@@ -326,12 +326,11 @@ describe("buildOpencodeConfig", () => {
     const cfg = (await buildOpencodeConfig()) as {
       agent: Record<string, { prompt?: string; permission?: unknown; mode?: string }>;
     };
-    // Prompt now starts with the COPILOT_PROMPT_BASE and ends with the
-    // spawn-time skill-creation directive (see the Skills Management
-    // spec). Assert the base is the prefix so future directive changes
-    // don't break this test.
     expect(cfg.agent["copilot-build"].prompt?.startsWith(COPILOT_PROMPT_BASE)).toBe(true);
     expect(cfg.agent.build.prompt?.startsWith(COPILOT_PROMPT_BASE)).toBe(true);
+    expect(cfg.agent["copilot-build"].prompt).toContain("{folder_name}");
+    expect(cfg.agent["copilot-build"].prompt).toContain("{activeNote}");
+    expect(cfg.agent.build.prompt).toContain("{folder_name}");
     expect(cfg.agent["copilot-build"].prompt).toContain(
       'metadata.copilot-enabled-agents: "opencode"'
     );

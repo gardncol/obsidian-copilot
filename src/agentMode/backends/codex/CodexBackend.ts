@@ -2,6 +2,7 @@ import { getSettings } from "@/settings/model";
 import { AcpBackend, AcpSpawnDescriptor } from "@/agentMode/acp/types";
 import { buildSimpleSpawnDescriptor } from "@/agentMode/backends/shared/simpleBinaryBackend";
 import {
+  buildPillSyntaxDirective,
   buildSkillCreationDirective,
   DEFAULT_SKILLS_FOLDER,
   SkillManager,
@@ -37,7 +38,7 @@ export class CodexBackend implements AcpBackend {
     // session. See the Skills Management spec.
     const skillsFolder = getSettings().agentMode?.skills?.folder ?? DEFAULT_SKILLS_FOLDER;
     const dirs = Object.values(SkillManager.getInstance().getAgentDirsProjectRel());
-    const directive = buildSkillCreationDirective("codex", skillsFolder, dirs);
+    const directive = `${buildPillSyntaxDirective()}\n\n${buildSkillCreationDirective("codex", skillsFolder, dirs)}`;
     descriptor.args = [
       ...descriptor.args,
       "-c",

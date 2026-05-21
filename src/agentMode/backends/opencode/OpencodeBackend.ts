@@ -5,6 +5,7 @@ import { getSettings } from "@/settings/model";
 import { AcpBackend, AcpSpawnDescriptor } from "@/agentMode/acp/types";
 import type { CopilotMode } from "@/agentMode/session/types";
 import {
+  buildPillSyntaxDirective,
   buildSkillCreationDirective,
   composeDenyList,
   DEFAULT_SKILLS_FOLDER,
@@ -233,7 +234,7 @@ export async function buildOpencodeConfig(): Promise<Record<string, unknown>> {
   const skillsDirs = skillManagerReady
     ? Object.values(SkillManager.getInstance().getAgentDirsProjectRel())
     : [];
-  const prompt = `${basePrompt}\n\n${buildSkillCreationDirective("opencode", skillsFolder, skillsDirs)}`;
+  const prompt = `${basePrompt}\n\n${buildPillSyntaxDirective()}\n\n${buildSkillCreationDirective("opencode", skillsFolder, skillsDirs)}`;
   config.agent = {
     [OPENCODE_BUILTIN_BUILD_AGENT_ID]: {
       prompt,

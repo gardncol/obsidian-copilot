@@ -16,6 +16,7 @@ import { resolveClaudeBinary } from "./claudeBinaryResolver";
 import { ClaudeSdkBackendProcess } from "@/agentMode/sdk/ClaudeSdkBackendProcess";
 import { getCachedSdkCatalog, synthesizeEffortConfigOption } from "@/agentMode/sdk/effortOption";
 import {
+  buildPillSyntaxDirective,
   buildSkillCreationDirective,
   DEFAULT_SKILLS_FOLDER,
   SkillManager,
@@ -206,7 +207,7 @@ export const ClaudeBackendDescriptor: BackendDescriptor = {
       getSkillCreationDirective: () => {
         const folder = getSettings().agentMode?.skills?.folder ?? DEFAULT_SKILLS_FOLDER;
         const dirs = Object.values(SkillManager.getInstance().getAgentDirsProjectRel());
-        return buildSkillCreationDirective("claude", folder, dirs);
+        return `${buildPillSyntaxDirective()}\n\n${buildSkillCreationDirective("claude", folder, dirs)}`;
       },
     });
   },
