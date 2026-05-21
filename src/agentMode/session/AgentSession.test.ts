@@ -490,15 +490,31 @@ describe("AgentSession.create (via start)", () => {
     expect(session.getState()?.model).toBeNull();
   });
 
-  it("attempts setModel when defaultModelId is set", async () => {
+  it("attempts setModel when defaultModelSelection is set", async () => {
     const mock = makeMockBackend();
-    mock.newSession.mockResolvedValueOnce({ sessionId: "acp-1", state: emptyState() });
+    const stateWithSonnet: BackendState = {
+      model: {
+        current: { baseModelId: "anthropic/sonnet", effort: null },
+        availableModels: [
+          {
+            baseModelId: "anthropic/sonnet",
+            name: "Claude Sonnet",
+            provider: "anthropic",
+            effortOptions: [],
+          },
+          { baseModelId: "openai/gpt-5", name: "GPT-5", provider: "openai", effortOptions: [] },
+        ],
+      },
+      mode: null,
+    };
+    mock.newSession.mockResolvedValueOnce({ sessionId: "acp-1", state: stateWithSonnet });
     const session = AgentSession.start({
       backend: mock.asBackend,
       cwd: "/vault",
       internalId: "internal-1",
       backendId: "opencode",
-      defaultModelId: "openai/gpt-5",
+      defaultModelSelection: { baseModelId: "openai/gpt-5", effort: null },
+      getDescriptor: () => makeWireOnlyDescriptor(),
     });
     await session.ready;
     expect(mock.setSessionModel).toHaveBeenCalledWith({
@@ -507,21 +523,275 @@ describe("AgentSession.create (via start)", () => {
     });
   });
 
-  it("survives a MethodUnsupportedError from default-model application", async () => {
+  it("seeds currentState with the persisted selection before notifying listeners", async () => {
     const mock = makeMockBackend();
-    mock.newSession.mockResolvedValueOnce({ sessionId: "acp-1", state: emptyState() });
+    const stateWithSonnet: BackendState = {
+      model: {
+        current: { baseModelId: "anthropic/sonnet", effort: null },
+        availableModels: [
+          {
+            baseModelId: "anthropic/sonnet",
+            name: "Claude Sonnet",
+            provider: "anthropic",
+            effortOptions: [],
+          },
+          { baseModelId: "openai/gpt-5", name: "GPT-5", provider: "openai", effortOptions: [] },
+        ],
+      },
+      mode: null,
+    };
+    mock.newSession.mockResolvedValueOnce({ sessionId: "acp-1", state: stateWithSonnet });
+    // Block setSessionModel so the seed must survive on its own — without
+    // the optimistic seed the picker would see "anthropic/sonnet" first.
+    let resolveSetModel: ((s: BackendState) => void) | null = null;
+    mock.setSessionModel.mockImplementationOnce(
+      () => new Promise<BackendState>((resolve) => (resolveSetModel = resolve))
+    );
+    const session = AgentSession.start({
+      backend: mock.asBackend,
+      cwd: "/vault",
+      internalId: "internal-1",
+      backendId: "opencode",
+      defaultModelSelection: { baseModelId: "openai/gpt-5", effort: null },
+      getDescriptor: () => makeWireOnlyDescriptor(),
+    });
+
+    const observed: Array<string | undefined> = [];
+    session.subscribe({
+      onMessagesChanged: jest.fn(),
+      onStatusChanged: jest.fn(),
+      onModelChanged: () => observed.push(session.getState()?.model?.current.baseModelId),
+    });
+
+    // Wait for the first notifyModelChanged inside initialize.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(observed[0]).toBe("openai/gpt-5");
+
+    resolveSetModel!(stateWithSonnet);
+    await session.ready;
+  });
+
+  it("eagerly seeds currentState from initialCachedState before newSession resolves", async () => {
+    const mock = makeMockBackend();
+    const cachedState: BackendState = {
+      model: {
+        current: { baseModelId: "kimi-2.6", effort: null },
+        availableModels: [
+          { baseModelId: "kimi-2.6", name: "Kimi 2.6", provider: "moon", effortOptions: [] },
+          {
+            baseModelId: "big-pickle",
+            name: "Big Pickle",
+            provider: "moon",
+            effortOptions: [],
+          },
+        ],
+      },
+      mode: null,
+    };
+    // Block newSession so we can observe the pre-initialize state.
+    let resolveNewSession: ((r: { sessionId: string; state: BackendState }) => void) | null = null;
+    mock.newSession.mockImplementationOnce(
+      () =>
+        new Promise<{ sessionId: string; state: BackendState }>(
+          (resolve) => (resolveNewSession = resolve)
+        )
+    );
+    const session = AgentSession.start({
+      backend: mock.asBackend,
+      cwd: "/vault",
+      internalId: "internal-1",
+      backendId: "opencode",
+      defaultModelSelection: { baseModelId: "big-pickle", effort: null },
+      initialCachedState: cachedState,
+      getDescriptor: () => makeWireOnlyDescriptor(),
+    });
+
+    // Before newSession resolves, getState reflects the eager seed
+    // (current = big-pickle) rather than the cached current (kimi-2.6).
+    expect(session.getState()?.model?.current.baseModelId).toBe("big-pickle");
+
+    resolveNewSession!({ sessionId: "acp-1", state: cachedState });
+    await session.ready;
+  });
+
+  it("does not seed effort into currentState (effort stays as backend reported)", async () => {
+    // Regression: previously, the optimistic seed wrote both `baseModelId`
+    // and `effort` into currentState. For descriptor-style backends where
+    // effort lives outside the wire id, `applyInitialSessionConfig` would
+    // see the seeded effort match the persisted effort and skip the real
+    // `setConfigOption`, silently dropping the user's persisted effort.
+    const mock = makeMockBackend();
+    const backendState: BackendState = {
+      model: {
+        current: { baseModelId: "anthropic/sonnet", effort: "low" },
+        availableModels: [
+          {
+            baseModelId: "anthropic/sonnet",
+            name: "Claude Sonnet",
+            provider: "anthropic",
+            effortOptions: [
+              { value: "low", label: "Low" },
+              { value: "high", label: "High" },
+            ],
+          },
+        ],
+      },
+      mode: null,
+    };
+    mock.newSession.mockResolvedValueOnce({ sessionId: "acp-1", state: backendState });
+    const session = AgentSession.start({
+      backend: mock.asBackend,
+      cwd: "/vault",
+      internalId: "internal-1",
+      backendId: "claude",
+      defaultModelSelection: { baseModelId: "anthropic/sonnet", effort: "high" },
+      // Descriptor whose wire encoding ignores effort (Claude-style).
+      getDescriptor: () => makeDescriptorWireWithoutEffort(),
+    });
+    await session.ready;
+    // baseModelId matches → no setModel call needed.
+    expect(mock.setSessionModel).not.toHaveBeenCalled();
+    // Effort is what the backend reported, NOT the persisted "high" — so
+    // `applyInitialSessionConfig` will see a mismatch and call setConfigOption.
+    expect(session.getState()?.model?.current.effort).toBe("low");
+  });
+
+  it("reverts the seeded selection when setModel fails", async () => {
+    const mock = makeMockBackend();
+    const stateWithSonnet: BackendState = {
+      model: {
+        current: { baseModelId: "anthropic/sonnet", effort: null },
+        availableModels: [
+          {
+            baseModelId: "anthropic/sonnet",
+            name: "Claude Sonnet",
+            provider: "anthropic",
+            effortOptions: [],
+          },
+          { baseModelId: "openai/gpt-5", name: "GPT-5", provider: "openai", effortOptions: [] },
+        ],
+      },
+      mode: null,
+    };
+    mock.newSession.mockResolvedValueOnce({ sessionId: "acp-1", state: stateWithSonnet });
     mock.setSessionModel.mockRejectedValueOnce(new MethodUnsupportedError("session/set_model"));
     const session = AgentSession.start({
       backend: mock.asBackend,
       cwd: "/vault",
       internalId: "internal-1",
       backendId: "opencode",
-      defaultModelId: "openai/gpt-5",
+      defaultModelSelection: { baseModelId: "openai/gpt-5", effort: null },
+      getDescriptor: () => makeWireOnlyDescriptor(),
     });
     await session.ready;
     expect(session.getStatus()).toBe("idle");
+    // Seed reverted to whatever the backend actually reported.
+    expect(session.getState()?.model?.current.baseModelId).toBe("anthropic/sonnet");
   });
 });
+
+/** Minimal wire-only descriptor for tests that exercise seed/setModel. */
+function makeWireOnlyDescriptor(): BackendDescriptor {
+  return {
+    wire: {
+      encode: (selection: { baseModelId: string; effort: string | null }) =>
+        selection.effort ? `${selection.baseModelId}/${selection.effort}` : selection.baseModelId,
+      decode: (wireId: string) => ({
+        selection: { baseModelId: wireId, effort: null },
+        provider: null,
+      }),
+    },
+  } as unknown as BackendDescriptor;
+}
+
+describe("AgentSession warm-adoption ready gating", () => {
+  it("ready stays pending until setModel resolves so sendPrompt can't fire on the probe model", async () => {
+    const mock = makeMockBackend();
+    const probeState: BackendState = {
+      model: {
+        current: { baseModelId: "anthropic/sonnet", effort: null },
+        availableModels: [
+          {
+            baseModelId: "anthropic/sonnet",
+            name: "Sonnet",
+            provider: "anthropic",
+            effortOptions: [],
+          },
+          { baseModelId: "openai/gpt-5", name: "GPT-5", provider: "openai", effortOptions: [] },
+        ],
+      },
+      mode: null,
+    };
+    // Block setSessionModel so we can observe `ready` remaining pending.
+    let resolveSetModel!: (s: BackendState) => void;
+    mock.setSessionModel.mockImplementationOnce(
+      () => new Promise<BackendState>((resolve) => (resolveSetModel = resolve))
+    );
+
+    const session = new AgentSession({
+      backend: mock.asBackend,
+      backendSessionId: "probe-1",
+      internalId: "internal-1",
+      backendId: "opencode",
+      initialState: probeState,
+      defaultModelSelection: { baseModelId: "openai/gpt-5", effort: null },
+      getDescriptor: () => makeWireOnlyDescriptor(),
+    });
+
+    let readyResolved = false;
+    void session.ready.then(() => {
+      readyResolved = true;
+    });
+    await new Promise((r) => window.setTimeout(r, 0));
+    expect(readyResolved).toBe(false);
+    expect(mock.setSessionModel).toHaveBeenCalledWith({
+      sessionId: "probe-1",
+      modelId: "openai/gpt-5",
+    });
+
+    resolveSetModel({
+      model: {
+        ...probeState.model!,
+        current: { baseModelId: "openai/gpt-5", effort: null },
+      },
+      mode: null,
+    });
+    await session.ready;
+    expect(readyResolved).toBe(true);
+    expect(session.getState()?.model?.current.baseModelId).toBe("openai/gpt-5");
+  });
+
+  it("ready resolves immediately when no default selection is supplied", async () => {
+    const mock = makeMockBackend();
+    const session = new AgentSession({
+      backend: mock.asBackend,
+      backendSessionId: "probe-1",
+      internalId: "internal-1",
+      backendId: "opencode",
+      initialState: emptyState(),
+    });
+    await session.ready;
+    expect(mock.setSessionModel).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Descriptor whose wire encoding ignores effort (Claude SDK-style). Used
+ * to exercise the "effort lives out-of-band" branch where `setModel`
+ * would be a no-op and effort is applied via `applyInitialSessionConfig`.
+ */
+function makeDescriptorWireWithoutEffort(): BackendDescriptor {
+  return {
+    wire: {
+      encode: (selection: { baseModelId: string; effort: string | null }) => selection.baseModelId,
+      decode: (wireId: string) => ({
+        selection: { baseModelId: wireId, effort: null },
+        provider: null,
+      }),
+    },
+  } as unknown as BackendDescriptor;
+}
 
 describe("AgentSession.setModel", () => {
   it("calls backend.setSessionModel and replaces the cached state on success", async () => {

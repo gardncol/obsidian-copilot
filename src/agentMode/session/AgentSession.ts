@@ -9,6 +9,7 @@ import {
   BackendProcess,
   BackendState,
   CurrentPlan,
+  ModelSelection,
   NewAgentChatMessage,
   PERMISSION_ALLOW_KINDS,
   PERMISSION_REJECT_KINDS,
@@ -42,6 +43,37 @@ const MAX_TOOL_OUTPUT_TEXT_CHARS = 12_000;
 // when nothing is pending — preserves React `useState` setter bail-out
 // behavior on idle subscription ticks.
 const EMPTY_PERMISSIONS: PermissionPrompt[] = [];
+
+/**
+ * Optimistically swap `state.model.current.baseModelId` for the persisted
+ * user selection so the picker's first paint matches what the user picked.
+ *
+ * Only `baseModelId` is seeded — `effort` is left as the backend reported.
+ * For descriptor-style backends (Claude) effort lives out-of-band and is
+ * applied via `applyInitialSessionConfig` → `setConfigOption`; seeding it
+ * here would make that step see a matching value and silently skip the
+ * real config write. For wire-effort backends (opencode-style) the
+ * subsequent `setModel` call carries the user's effort through the
+ * encoded id, and the backend's response replaces this seed entirely.
+ *
+ * Returns the input reference unchanged when no seed is possible.
+ */
+function seedSelectionIntoState(
+  state: BackendState | null,
+  selection: ModelSelection | undefined
+): BackendState | null {
+  if (!state || !state.model || !selection) return state;
+  const entry = state.model.availableModels.find((m) => m.baseModelId === selection.baseModelId);
+  if (!entry) return state;
+  if (state.model.current.baseModelId === selection.baseModelId) return state;
+  return {
+    ...state,
+    model: {
+      ...state.model,
+      current: { ...state.model.current, baseModelId: selection.baseModelId },
+    },
+  };
+}
 
 export type AgentSessionStatus =
   | "starting"
@@ -94,7 +126,21 @@ export interface AgentSessionStartOptions {
   cwd: string;
   internalId: string;
   backendId: BackendId;
-  defaultModelId?: string;
+  /**
+   * Persisted user preference to apply after the backend's initial session
+   * state. The session seeds it optimistically so the first picker paint
+   * shows the user's pick, then confirms with the backend via setModel
+   * (and, for descriptor-style backends, setConfigOption — handled by the
+   * manager's `applyInitialSessionConfig` hook).
+   */
+  defaultModelSelection?: ModelSelection;
+  /**
+   * Snapshot from the preloader cache used to seed `currentState`
+   * synchronously so the picker doesn't flash the previous session's
+   * selection during the `backend.newSession` round-trip. Replaced by the
+   * agent's fresh `newSession` response inside `initialize()`.
+   */
+  initialCachedState?: BackendState | null;
   /**
    * Optional descriptor accessor. The session uses it to resolve mode mappings
    * without coupling to specific backends. Manager-supplied; tests omit it.
@@ -112,6 +158,13 @@ export interface AgentSessionStateOptions {
   internalId: string;
   backendId: BackendId;
   initialState?: BackendState | null;
+  /**
+   * Optional persisted user preference applied to the warm/adopted session.
+   * Same role as `AgentSessionStartOptions.defaultModelSelection` — seeded
+   * optimistically on construction; setModel runs async and reverts the
+   * seed on failure.
+   */
+  defaultModelSelection?: ModelSelection;
   cwd?: string | null;
   getDescriptor?: () => BackendDescriptor | undefined;
 }
@@ -219,19 +272,30 @@ export class AgentSession {
     this.getDescriptor = opts.getDescriptor ?? null;
     if ("backendSessionId" in opts) {
       this.backendSessionId = opts.backendSessionId;
-      this.currentState = opts.initialState ?? null;
+      const originalState = opts.initialState ?? null;
+      this.currentState = seedSelectionIntoState(originalState, opts.defaultModelSelection);
       this.unregisterSessionHandler = this.backend.registerSessionHandler(
         opts.backendSessionId,
         (event) => this.handleSessionEvent(event)
       );
-      // backendSessionId is non-null → getStatus() yields "idle" without
-      // any further bookkeeping. Sync the cache so the first
-      // `recomputeStatusIfChanged` call doesn't fire a spurious
-      // "starting → idle" transition that no one observed.
+      // Sync the status cache so the first recomputeStatusIfChanged doesn't
+      // fire a spurious "starting → idle" transition that no one observed.
       this.cachedStatus = this.getStatus();
-      this.ready = Promise.resolve();
+      // Gate `ready` on the model confirmation round-trip so `sendPrompt`
+      // can't fire on the probe's model before the user's persisted
+      // selection is applied to the backend.
+      this.ready =
+        opts.defaultModelSelection && originalState
+          ? this.confirmSeededSelection(opts.defaultModelSelection, originalState)
+          : Promise.resolve();
     } else {
-      // Default cachedStatus ("starting") already matches getStatus().
+      // Eagerly seed from the preloader cache so the picker doesn't fall
+      // back to the prior session's `current` while `backend.newSession` is
+      // in flight. `initialize()` replaces this with the agent's response.
+      this.currentState = seedSelectionIntoState(
+        opts.initialCachedState ?? null,
+        opts.defaultModelSelection
+      );
       this.ready = this.initialize(opts);
     }
   }
@@ -252,7 +316,7 @@ export class AgentSession {
   }
 
   private async initialize(opts: AgentSessionStartOptions): Promise<void> {
-    const { backend, cwd, defaultModelId } = opts;
+    const { backend, cwd, defaultModelSelection } = opts;
     try {
       const resp = await backend.newSession({
         cwd,
@@ -266,7 +330,7 @@ export class AgentSession {
         : "agent did not report model state";
       logInfo(`[AgentMode] session ${resp.sessionId} ${modelLog}`);
       this.backendSessionId = resp.sessionId;
-      this.currentState = resp.state;
+      this.currentState = seedSelectionIntoState(resp.state, defaultModelSelection);
       this.unregisterSessionHandler = this.backend.registerSessionHandler(resp.sessionId, (event) =>
         this.handleSessionEvent(event)
       );
@@ -279,14 +343,8 @@ export class AgentSession {
       this.recomputeStatusIfChanged();
       this.notifyModelChanged();
 
-      // Apply sticky preference. Best-effort — failures leave the session
-      // usable with whatever the agent picked by default.
-      if (defaultModelId) {
-        try {
-          await this.setModel(defaultModelId);
-        } catch (e) {
-          logWarn(`[AgentMode] could not apply default model ${defaultModelId}`, e);
-        }
+      if (defaultModelSelection) {
+        await this.confirmSeededSelection(defaultModelSelection, resp.state);
       }
     } catch (err) {
       if (this.disposed) return;
@@ -324,6 +382,42 @@ export class AgentSession {
     });
     this.currentState = next;
     this.notifyModelChanged();
+  }
+
+  /**
+   * Apply the persisted user selection to the backend via `setModel`.
+   * Runs whenever `defaultModelSelection` is supplied — `setModel` is
+   * idempotent, and the wire-encoding short-circuit below makes it a
+   * pure no-op when the selection already matches the backend's report.
+   *
+   * On success the backend's response replaces `currentState`. On
+   * failure any optimistic baseModelId seed is reverted to `originalState`
+   * so the picker drops back to whatever the backend actually has.
+   *
+   * Skips the round-trip when the encoded form matches. For descriptor-
+   * style backends (Claude SDK) where effort lives outside the wire id,
+   * an effort-only change encodes the same and `setModel` is correctly
+   * skipped here — `applyInitialSessionConfig` dispatches the effort
+   * via `setConfigOption` instead.
+   */
+  private async confirmSeededSelection(
+    selection: ModelSelection,
+    originalState: BackendState
+  ): Promise<void> {
+    const descriptor = this.getDescriptor?.();
+    if (!descriptor) return;
+    const encoded = descriptor.wire.encode(selection);
+    const originalEncoded = originalState.model
+      ? descriptor.wire.encode(originalState.model.current)
+      : null;
+    if (encoded === originalEncoded) return;
+    try {
+      await this.setModel(encoded);
+    } catch (e) {
+      logWarn(`[AgentMode] could not apply default model ${encoded}; reverting seed`, e);
+      this.currentState = originalState;
+      this.notifyModelChanged();
+    }
   }
 
   /**
