@@ -36,7 +36,8 @@ import { logError } from "@/logger";
 import { ChatMessage } from "@/types/message";
 import { cleanMessageForCopy, extractYoutubeVideoId, insertIntoEditor } from "@/utils";
 import { preprocessAIResponse } from "@/utils/markdownPreprocess";
-import { App, Component, MarkdownRenderer, MarkdownView, TFile } from "obsidian";
+import { renderMarkdown } from "@/utils/renderMarkdown";
+import { App, Component, MarkdownView, TFile } from "obsidian";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSettingsValue } from "@/settings/model";
 import {
@@ -550,14 +551,6 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
         '<span class="copilot-citation-ref">[$1]</span>'
       );
 
-      // Transform [[link]] to clickable format but exclude ![[]] image links
-      const noteLinksProcessed = replaceLinks(
-        citationPlaceholderProcessed,
-        /(?<!!)\[\[([^\]]+)]]/g,
-        (file: TFile) =>
-          `<a href="obsidian://open?file=${encodeURIComponent(file.path)}">${file.basename}</a>`
-      );
-
       /**
        * Converts YouTube video embeds to static thumbnails during streaming.
        * This prevents iframe flickering caused by repeated DOM recreation.
@@ -585,7 +578,7 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
         });
       };
 
-      return processYouTubeEmbed(noteLinksProcessed);
+      return processYouTubeEmbed(citationPlaceholderProcessed);
     },
     [app, isStreaming, settings.enableInlineCitations, collapsibleOpenStateMap]
   );
@@ -682,6 +675,9 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
         // Bind DOM ops to the document that owns the message container so
         // popout-window chats don't pick up the wrong document if focus shifts.
         const doc = contentRef.current.doc;
+        // Resolve internal links against the active note so vaults with
+        // duplicate basenames or heading-only links open the right file.
+        const sourcePath = app.workspace.getActiveFile()?.path ?? "";
         // Track existing tool call and error block IDs
         const existingToolCallIds = new Set<string>();
         const existingErrorIds = new Set<string>();
@@ -718,14 +714,9 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
               contentRef.current!.appendChild(textDiv);
             }
 
-            void MarkdownRenderer.renderMarkdown(
-              segment.content,
-              textDiv,
-              "",
-              componentRef.current!
-            )
+            void renderMarkdown(app, segment.content, textDiv, sourcePath, componentRef.current!)
               .then(() => normalizeFootnoteRendering(textDiv))
-              .catch((err) => logError("renderMarkdown failed", err));
+              .catch((err: unknown) => logError("renderMarkdown failed", err));
             currentIndex++;
           } else if (segment.type === "toolCall" && segment.toolCall) {
             const toolCallId = segment.toolCall.id;

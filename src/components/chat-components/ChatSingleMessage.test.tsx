@@ -19,6 +19,7 @@ jest.mock("@/settings/model", () => ({
       },
     ],
   })),
+  getSettings: jest.fn(() => ({ debug: false })),
 }));
 
 jest.mock("@/aiParams", () => ({
@@ -36,14 +37,17 @@ jest.mock("@/LLMProviders/chainRunner/utils/citationUtils", () => ({
 }));
 
 jest.mock("obsidian", () => {
-  const renderMarkdown = jest.fn().mockResolvedValue(undefined);
+  // Mirrors the modern `MarkdownRenderer.render(app, md, el, sourcePath, component)`
+  // signature — `md` is the second argument, not the first.
+  const render = jest.fn().mockResolvedValue(undefined);
   return {
     MarkdownRenderer: {
-      renderMarkdown,
+      render,
     },
     Component: class {
       load() {}
       unload() {}
+      register(_cb: () => void) {}
     },
     MarkdownView: class {},
     TFile: class {},
@@ -63,12 +67,12 @@ jest.mock("obsidian", () => {
         /* noop */
       }
     },
-    __renderMarkdownMock: renderMarkdown,
+    __renderMock: render,
   };
 });
 
-const { __renderMarkdownMock: renderMarkdownMock } = jest.requireMock<{
-  __renderMarkdownMock: jest.Mock;
+const { __renderMock: renderMarkdownMock } = jest.requireMock<{
+  __renderMock: jest.Mock;
 }>("obsidian");
 
 // ---------------------------------------------------------------------------
@@ -127,7 +131,7 @@ describe("think block rendering — closing tags are not consumed by indented co
     const messageText = `<think>${thinkContent}</think>Here is my answer.`;
 
     const capturedMarkdown: string[] = [];
-    renderMarkdownMock.mockImplementation(async (md: string, el: HTMLElement) => {
+    renderMarkdownMock.mockImplementation(async (_app: unknown, md: string, el: HTMLElement) => {
       capturedMarkdown.push(md);
       el.textContent = "rendered";
     });
@@ -153,7 +157,7 @@ describe("think block rendering — closing tags are not consumed by indented co
     const messageText = `<think>${thinkContent}</think>Response text.`;
 
     const capturedMarkdown: string[] = [];
-    renderMarkdownMock.mockImplementation(async (md: string, el: HTMLElement) => {
+    renderMarkdownMock.mockImplementation(async (_app: unknown, md: string, el: HTMLElement) => {
       capturedMarkdown.push(md);
       el.textContent = "rendered";
     });
@@ -179,7 +183,7 @@ describe("think block rendering — closing tags are not consumed by indented co
     const messageText = "<think>Thinking:\n    *   Still streaming.";
 
     const capturedMarkdown: string[] = [];
-    renderMarkdownMock.mockImplementation(async (md: string, el: HTMLElement) => {
+    renderMarkdownMock.mockImplementation(async (_app: unknown, md: string, el: HTMLElement) => {
       capturedMarkdown.push(md);
       el.textContent = "rendered";
     });
@@ -287,10 +291,11 @@ describe("ChatSingleMessage", () => {
   });
 
   it("normalizes rendered footnotes for assistant messages", async () => {
-    renderMarkdownMock.mockImplementation(async (_markdown: string, el: HTMLElement) => {
-      el.append(
-        ...new DOMParser().parseFromString(
-          `
+    renderMarkdownMock.mockImplementation(
+      async (_app: unknown, _markdown: string, el: HTMLElement) => {
+        el.append(
+          ...new DOMParser().parseFromString(
+            `
         <p>Example <sup><a href="#fn-2">2-1</a></sup></p>
         <hr class="content-hr" />
         <div class="footnotes">
@@ -302,10 +307,11 @@ describe("ChatSingleMessage", () => {
           </ol>
         </div>
       `,
-          "text/html"
-        ).body.children
-      );
-    });
+            "text/html"
+          ).body.children
+        );
+      }
+    );
 
     const { container } = render(
       <TooltipProvider>
