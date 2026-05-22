@@ -18,6 +18,8 @@ import {
   buildBaseChatConfig,
   buildOpenAIReasoningOverlay,
   buildProviderSpecificParams,
+  resolveBaseUrl,
+  resolveEnableCors,
   resolveMaxTokens,
   resolveTemperature,
 } from "@/modelManagement/providers/adapters/adapterUtils";
@@ -86,11 +88,14 @@ export function normalizeAzureUrl(raw: string | undefined): {
 
 /** Build an Azure OpenAI LangChain chat model. */
 export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
-  const { legacyModel, apiKey } = input;
+  const { apiKey } = input;
+  const modelId = input.entry.modelId;
+  const baseUrl = resolveBaseUrl(input);
+  const enableCors = resolveEnableCors(input);
   // Azure deployment / instance / api-version live on `ProviderConfig.extra`
   // post-M9 (validated by `extraSchema` above). Per-model overrides may live
-  // on `RegistryEntry.extra` (validated by `entryExtraSchema`); the legacy
-  // `CustomModel` still wins when present during the transition.
+  // on `RegistryEntry.extra` (validated by `entryExtraSchema`) and win over
+  // the provider-level defaults.
   const entryInstance = readEntryExtra(input, "azureInstanceName");
   const entryDeployment = readEntryExtra(input, "azureDeploymentName");
   const entryApiVersion = readEntryExtra(input, "azureApiVersion");
@@ -98,19 +103,19 @@ export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
   const extraInstance = readExtra(input, "azureInstanceName");
   const extraDeployment = readExtra(input, "azureDeploymentName");
   const extraApiVersion = readExtra(input, "azureApiVersion");
-  const azureUrl = normalizeAzureUrl(legacyModel.baseUrl);
-  const reasoningOverlay = buildOpenAIReasoningOverlay(legacyModel, { allowVerbosity: false });
+  const azureUrl = normalizeAzureUrl(baseUrl);
+  const reasoningOverlay = buildOpenAIReasoningOverlay(modelId, input.defaults, {
+    allowVerbosity: false,
+  });
 
-  // Resolution order: per-model legacy field → per-model `entry.extra` →
-  // provider-level `provider.extra`.
-  const instanceName = legacyModel.azureOpenAIApiInstanceName || entryInstance || extraInstance;
-  const deploymentName =
-    legacyModel.azureOpenAIApiDeploymentName || entryDeployment || extraDeployment;
-  const apiVersion = legacyModel.azureOpenAIApiVersion || entryApiVersion || extraApiVersion;
+  // Resolution order: per-model `entry.extra` → provider-level `provider.extra`.
+  const instanceName = entryInstance || extraInstance;
+  const deploymentName = entryDeployment || extraDeployment;
+  const apiVersion = entryApiVersion || extraApiVersion;
 
   const config = {
     ...buildBaseChatConfig(input),
-    modelName: legacyModel.baseUrl ? legacyModel.name : deploymentName,
+    modelName: baseUrl ? modelId : deploymentName,
     apiKey,
     configuration: {
       baseURL:
@@ -123,12 +128,12 @@ export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
         "Content-Type": "application/json",
         "api-key": apiKey,
       },
-      fetch: legacyModel.enableCors ? safeFetch : undefined,
+      fetch: enableCors ? safeFetch : undefined,
     },
     maxTokens: resolveMaxTokens(input),
     temperature: resolveTemperature(input),
     ...reasoningOverlay,
-    ...buildProviderSpecificParams(ChatModelProviders.AZURE_OPENAI, legacyModel),
+    ...buildProviderSpecificParams(ChatModelProviders.AZURE_OPENAI, input.defaults),
   };
   return new ChatOpenAI(config);
 }

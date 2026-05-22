@@ -14,6 +14,8 @@ import type { BuildChatModelInput } from "@/modelManagement/chatModel/ChatModelF
 import {
   buildBaseChatConfig,
   buildProviderSpecificParams,
+  resolveBaseUrl,
+  resolveEnableCors,
   resolveMaxTokens,
 } from "@/modelManagement/providers/adapters/adapterUtils";
 import { OpenRouterChatModel } from "@/modelManagement/providers/clients/OpenRouterChatModel";
@@ -30,21 +32,21 @@ export const entryExtraSchema = z
 
 /** Build an OpenRouter LangChain chat model via `OpenRouterChatModel`. */
 export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
-  const { legacyModel, apiKey } = input;
-  // Read prompt-caching toggle from `entry.extra` first; fall back to the
-  // legacy `CustomModel` field. Default `true` only when neither is set.
+  const { apiKey } = input;
+  // Read prompt-caching toggle from `entry.extra`. Default to `true` when
+  // unset so existing OpenRouter setups keep caching automatically.
   const rawEnablePromptCaching = input.entry.extra?.enablePromptCaching;
-  const entryEnablePromptCaching =
-    typeof rawEnablePromptCaching === "boolean" ? rawEnablePromptCaching : undefined;
-  const enablePromptCaching = entryEnablePromptCaching ?? legacyModel.enablePromptCaching ?? true;
+  const enablePromptCaching =
+    typeof rawEnablePromptCaching === "boolean" ? rawEnablePromptCaching : true;
+  const enableCors = resolveEnableCors(input);
 
   const config = {
     ...buildBaseChatConfig(input),
-    modelName: legacyModel.name,
+    modelName: input.entry.modelId,
     apiKey,
     configuration: {
-      baseURL: legacyModel.baseUrl || "https://openrouter.ai/api/v1",
-      fetch: legacyModel.enableCors ? safeFetch : undefined,
+      baseURL: resolveBaseUrl(input) || "https://openrouter.ai/api/v1",
+      fetch: enableCors ? safeFetch : undefined,
       defaultHeaders: {
         "HTTP-Referer": "https://obsidiancopilot.com",
         "X-Title": "Obsidian Copilot",
@@ -54,11 +56,11 @@ export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
     // non-reasoning models, and the previous capability gate added the risk
     // of mis-tagged custom models getting the wrong behavior.
     enableReasoning: true,
-    reasoningEffort: legacyModel.reasoningEffort,
+    reasoningEffort: input.defaults.reasoningEffort,
     // Enable prompt caching by default; can be turned off for ZDR endpoints.
     enablePromptCaching,
     maxTokens: resolveMaxTokens(input),
-    ...buildProviderSpecificParams(ChatModelProviders.OPENROUTERAI, legacyModel),
+    ...buildProviderSpecificParams(ChatModelProviders.OPENROUTERAI, input.defaults),
   };
   return new OpenRouterChatModel(config);
 }

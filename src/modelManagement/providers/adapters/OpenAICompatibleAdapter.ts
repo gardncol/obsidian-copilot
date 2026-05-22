@@ -21,6 +21,8 @@ import {
   buildOpenAIReasoningOverlay,
   buildProviderSpecificParams,
   isOpenAIGPT5,
+  resolveBaseUrl,
+  resolveEnableCors,
   resolveMaxTokens,
   resolveTemperature,
 } from "@/modelManagement/providers/adapters/adapterUtils";
@@ -44,44 +46,33 @@ export const entryExtraSchema = z
 
 /** Build an OpenAI-compatible LangChain chat model via `ChatOpenAI`. */
 export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
-  const { legacyModel, apiKey } = input;
-  const reasoningOverlay = buildOpenAIReasoningOverlay(legacyModel, { allowVerbosity: true });
-
-  // Per-model overrides land on `RegistryEntry.extra` post-M9. Fall back to
-  // the legacy `CustomModel` while in-memory chat-model lookups still flow
-  // through it (see `chainManager.setChatModel(mergedModel)`). Read fields
-  // directly — strict schema validation happens at write time (BYOK UI);
-  // extra unknown keys preserved by the migration pass through harmlessly.
-  const rawEntryExtra = input.entry.extra ?? {};
-  const entryBaseUrl =
-    typeof rawEntryExtra.baseUrl === "string" && rawEntryExtra.baseUrl.length > 0
-      ? rawEntryExtra.baseUrl
-      : undefined;
-  const entryEnableCors =
-    typeof rawEntryExtra.enableCors === "boolean" ? rawEntryExtra.enableCors : undefined;
-  const baseUrl = entryBaseUrl ?? legacyModel.baseUrl;
-  const enableCors = entryEnableCors ?? legacyModel.enableCors;
+  const { apiKey } = input;
+  const modelId = input.entry.modelId;
+  const enableCors = resolveEnableCors(input);
+  const reasoningOverlay = buildOpenAIReasoningOverlay(modelId, input.defaults, {
+    allowVerbosity: true,
+  });
 
   const config: Record<string, unknown> = {
     ...buildBaseChatConfig(input),
-    modelName: legacyModel.name,
+    modelName: modelId,
     apiKey,
-    streamUsage: legacyModel.streamUsage ?? false,
+    streamUsage: input.defaults.streamUsage ?? false,
     configuration: {
-      baseURL: baseUrl,
+      baseURL: resolveBaseUrl(input),
       fetch: enableCors ? safeFetch : undefined,
       defaultHeaders: { "dangerously-allow-browser": "true" },
     },
     maxTokens: resolveMaxTokens(input),
     temperature: resolveTemperature(input),
     ...reasoningOverlay,
-    ...buildProviderSpecificParams(ChatModelProviders.OPENAI_FORMAT, legacyModel),
+    ...buildProviderSpecificParams(ChatModelProviders.OPENAI_FORMAT, input.defaults),
   };
 
   // Match legacy behavior: GPT-5 models automatically route via Responses API.
-  if (isOpenAIGPT5(legacyModel.name)) {
+  if (isOpenAIGPT5(modelId)) {
     config.useResponsesApi = true;
-    logInfo(`Enabling Responses API for GPT-5 model: ${legacyModel.name} (openai-compatible)`);
+    logInfo(`Enabling Responses API for GPT-5 model: ${modelId} (openai-compatible)`);
   }
 
   return new ChatOpenAI(config);

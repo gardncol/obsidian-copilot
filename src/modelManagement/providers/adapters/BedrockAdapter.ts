@@ -18,6 +18,8 @@ import type { BuildChatModelInput } from "@/modelManagement/chatModel/ChatModelF
 import {
   buildBaseChatConfig,
   buildProviderSpecificParams,
+  resolveBaseUrl,
+  resolveEnableCors,
   resolveMaxTokens,
   resolveStreaming,
   resolveTemperature,
@@ -43,7 +45,7 @@ export const entryExtraSchema = z
 
 /** Build an Amazon Bedrock LangChain chat model. */
 export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
-  const { legacyModel, apiKey } = input;
+  const { apiKey } = input;
 
   if (!apiKey) {
     throw new Error(
@@ -52,26 +54,24 @@ export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
   }
 
   // Bedrock region resolution order:
-  //   1. Per-model override on the legacy `CustomModel` (still in shape).
-  //   2. `entry.extra.bedrockRegion` (per-model override on the registry entry).
-  //   3. `provider.extra.bedrockRegion` (provider-level default).
-  //   4. AWS default `us-east-1`.
-  const explicitRegion = legacyModel.bedrockRegion?.trim();
+  //   1. `entry.extra.bedrockRegion` (per-model override on the registry entry).
+  //   2. `provider.extra.bedrockRegion` (provider-level default).
+  //   3. AWS default `us-east-1`.
   const rawEntryRegion = input.entry.extra?.bedrockRegion;
   const entryRegion = typeof rawEntryRegion === "string" ? rawEntryRegion.trim() : undefined;
   const rawExtraRegion = input.provider.extra?.bedrockRegion;
   const extraRegion = typeof rawExtraRegion === "string" ? rawExtraRegion.trim() : undefined;
-  const resolvedRegion = explicitRegion || entryRegion || extraRegion || "us-east-1";
+  const resolvedRegion = entryRegion || extraRegion || "us-east-1";
 
-  const baseUrlInput = legacyModel.baseUrl?.trim();
+  const baseUrlInput = resolveBaseUrl(input)?.trim();
   const baseUrl = baseUrlInput ? baseUrlInput.replace(/\/+$/, "") : undefined;
   const endpointBase = baseUrl || `https://bedrock-runtime.${resolvedRegion}.amazonaws.com`;
 
-  const modelName = legacyModel.name;
+  const modelName = input.entry.modelId;
   const encodedModel = encodeURIComponent(modelName);
   const endpoint = `${endpointBase}/model/${encodedModel}/invoke`;
   const streamEndpoint = `${endpointBase}/model/${encodedModel}/invoke-with-response-stream`;
-  const fetchImplementation = legacyModel.enableCors ? safeFetch : undefined;
+  const fetchImplementation = resolveEnableCors(input) ? safeFetch : undefined;
 
   // Inference profiles prefix Anthropic identifiers (e.g. global.anthropic.*),
   // so look for the segment anywhere — not just at the start.
@@ -94,7 +94,7 @@ export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
     streamEndpoint,
     defaultMaxTokens: maxTokens,
     defaultTemperature: temperature,
-    defaultTopP: legacyModel.topP,
+    defaultTopP: input.defaults.topP,
     anthropicVersion,
     enableThinking,
     fetchImplementation,
@@ -107,7 +107,7 @@ export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
     ...buildBaseChatConfig(input),
     ...bedrockFields,
     maxTokens,
-    ...buildProviderSpecificParams(ChatModelProviders.AMAZON_BEDROCK, legacyModel),
+    ...buildProviderSpecificParams(ChatModelProviders.AMAZON_BEDROCK, input.defaults),
   };
   return new BedrockChatModel(merged);
 }

@@ -15,6 +15,8 @@ import {
   buildBaseChatConfig,
   buildOpenAIReasoningOverlay,
   buildProviderSpecificParams,
+  resolveBaseUrl,
+  resolveEnableCors,
   resolveMaxTokens,
   resolveTemperature,
 } from "@/modelManagement/providers/adapters/adapterUtils";
@@ -27,22 +29,25 @@ export const entryExtraSchema = z.object({}).strict();
 
 /** Build a SiliconFlow LangChain chat model via the OpenAI-compatible client. */
 export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
-  const { legacyModel, apiKey } = input;
-  const reasoningOverlay = buildOpenAIReasoningOverlay(legacyModel, { allowVerbosity: false });
+  const { apiKey } = input;
+  const enableCors = resolveEnableCors(input);
+  const reasoningOverlay = buildOpenAIReasoningOverlay(input.entry.modelId, input.defaults, {
+    allowVerbosity: false,
+  });
   const config = {
     ...buildBaseChatConfig(input),
-    modelName: legacyModel.name,
+    modelName: input.entry.modelId,
     apiKey,
     configuration: {
-      baseURL: legacyModel.baseUrl || ProviderInfo[ChatModelProviders.SILICONFLOW].host,
-      fetch: legacyModel.enableCors ? safeFetch : undefined,
+      baseURL: resolveBaseUrl(input) || ProviderInfo[ChatModelProviders.SILICONFLOW].host,
+      fetch: enableCors ? safeFetch : undefined,
     },
     // OpenAI special config always sets `maxTokens` / `temperature`;
     // replicate that so SiliconFlow behaves identically to legacy.
     maxTokens: resolveMaxTokens(input),
     temperature: resolveTemperature(input),
     ...reasoningOverlay,
-    ...buildProviderSpecificParams(ChatModelProviders.SILICONFLOW, legacyModel),
+    ...buildProviderSpecificParams(ChatModelProviders.SILICONFLOW, input.defaults),
   };
   return new ChatOpenAI(config);
 }

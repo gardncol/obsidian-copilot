@@ -17,13 +17,20 @@ import {
   buildOpenAIReasoningOverlay,
   buildProviderSpecificParams,
   isOpenAIGPT5,
+  resolveBaseUrl,
+  resolveEnableCors,
   resolveMaxTokens,
   resolveTemperature,
 } from "@/modelManagement/providers/adapters/adapterUtils";
 import { logInfo } from "@/logger";
 import { safeFetch } from "@/utils";
 
-/** OpenAI accepts an optional org id alongside the API key. */
+/**
+ * OpenAI accepts an optional organization id alongside the API key. Stored
+ * on `ProviderConfig.extra.openAIOrgId` (populated by the v0→v2 migration
+ * from the legacy top-level `settings.openAIOrgId` and editable via the
+ * BYOK Configure Provider dialog).
+ */
 export const extraSchema = z
   .object({
     openAIOrgId: z.string().optional(),
@@ -33,30 +40,43 @@ export const extraSchema = z
 /** No per-model overrides for OpenAI. */
 export const entryExtraSchema = z.object({}).strict();
 
+/**
+ * Read the OpenAI org id from `provider.extra` if present and non-empty.
+ * Tolerates missing/typed-incorrectly values without throwing.
+ */
+function readOpenAIOrgId(input: BuildChatModelInput): string | undefined {
+  const value = input.provider.extra?.openAIOrgId;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 /** Build an OpenAI LangChain chat model. */
 export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
-  const { legacyModel, apiKey, extraSecrets } = input;
-  const reasoningOverlay = buildOpenAIReasoningOverlay(legacyModel, { allowVerbosity: true });
+  const { apiKey } = input;
+  const modelId = input.entry.modelId;
+  const enableCors = resolveEnableCors(input);
+  const reasoningOverlay = buildOpenAIReasoningOverlay(modelId, input.defaults, {
+    allowVerbosity: true,
+  });
 
   const config: Record<string, unknown> = {
     ...buildBaseChatConfig(input),
-    modelName: legacyModel.name,
+    modelName: modelId,
     apiKey,
     configuration: {
-      baseURL: legacyModel.baseUrl,
-      fetch: legacyModel.enableCors ? safeFetch : undefined,
-      organization: extraSecrets?.openAIOrgId,
+      baseURL: resolveBaseUrl(input),
+      fetch: enableCors ? safeFetch : undefined,
+      organization: readOpenAIOrgId(input),
     },
     maxTokens: resolveMaxTokens(input),
     temperature: resolveTemperature(input),
     ...reasoningOverlay,
-    ...buildProviderSpecificParams(ChatModelProviders.OPENAI, legacyModel),
+    ...buildProviderSpecificParams(ChatModelProviders.OPENAI, input.defaults),
   };
 
   // Match legacy: GPT-5 models route via Responses API for verbosity support.
-  if (isOpenAIGPT5(legacyModel.name)) {
+  if (isOpenAIGPT5(modelId)) {
     config.useResponsesApi = true;
-    logInfo(`Enabling Responses API for GPT-5 model: ${legacyModel.name} (openai)`);
+    logInfo(`Enabling Responses API for GPT-5 model: ${modelId} (openai)`);
   }
 
   return new ChatOpenAI(config);

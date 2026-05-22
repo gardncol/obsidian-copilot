@@ -13,9 +13,11 @@ import { z } from "zod";
 
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 
+import { ChatModelProviders } from "@/constants";
 import type { BuildChatModelInput } from "@/modelManagement/chatModel/ChatModelFactory";
 import {
   buildBaseChatConfig,
+  resolveEnableCors,
   resolveMaxTokens,
 } from "@/modelManagement/providers/adapters/adapterUtils";
 import { GitHubCopilotChatModel } from "@/LLMProviders/githubCopilot/GitHubCopilotChatModel";
@@ -25,28 +27,47 @@ import { safeFetchNoThrow, shouldUseGitHubCopilotResponsesApi } from "@/utils";
 
 export const extraSchema = z.object({}).strict();
 
-/** No per-model overrides. */
-export const entryExtraSchema = z.object({}).strict();
+/** Per-model override for GitHub Copilot registry entries. */
+export const entryExtraSchema = z
+  .object({
+    /**
+     * Force the Responses API for this model. Codex-family ids opt in
+     * automatically — this flag is for non-Codex models the user wants to
+     * route through `/responses` regardless.
+     */
+    useResponsesApi: z.boolean().optional(),
+  })
+  .strict();
 
 /** Build a GitHub Copilot LangChain chat model. */
 export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
-  const { legacyModel } = input;
+  const modelId = input.entry.modelId;
+  const enableCors = resolveEnableCors(input);
+  const rawUseResponsesApi = input.entry.extra?.useResponsesApi;
+  const useResponsesApi = typeof rawUseResponsesApi === "boolean" ? rawUseResponsesApi : undefined;
+
   const config: Record<string, unknown> = {
     ...buildBaseChatConfig(input),
-    modelName: legacyModel.name,
+    modelName: modelId,
     // Use safeFetchNoThrow for CORS bypass on mobile platforms.
     // This doesn't throw on HTTP errors so 401 retry logic works correctly.
     // WARNING: AbortSignal/timeout will NOT work when enableCors is true
     // because Obsidian's requestUrl doesn't support cancellation.
     // Reason: fetchImplementation is passed to the authed fetch wrapper inside
     // GitHubCopilotChatModel, which injects Copilot token and headers per request.
-    fetchImplementation: legacyModel.enableCors ? safeFetchNoThrow : undefined,
+    fetchImplementation: enableCors ? safeFetchNoThrow : undefined,
     maxTokens: resolveMaxTokens(input),
   };
 
-  if (shouldUseGitHubCopilotResponsesApi(legacyModel)) {
+  if (
+    shouldUseGitHubCopilotResponsesApi({
+      provider: ChatModelProviders.GITHUB_COPILOT,
+      name: modelId,
+      useResponsesApi,
+    })
+  ) {
     config.useResponsesApi = true;
-    logInfo(`Enabling Responses API for GitHub Copilot model: ${legacyModel.name}`);
+    logInfo(`Enabling Responses API for GitHub Copilot model: ${modelId}`);
     return new GitHubCopilotResponsesModel(config);
   }
 

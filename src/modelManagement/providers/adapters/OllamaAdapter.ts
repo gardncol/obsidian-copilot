@@ -17,6 +17,8 @@ import {
   DEFAULT_OLLAMA_NUM_CTX_VALUE,
   buildBaseChatConfig,
   buildProviderSpecificParams,
+  resolveBaseUrl,
+  resolveEnableCors,
   resolveMaxTokens,
 } from "@/modelManagement/providers/adapters/adapterUtils";
 import { safeFetch } from "@/utils";
@@ -32,25 +34,24 @@ export const entryExtraSchema = z
 
 /** Build an Ollama LangChain chat model. */
 export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
-  const { legacyModel, apiKey } = input;
-  // `numCtx` can live on the registry entry post-M9; fall back to the
-  // legacy `CustomModel` field, then the global default.
+  const { apiKey } = input;
+  // `numCtx` lives on `entry.extra` post-M9; fall back to the global default.
   const rawNumCtx = input.entry.extra?.numCtx;
-  const entryNumCtx = typeof rawNumCtx === "number" ? rawNumCtx : undefined;
-  const numCtx = entryNumCtx ?? legacyModel.numCtx ?? DEFAULT_OLLAMA_NUM_CTX_VALUE;
+  const numCtx = typeof rawNumCtx === "number" ? rawNumCtx : DEFAULT_OLLAMA_NUM_CTX_VALUE;
+  const enableCors = resolveEnableCors(input);
 
   const config = {
     ...buildBaseChatConfig(input),
     // ChatOllama uses `model` (not `modelName`).
-    model: legacyModel.name,
+    model: input.entry.modelId,
     // MUST NOT include `/v1` in Ollama's baseUrl.
-    baseUrl: legacyModel.baseUrl || "http://localhost:11434",
+    baseUrl: resolveBaseUrl(input) || "http://localhost:11434",
     headers: {
       Authorization: `Bearer ${apiKey || "default-key"}`,
     },
     // Route through `requestUrl` (safeFetch) to bypass CORS / mixed-content
     // restrictions — required on mobile (WKWebView) when calling http:// Ollama hosts.
-    fetch: legacyModel.enableCors ? safeFetch : undefined,
+    fetch: enableCors ? safeFetch : undefined,
     // Enable thinking unconditionally — Ollama ignores the flag for
     // non-reasoning models. Thinking content (e.g. qwen3, deepseek-r1) goes
     // to `additional_kwargs.reasoning_content`.
@@ -59,7 +60,7 @@ export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
     repeatPenalty: 1.1,
     numCtx,
     maxTokens: resolveMaxTokens(input),
-    ...buildProviderSpecificParams(ChatModelProviders.OLLAMA, legacyModel),
+    ...buildProviderSpecificParams(ChatModelProviders.OLLAMA, input.defaults),
   };
   return new ChatOllama(config);
 }

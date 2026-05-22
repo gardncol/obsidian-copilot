@@ -15,6 +15,7 @@ import type { BuildChatModelInput } from "@/modelManagement/chatModel/ChatModelF
 import {
   buildBaseChatConfig,
   buildProviderSpecificParams,
+  resolveBaseUrl,
   resolveMaxTokens,
 } from "@/modelManagement/providers/adapters/adapterUtils";
 
@@ -33,15 +34,15 @@ const GOOGLE_SAFETY_SETTINGS_BLOCK_NONE: SafetySetting[] = [
 
 /** Build a Google Generative AI LangChain chat model. */
 export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
-  const { legacyModel, apiKey } = input;
+  const { apiKey } = input;
   const config = {
     ...buildBaseChatConfig(input),
     apiKey,
-    model: legacyModel.name,
+    model: input.entry.modelId,
     safetySettings: GOOGLE_SAFETY_SETTINGS_BLOCK_NONE,
-    baseUrl: legacyModel.baseUrl,
+    baseUrl: resolveBaseUrl(input),
     maxTokens: resolveMaxTokens(input),
-    ...buildProviderSpecificParams(ChatModelProviders.GOOGLE, legacyModel),
+    ...buildProviderSpecificParams(ChatModelProviders.GOOGLE, input.defaults),
   };
   return new ChatGoogleGenerativeAI(config);
 }

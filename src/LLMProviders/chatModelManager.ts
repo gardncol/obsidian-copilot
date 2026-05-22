@@ -1,14 +1,25 @@
-import { CustomModel, getModelKey, ModelConfig } from "@/aiParams";
-import {
-  BREVILABS_MODELS_BASE_URL,
-  BUILTIN_CHAT_MODELS,
-  ChatModelProviders,
-  DEFAULT_OLLAMA_NUM_CTX,
-  ModelCapability,
-  ProviderInfo,
-} from "@/constants";
+/**
+ * ChatModelManager — thin coordinator that selects the active chat model
+ * and delegates LangChain client construction to `ChatModelFactory`. The
+ * factory dispatches to per-provider adapters under
+ * `src/modelManagement/providers/adapters/`, each of which owns its own
+ * URL / header / Responses-API / fetch-implementation logic.
+ *
+ * **Credential resolution post-M9.** Provider credentials are read exclusively
+ * from `settings.providers[id]` via `ProviderRegistry` — the legacy per-field
+ * settings (`openAIApiKey`, `anthropicApiKey`, …) were deleted by the v0→v2
+ * migration. Callers still pass `CustomModel` to `createModelInstance(model)`
+ * / `setChatModel(model)` / `ping(model)`; we synthesize a `ProviderConfig`
+ * + `RegistryEntry` for the factory and look up the key by the canonical
+ * provider id derived from `customModel.provider`.
+ *
+ * See: designdocs/MODEL_MANAGEMENT_REDESIGN_TECH_SPEC.md §3.4.
+ */
+import { CustomModel, getModelKey } from "@/aiParams";
+import { BREVILABS_MODELS_BASE_URL, BUILTIN_CHAT_MODELS, ChatModelProviders } from "@/constants";
 import { getDecryptedKey } from "@/encryptionService";
-import { logError, logInfo } from "@/logger";
+import { MissingApiKeyError, MissingPlusLicenseError } from "@/error";
+import { logError, logInfo, logWarn } from "@/logger";
 import { isPlusEnabled } from "@/plusUtils";
 import {
   CopilotSettings,
@@ -16,46 +27,46 @@ import {
   getSettings,
   subscribeToSettingsChange,
 } from "@/settings/model";
+import { err2String, findCustomModel, safeFetch } from "@/utils";
 import {
-  err2String,
-  findCustomModel,
-  getModelInfo,
-  ModelInfo,
-  safeFetch,
-  safeFetchNoThrow,
-  shouldUseGitHubCopilotResponsesApi,
-} from "@/utils";
-import { ChatAnthropic } from "@langchain/anthropic";
-import { BaseChatModel } from "@langchain/core/language_models/chat_models";
+  isAnthropicThinkingModel,
+  isOpenAIGPT5,
+  isOpenAIOSeries,
+} from "@/modelManagement/providers/adapters/adapterUtils";
 import { BaseLanguageModel } from "@langchain/core/language_models/base";
-import { ChatDeepSeek } from "@langchain/deepseek";
-import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
-import { ChatGroq } from "@langchain/groq";
-import { ChatOllama } from "@langchain/ollama";
+import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { ChatOpenAI } from "@langchain/openai";
-import { ChatXAI } from "@langchain/xai";
-import { MissingApiKeyError, MissingPlusLicenseError } from "@/error";
 import { Notice } from "obsidian";
-import { ChatOpenRouter } from "./ChatOpenRouter";
-import { ChatLMStudio } from "./ChatLMStudio";
-import { BedrockChatModel, type BedrockChatModelFields } from "./BedrockChatModel";
-import { GitHubCopilotChatModel } from "@/LLMProviders/githubCopilot/GitHubCopilotChatModel";
-import { GitHubCopilotResponsesModel } from "@/LLMProviders/githubCopilot/GitHubCopilotResponsesModel";
-import type { SafetySetting } from "@google/generative-ai";
 
-const GOOGLE_SAFETY_SETTINGS_BLOCK_NONE: SafetySetting[] = [
-  { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" } as SafetySetting,
-  { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" } as SafetySetting,
-  { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" } as SafetySetting,
-  { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" } as SafetySetting,
-];
+import {
+  getProviderApiKeySync,
+  ModelCatalogService,
+  ModelRegistry,
+  ProviderRegistry,
+  type ProviderConfig,
+  type RegistryEntry,
+} from "@/modelManagement";
+// ChatModelFactory and the AzureAdapter's normalize helper are imported
+// from internal paths (carved out in eslint.config.mjs) to avoid pulling
+// the entire adapter tree — and the LangChain packages it transitively
+// depends on — into every caller of the @/modelManagement barrel.
+import {
+  ChatModelFactory,
+  type BuildChatModelInput,
+  type BuildChatModelOverrides,
+} from "@/modelManagement/chatModel/ChatModelFactory";
+import { normalizeAzureUrl as normalizeAzureUrlImpl } from "@/modelManagement/providers/adapters/AzureAdapter";
+
+// Re-export `normalizeAzureUrl` so external callers (e.g. `utils/curlCommand.ts`)
+// continue to import it from `@/LLMProviders/ChatModelManager` while the helper
+// itself now lives with the Azure adapter.
+export const normalizeAzureUrl = normalizeAzureUrlImpl;
 
 // Patch BaseLanguageModel.prototype.getNumTokens once at module load to prevent
 // tiktoken CDN fetches. LangChain's default getNumTokens() downloads a ~3MB BPE
 // vocabulary from tiktoken.pages.dev, which blocks all LLM calls when the CDN is
 // unreachable. This char/4 estimation is the same fallback LangChain uses internally
 // before tiktoken loads. Actual token usage comes from API response metadata.
-
 (
   BaseLanguageModel.prototype as { getNumTokens: (...args: unknown[]) => Promise<number> }
 ).getNumTokens = async (content: string | Array<{ type: string; text?: string }>) => {
@@ -66,97 +77,109 @@ const GOOGLE_SAFETY_SETTINGS_BLOCK_NONE: SafetySetting[] = [
   return Math.ceil(text.length / 4);
 };
 
-type ChatConstructorType = {
-  new (config: Record<string, unknown>): BaseChatModel;
+/**
+ * Map the legacy `ChatModelProviders` enum to the adapter registry key
+ * (`ProviderId`). System providers (`COPILOT_PLUS`) are handled separately
+ * by the manager and don't appear here.
+ */
+const LEGACY_PROVIDER_TO_ADAPTER_KEY: Record<string, string> = {
+  [ChatModelProviders.OPENAI]: "openai",
+  [ChatModelProviders.ANTHROPIC]: "anthropic",
+  [ChatModelProviders.GOOGLE]: "google",
+  [ChatModelProviders.XAI]: "xai",
+  [ChatModelProviders.AZURE_OPENAI]: "azure",
+  [ChatModelProviders.AMAZON_BEDROCK]: "amazon-bedrock",
+  [ChatModelProviders.GROQ]: "groq",
+  [ChatModelProviders.OLLAMA]: "ollama",
+  [ChatModelProviders.LM_STUDIO]: "lmstudio",
+  [ChatModelProviders.OPENROUTERAI]: "openrouter",
+  [ChatModelProviders.MISTRAL]: "mistral",
+  [ChatModelProviders.DEEPSEEK]: "deepseek",
+  [ChatModelProviders.COHEREAI]: "cohere",
+  [ChatModelProviders.SILICONFLOW]: "siliconflow",
+  [ChatModelProviders.GITHUB_COPILOT]: "github-copilot",
+  [ChatModelProviders.OPENAI_FORMAT]: "openai-compatible",
 };
 
-const CHAT_PROVIDER_CONSTRUCTORS = {
-  [ChatModelProviders.OPENAI]: ChatOpenAI,
-  [ChatModelProviders.AZURE_OPENAI]: ChatOpenAI,
-  [ChatModelProviders.ANTHROPIC]: ChatAnthropic,
-  [ChatModelProviders.COHEREAI]: ChatOpenAI,
-  [ChatModelProviders.GOOGLE]: ChatGoogleGenerativeAI,
-  [ChatModelProviders.XAI]: ChatXAI,
-  [ChatModelProviders.OPENROUTERAI]: ChatOpenRouter,
-  [ChatModelProviders.OLLAMA]: ChatOllama,
-  [ChatModelProviders.LM_STUDIO]: ChatOpenRouter,
-  [ChatModelProviders.GROQ]: ChatGroq,
-  [ChatModelProviders.OPENAI_FORMAT]: ChatOpenAI,
-  [ChatModelProviders.SILICONFLOW]: ChatOpenAI,
-  [ChatModelProviders.COPILOT_PLUS]: ChatOpenRouter,
-  [ChatModelProviders.MISTRAL]: ChatOpenAI,
-  [ChatModelProviders.DEEPSEEK]: ChatDeepSeek,
-  [ChatModelProviders.AMAZON_BEDROCK]: BedrockChatModel,
-  [ChatModelProviders.GITHUB_COPILOT]: GitHubCopilotChatModel,
-} as const;
-
-type ChatProviderConstructMap = typeof CHAT_PROVIDER_CONSTRUCTORS;
+/**
+ * Map an adapter key to the `ProviderConfig.type` discriminator. Used when
+ * synthesizing a `ProviderConfig` from a legacy `CustomModel`.
+ */
+const ADAPTER_KEY_TO_PROVIDER_TYPE: Record<string, ProviderConfig["type"]> = {
+  openai: "openai-compatible",
+  "openai-compatible": "openai-compatible",
+  cohere: "openai-compatible",
+  mistral: "openai-compatible",
+  deepseek: "openai-compatible",
+  siliconflow: "openai-compatible",
+  groq: "openai-compatible",
+  xai: "openai-compatible",
+  ollama: "openai-compatible",
+  lmstudio: "openai-compatible",
+  openrouter: "openai-compatible",
+  "github-copilot": "github-copilot",
+  anthropic: "anthropic",
+  google: "google",
+  azure: "azure",
+  "amazon-bedrock": "bedrock",
+};
 
 /**
- * Normalize an Azure URL that a user may have pasted in full.
- * Strips trailing `/chat/completions` or `/embeddings` and extracts
- * `api-version` from query parameters so the OpenAI client can
- * construct the correct final URL.
+ * Per-instance manager for the active chat model + per-provider construction
+ * logic. Holds the most recently configured `BaseChatModel` instance for the
+ * scope that owns this manager (`getChatModel()`), and exposes per-call
+ * factories (`createModelInstance(...)`, `ping(...)`).
+ *
+ * **No process-wide singleton state.** Each owning scope (chain, project chat,
+ * agent backend) instantiates its own `ChatModelManager` so two scopes can
+ * select different models simultaneously without contending on a shared slot.
+ * A static `getInstance()` shim is retained for legacy callers that still
+ * obtain a manager by name, but it returns a NEW instance on every call —
+ * callers that want to share state must construct a single instance and pass
+ * it to all collaborators.
  */
-export function normalizeAzureUrl(raw: string | undefined): {
-  baseUrl: string | undefined;
-  apiVersion: string | undefined;
-} {
-  if (!raw) return { baseUrl: undefined, apiVersion: undefined };
-
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return { baseUrl: raw, apiVersion: undefined };
-  }
-
-  const apiVersion = url.searchParams.get("api-version") || undefined;
-  url.search = "";
-  let baseUrl = url.toString().replace(/\/+$/, "");
-
-  // Strip paths that the OpenAI client appends automatically
-  baseUrl = baseUrl.replace(/\/(chat\/completions|embeddings)$/, "");
-
-  return { baseUrl, apiVersion };
-}
-
-export default class ChatModelManager {
-  private static instance: ChatModelManager;
-  private static chatModel: BaseChatModel | null;
-  private static modelMap: Record<
+class ChatModelManager {
+  private chatModel: BaseChatModel | null = null;
+  private modelMap: Record<
     string,
     {
       hasApiKey: boolean;
-      AIConstructor: ChatConstructorType;
       vendor: string;
     }
-  >;
+  > = {};
 
-  private static readonly ANTHROPIC_THINKING_BUDGET_TOKENS = 2048;
+  /**
+   * Resolve the default API key for a legacy `ChatModelProviders` value by
+   * consulting `ProviderRegistry`. Local providers (Ollama / LM Studio /
+   * OpenAI-format) have no stored credential; they get `"default-key"` so
+   * the existing `hasApiKey` check (and downstream LangChain clients that
+   * require a non-empty string) keep working. Copilot Plus and the GitHub
+   * Copilot OAuth token slots remain on their dedicated settings fields —
+   * neither is a BYOK credential.
+   *
+   * Returns `""` when no credential is configured.
+   */
+  private resolveDefaultApiKey(provider: ChatModelProviders): string {
+    switch (provider) {
+      case ChatModelProviders.OLLAMA:
+      case ChatModelProviders.LM_STUDIO:
+      case ChatModelProviders.OPENAI_FORMAT:
+        return "default-key";
+      case ChatModelProviders.COPILOT_PLUS:
+        return getSettings().plusLicenseKey ?? "";
+      case ChatModelProviders.GITHUB_COPILOT: {
+        const settings = getSettings();
+        return settings.githubCopilotToken || settings.githubCopilotAccessToken || "";
+      }
+      default: {
+        const adapterKey = LEGACY_PROVIDER_TO_ADAPTER_KEY[provider];
+        if (!adapterKey) return "";
+        return getProviderApiKeySync(adapterKey) ?? "";
+      }
+    }
+  }
 
-  private readonly providerApiKeyMap: Record<ChatModelProviders, () => string> = {
-    [ChatModelProviders.OPENAI]: () => getSettings().openAIApiKey,
-    [ChatModelProviders.GOOGLE]: () => getSettings().googleApiKey,
-    [ChatModelProviders.AZURE_OPENAI]: () => getSettings().azureOpenAIApiKey,
-    [ChatModelProviders.ANTHROPIC]: () => getSettings().anthropicApiKey,
-    [ChatModelProviders.COHEREAI]: () => getSettings().cohereApiKey,
-    [ChatModelProviders.OPENROUTERAI]: () => getSettings().openRouterAiApiKey,
-    [ChatModelProviders.GROQ]: () => getSettings().groqApiKey,
-    [ChatModelProviders.XAI]: () => getSettings().xaiApiKey,
-    [ChatModelProviders.OLLAMA]: () => "default-key",
-    [ChatModelProviders.LM_STUDIO]: () => "default-key",
-    [ChatModelProviders.OPENAI_FORMAT]: () => "default-key",
-    [ChatModelProviders.COPILOT_PLUS]: () => getSettings().plusLicenseKey,
-    [ChatModelProviders.MISTRAL]: () => getSettings().mistralApiKey,
-    [ChatModelProviders.DEEPSEEK]: () => getSettings().deepseekApiKey,
-    [ChatModelProviders.AMAZON_BEDROCK]: () => getSettings().amazonBedrockApiKey,
-    [ChatModelProviders.SILICONFLOW]: () => getSettings().siliconflowApiKey,
-    [ChatModelProviders.GITHUB_COPILOT]: () =>
-      getSettings().githubCopilotToken || getSettings().githubCopilotAccessToken,
-  } as const;
-
-  private constructor() {
+  constructor() {
     this.buildModelMap();
     subscribeToSettingsChange(() => {
       this.buildModelMap();
@@ -164,496 +187,116 @@ export default class ChatModelManager {
     });
   }
 
+  /**
+   * Legacy compatibility shim. Returns a NEW `ChatModelManager` on every call
+   * — there is intentionally no shared singleton. Callers that want to share
+   * state (e.g. the main chain manager and its chain runners) must construct
+   * a single instance and pass it down. New code should prefer `new
+   * ChatModelManager()` directly so the instance lifetime is explicit.
+   */
   static getInstance(): ChatModelManager {
-    if (!ChatModelManager.instance) {
-      ChatModelManager.instance = new ChatModelManager();
-    }
-    return ChatModelManager.instance;
-  }
-
-  private static readonly REASONING_MODEL_TEMPERATURE = 1;
-
-  /**
-   * Determines the appropriate temperature for a model
-   * @returns temperature value or undefined if temperature should not be set
-   */
-  private getTemperatureForModel(
-    modelInfo: ModelInfo,
-    customModel: CustomModel,
-    settings: CopilotSettings
-  ): number | undefined {
-    // Thinking-enabled models don't accept temperature
-    if (modelInfo.isThinkingEnabled) {
-      return undefined;
-    }
-
-    // O-series and GPT-5 models require temperature = 1
-    if (modelInfo.isOSeries || modelInfo.isGPT5) {
-      return ChatModelManager.REASONING_MODEL_TEMPERATURE;
-    }
-
-    // All other models use configured temperature
-    return customModel.temperature ?? settings.temperature;
-  }
-
-  private async getModelConfig(customModel: CustomModel): Promise<ModelConfig> {
-    const settings = getSettings();
-
-    const modelName = customModel.name;
-    const modelInfo = getModelInfo(modelName);
-    const { isThinkingEnabled, usesAdaptiveThinking } = modelInfo;
-    const resolvedTemperature = this.getTemperatureForModel(modelInfo, customModel, settings);
-    const maxTokens = customModel.maxTokens ?? settings.maxTokens;
-
-    // Base config - temperature will be handled by provider-specific methods
-    const baseConfig: Omit<ModelConfig, "maxTokens" | "maxCompletionTokens"> = {
-      modelName: modelName,
-      streaming: customModel.stream ?? true,
-      maxRetries: 3,
-      maxConcurrency: 3,
-      enableCors: customModel.enableCors,
-      // Add temperature for normal models (will be overridden by special configs if needed)
-      ...(!isThinkingEnabled && resolvedTemperature !== undefined
-        ? { temperature: resolvedTemperature }
-        : {}),
-    };
-
-    const providerConfig: {
-      [K in keyof ChatProviderConstructMap]: ConstructorParameters<ChatProviderConstructMap[K]>[0];
-    } = {
-      [ChatModelProviders.OPENAI]: {
-        modelName: modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.openAIApiKey),
-        configuration: {
-          baseURL: customModel.baseUrl,
-          fetch: customModel.enableCors ? safeFetch : undefined,
-          organization: await getDecryptedKey(customModel.openAIOrgId || settings.openAIOrgId),
-        },
-        ...this.getOpenAISpecialConfig(
-          modelName,
-          customModel.maxTokens ?? settings.maxTokens,
-          customModel.temperature ?? settings.temperature,
-          customModel
-        ),
-      },
-      [ChatModelProviders.ANTHROPIC]: {
-        anthropicApiKey: await getDecryptedKey(customModel.apiKey || settings.anthropicApiKey),
-        model: modelName,
-        anthropicApiUrl: customModel.baseUrl,
-        clientOptions: {
-          // Required to bypass CORS restrictions
-          defaultHeaders: {
-            "anthropic-dangerous-direct-browser-access": "true",
-          },
-          fetch: customModel.enableCors ? safeFetch : undefined,
-        },
-        ...(isThinkingEnabled && {
-          // Opus 4.7+ defaults thinking.display to "omitted" so thinking summaries
-          // never reach the UI; force "summarized" for the adaptive branch. Pre-4.7
-          // models default to "summarized" server-side and don't need this.
-          thinking: usesAdaptiveThinking
-            ? { type: "adaptive" as const, display: "summarized" as const }
-            : {
-                type: "enabled" as const,
-                budget_tokens: ChatModelManager.ANTHROPIC_THINKING_BUDGET_TOKENS,
-              },
-        }),
-      },
-      [ChatModelProviders.AZURE_OPENAI]: await (async (): Promise<Record<string, unknown>> => {
-        const azureUrl = normalizeAzureUrl(customModel.baseUrl);
-        return {
-          modelName: customModel.baseUrl
-            ? modelName
-            : customModel.azureOpenAIApiDeploymentName || settings.azureOpenAIApiDeploymentName,
-          apiKey: await getDecryptedKey(customModel.apiKey || settings.azureOpenAIApiKey),
-          configuration: {
-            baseURL:
-              azureUrl.baseUrl ||
-              `https://${customModel.azureOpenAIApiInstanceName || settings.azureOpenAIApiInstanceName}.openai.azure.com/openai/deployments/${customModel.azureOpenAIApiDeploymentName || settings.azureOpenAIApiDeploymentName}`,
-            defaultQuery: {
-              "api-version":
-                azureUrl.apiVersion ||
-                customModel.azureOpenAIApiVersion ||
-                settings.azureOpenAIApiVersion ||
-                "2024-05-01-preview",
-            },
-            defaultHeaders: {
-              "Content-Type": "application/json",
-              "api-key": await getDecryptedKey(customModel.apiKey || settings.azureOpenAIApiKey),
-            },
-            fetch: customModel.enableCors ? safeFetch : undefined,
-          },
-          ...this.getOpenAISpecialConfig(
-            modelName,
-            customModel.maxTokens ?? settings.maxTokens,
-            customModel.temperature ?? settings.temperature,
-            customModel
-          ),
-        };
-      })(),
-      [ChatModelProviders.COHEREAI]: {
-        modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.cohereApiKey),
-        configuration: {
-          baseURL: customModel.baseUrl || ProviderInfo[ChatModelProviders.COHEREAI].host,
-          fetch: customModel.enableCors ? safeFetch : undefined,
-        },
-      },
-      [ChatModelProviders.GOOGLE]: {
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.googleApiKey),
-        model: modelName,
-        safetySettings: GOOGLE_SAFETY_SETTINGS_BLOCK_NONE,
-        baseUrl: customModel.baseUrl,
-      },
-      [ChatModelProviders.XAI]: {
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.xaiApiKey),
-        model: modelName,
-        // This langchainjs XAI client does not support baseURL override
-      },
-      [ChatModelProviders.OPENROUTERAI]: {
-        modelName: modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.openRouterAiApiKey),
-        configuration: {
-          baseURL: customModel.baseUrl || "https://openrouter.ai/api/v1",
-          fetch: customModel.enableCors ? safeFetch : undefined,
-          defaultHeaders: {
-            "HTTP-Referer": "https://obsidiancopilot.com",
-            "X-Title": "Obsidian Copilot",
-          },
-        },
-        // Enable reasoning if the model has the reasoning capability
-        enableReasoning: customModel.capabilities?.includes(ModelCapability.REASONING) ?? false,
-        // Pass reasoning effort if configured and reasoning capability is enabled
-        reasoningEffort:
-          customModel.capabilities?.includes(ModelCapability.REASONING) &&
-          customModel.reasoningEffort
-            ? customModel.reasoningEffort
-            : undefined,
-        // Enable prompt caching by default; can be turned off for ZDR endpoints
-        enablePromptCaching: customModel.enablePromptCaching ?? true,
-      },
-      [ChatModelProviders.GROQ]: {
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.groqApiKey),
-        model: modelName,
-      },
-      [ChatModelProviders.OLLAMA]: {
-        // ChatOllama has `model` instead of `modelName`!!
-        model: modelName,
-        // MUST NOT use /v1 in the baseUrl for ollama
-        baseUrl: customModel.baseUrl || "http://localhost:11434",
-        headers: {
-          Authorization: `Bearer ${await getDecryptedKey(customModel.apiKey || "default-key")}`,
-        },
-        // Route through Obsidian's requestUrl (safeFetch) to bypass CORS / mixed-content
-        // restrictions — required on mobile (WKWebView) when calling http:// Ollama hosts.
-        fetch: customModel.enableCors ? safeFetch : undefined,
-        // Enable thinking for models with REASONING capability (e.g., qwen3, deepseek-r1)
-        // Thinking content goes to additional_kwargs.reasoning_content
-        think: customModel.capabilities?.includes(ModelCapability.REASONING) ?? false,
-        // Reduce repetition in local models (1.1 = slight penalty, helps with hallucination loops)
-        repeatPenalty: 1.1,
-        numCtx: customModel.numCtx ?? DEFAULT_OLLAMA_NUM_CTX,
-      },
-      [ChatModelProviders.LM_STUDIO]: {
-        modelName: modelName,
-        apiKey: customModel.apiKey || "default-key",
-        streamUsage: customModel.streamUsage ?? false,
-        configuration: {
-          baseURL: customModel.baseUrl || "http://localhost:1234/v1",
-          fetch: customModel.enableCors ? safeFetch : undefined,
-        },
-        // Enable reasoning extraction for models with REASONING capability
-        enableReasoning: customModel.capabilities?.includes(ModelCapability.REASONING) ?? false,
-        // Pass reasoning effort if configured and reasoning capability is enabled
-        reasoningEffort:
-          customModel.capabilities?.includes(ModelCapability.REASONING) &&
-          customModel.reasoningEffort
-            ? customModel.reasoningEffort
-            : undefined,
-      },
-      [ChatModelProviders.OPENAI_FORMAT]: {
-        modelName: modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.openAIApiKey),
-        streamUsage: customModel.streamUsage ?? false,
-        configuration: {
-          baseURL: customModel.baseUrl,
-          fetch: customModel.enableCors ? safeFetch : undefined,
-          defaultHeaders: { "dangerously-allow-browser": "true" },
-        },
-        ...this.getOpenAISpecialConfig(
-          modelName,
-          customModel.maxTokens ?? settings.maxTokens,
-          customModel.temperature ?? settings.temperature,
-          customModel
-        ),
-      },
-      [ChatModelProviders.SILICONFLOW]: {
-        modelName: modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.siliconflowApiKey),
-        configuration: {
-          baseURL: customModel.baseUrl || ProviderInfo[ChatModelProviders.SILICONFLOW].host,
-          fetch: customModel.enableCors ? safeFetch : undefined,
-        },
-        ...this.getOpenAISpecialConfig(
-          modelName,
-          customModel.maxTokens ?? settings.maxTokens,
-          customModel.temperature ?? settings.temperature,
-          customModel
-        ),
-      },
-      [ChatModelProviders.COPILOT_PLUS]: {
-        modelName: modelName,
-        apiKey: await getDecryptedKey(settings.plusLicenseKey),
-        configuration: {
-          baseURL: BREVILABS_MODELS_BASE_URL,
-          fetch: safeFetch,
-        },
-      },
-      [ChatModelProviders.MISTRAL]: {
-        modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.mistralApiKey),
-        configuration: {
-          baseURL: customModel.baseUrl || ProviderInfo[ChatModelProviders.MISTRAL].host,
-          fetch: customModel.enableCors ? safeFetch : undefined,
-        },
-      },
-      [ChatModelProviders.DEEPSEEK]: {
-        modelName: modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.deepseekApiKey),
-        configuration: {
-          baseURL: customModel.baseUrl || ProviderInfo[ChatModelProviders.DEEPSEEK].host,
-          fetch: customModel.enableCors ? safeFetch : undefined,
-        },
-      },
-      [ChatModelProviders.AMAZON_BEDROCK]: {} as BedrockChatModelFields,
-      [ChatModelProviders.GITHUB_COPILOT]: {
-        modelName: modelName,
-        // Use safeFetchNoThrow for CORS bypass on mobile platforms.
-        // This doesn't throw on HTTP errors so 401 retry logic works correctly.
-        // WARNING: AbortSignal/timeout will NOT work when enableCors is true
-        // because Obsidian's requestUrl doesn't support cancellation.
-        // Reason: fetchImplementation is passed to the authed fetch wrapper inside
-        // GitHubCopilotChatModel, which injects Copilot token and headers per request.
-        fetchImplementation: customModel.enableCors ? safeFetchNoThrow : undefined,
-      },
-    };
-
-    let selectedProviderConfig =
-      providerConfig[customModel.provider as keyof typeof providerConfig] || {};
-
-    if ((customModel.provider as ChatModelProviders) === ChatModelProviders.AMAZON_BEDROCK) {
-      selectedProviderConfig = await this.buildBedrockConfig(
-        customModel,
-        modelName,
-        settings,
-        maxTokens,
-        resolvedTemperature
-      );
-    }
-
-    // Get provider-specific parameters (like topP, frequencyPenalty) that the provider supports
-    const providerSpecificParams = this.getProviderSpecificParams(
-      customModel.provider as ChatModelProviders,
-      customModel
-    );
-
-    // LangChain 0.6.6 handles token configuration for special models internally
-    const tokenConfig = {
-      maxTokens,
-    };
-
-    const finalConfig = {
-      ...baseConfig,
-      ...selectedProviderConfig,
-      ...providerSpecificParams,
-      ...tokenConfig,
-    };
-
-    return finalConfig as ModelConfig;
+    return new ChatModelManager();
   }
 
   /**
-   * Adds special configuration for OpenAI models that support reasoning
-   * LangChain 0.6.6+ handles most of the token/temperature logic internally
+   * Build a `BaseChatModel` by dispatching through `ChatModelFactory`.
    *
-   * NOTE: GPT-5 models require Responses API for verbosity parameter to work.
-   * The useResponsesApi flag is set automatically in createModelInstance() for GPT-5.
+   * Resolves the active API key (decrypts as needed), looks up (or
+   * synthesizes) a `ProviderConfig` / `RegistryEntry` from the `CustomModel`,
+   * packages the global defaults, and forwards to the adapter for that
+   * provider.
+   *
+   * `COPILOT_PLUS` is a system provider not in the BYOK adapter registry;
+   * it's handled inline here as a fixed `ChatOpenAI` against the Brevilabs
+   * proxy. All other providers go through the adapter dispatch path.
    */
-  private getOpenAISpecialConfig(
-    modelName: string,
-    maxTokens: number,
-    _temperature: number | undefined,
-    customModel?: CustomModel
-  ): Record<string, unknown> {
-    const settings = getSettings();
-    const modelInfo = getModelInfo(modelName);
-    const resolvedTemperature = this.getTemperatureForModel(
-      modelInfo,
-      customModel || ({} as CustomModel),
-      settings
-    );
-
-    const config: Record<string, unknown> = {
-      maxTokens,
-      temperature: resolvedTemperature,
-    };
-
-    // Add reasoning parameters for O-series and GPT-5 models
-    // LangChain 0.6.6 will handle the endpoint routing and parameter conversion
-    if ((modelInfo.isOSeries || modelInfo.isGPT5) && customModel?.reasoningEffort) {
-      config.reasoning = {
-        effort: customModel.reasoningEffort,
-      };
-
-      // Add verbosity for GPT-5 models (Responses API only).
-      // Azure does not support Responses API so skip verbosity there;
-      // useResponsesApi is only enabled for OPENAI / OPENAI_FORMAT in createModelInstance().
-      if (
-        modelInfo.isGPT5 &&
-        customModel?.verbosity &&
-        (customModel?.provider as ChatModelProviders) !== ChatModelProviders.AZURE_OPENAI
-      ) {
-        const verbosityValue = customModel.verbosity;
-        // For Responses API, verbosity is nested under 'text' parameter
-        config.text = {
-          verbosity: verbosityValue,
-        };
-      }
-    }
-
-    return config;
-  }
-
-  /**
-   * Builds configuration for Amazon Bedrock models by merging custom overrides with global defaults.
-   * @param customModel - The model definition provided by the user.
-   * @param modelName - The resolved Bedrock model identifier to invoke.
-   * @param settings - Current Copilot settings.
-   * @param maxTokens - Maximum completion tokens requested for the invocation.
-   * @param temperature - Optional temperature override for the invocation.
-   */
-  private async buildBedrockConfig(
+  private async buildModelInstance(
     customModel: CustomModel,
-    modelName: string,
-    settings: CopilotSettings,
-    maxTokens: number,
-    temperature: number | undefined
-  ): Promise<BedrockChatModelFields> {
-    const apiKeySource = customModel.apiKey || settings.amazonBedrockApiKey;
-    if (!apiKeySource) {
-      throw new Error(
-        "Amazon Bedrock API key is not configured. Provide a key in Settings > API Keys or the model definition."
-      );
+    overrides?: BuildChatModelOverrides
+  ): Promise<BaseChatModel> {
+    const settings = getSettings();
+    const provider = customModel.provider as ChatModelProviders;
+
+    // Copilot Plus is a system-managed provider hitting the Brevilabs proxy.
+    // It doesn't go through the BYOK adapter path (no `provider.type`); the
+    // proxy itself enforces auth via the user's Plus license key.
+    if (provider === ChatModelProviders.COPILOT_PLUS) {
+      return buildCopilotPlusChatModel(customModel, settings, overrides);
     }
 
-    const apiKey = await getDecryptedKey(apiKeySource);
+    const adapterKey = LEGACY_PROVIDER_TO_ADAPTER_KEY[provider];
+    if (!adapterKey) {
+      throw new Error(`Unknown provider: ${customModel.provider} for model: ${customModel.name}`);
+    }
 
-    const explicitRegion = customModel.bedrockRegion?.trim();
-    const settingsRegion = settings.amazonBedrockRegion?.trim();
-    const resolvedRegion = explicitRegion || settingsRegion || "us-east-1";
-    const baseUrlInput = customModel.baseUrl?.trim();
-    const baseUrl = baseUrlInput ? baseUrlInput.replace(/\/+$/, "") : undefined;
-    const endpointBase = baseUrl || `https://bedrock-runtime.${resolvedRegion}.amazonaws.com`;
+    const apiKey = await this.resolveApiKeyForLegacyModel(customModel);
 
-    const encodedModel = encodeURIComponent(modelName);
-    const endpoint = `${endpointBase}/model/${encodedModel}/invoke`;
-    const streamEndpoint = `${endpointBase}/model/${encodedModel}/invoke-with-response-stream`;
-    const fetchImplementation = customModel.enableCors ? safeFetch : undefined;
-    // Inference profiles prefix Anthropic identifiers (e.g. global.anthropic.*), so look for the segment anywhere.
-    const requiresAnthropicVersion = /(^|\.)anthropic\./.test(modelName);
-    const anthropicVersion = requiresAnthropicVersion ? "bedrock-2023-05-31" : undefined;
-    // Only enable thinking mode if user has explicitly enabled REASONING capability
-    const enableThinking = customModel.capabilities?.includes(ModelCapability.REASONING) ?? false;
+    // Project-mode overrides for `temperature` / `maxTokens` flow in via the
+    // `mergedModel = { ...customModel, ...project.modelConfigs }` shape that
+    // `chainManager` constructs before calling `setChatModel`. Project
+    // temperature/maxTokens are surfaced here as a per-call override on the
+    // global defaults so adapters can stay registry-only.
+    const resolvedTemperature = customModel.temperature ?? settings.temperature;
+    const resolvedMaxTokens = customModel.maxTokens ?? settings.maxTokens;
 
-    return {
-      modelName,
-      modelId: modelName,
+    const input: BuildChatModelInput = {
+      provider: resolveProviderConfig(customModel, adapterKey),
+      entry: resolveRegistryEntry(customModel, adapterKey),
+      defaults: {
+        temperature: resolvedTemperature,
+        maxTokens: resolvedMaxTokens,
+        reasoningEffort: settings.reasoningEffort,
+        verbosity: settings.verbosity,
+        streaming: settings.stream,
+      },
+      catalog: ModelCatalogService.getInstance(),
       apiKey,
-      endpoint,
-      streamEndpoint,
-      defaultMaxTokens: maxTokens,
-      defaultTemperature: temperature,
-      defaultTopP: customModel.topP,
-      anthropicVersion,
-      enableThinking,
-      fetchImplementation,
-      streaming: customModel.stream ?? true,
+      overrides,
     };
+
+    return ChatModelFactory.create(input);
   }
 
   /**
-   * Returns provider-specific parameters (like topP, frequencyPenalty) based on what the provider supports
-   * This prevents passing undefined values to providers that don't support them
+   * Resolve and decrypt the primary API key for a legacy `CustomModel`.
+   *
+   * Resolution order:
+   *   1. Per-model override on `customModel.apiKey` (legacy, may carry an
+   *      `enc_*` ciphertext on older installs).
+   *   2. The provider's `apiKeyRef` via `ProviderRegistry` (post-M9 source
+   *      of truth). Local-only providers fall through to `"default-key"`.
+   *
+   * Returns `undefined` when no credential can be resolved (the manager's
+   * `hasApiKey` precheck and adapter-level guards surface a user-facing
+   * error).
    */
-  private getProviderSpecificParams(provider: ChatModelProviders, customModel: CustomModel) {
-    const params: Record<string, unknown> = {};
-
-    // Add topP only if defined
-    if (customModel.topP !== undefined) {
-      // These providers support topP
-      if (
-        [
-          ChatModelProviders.OPENAI,
-          ChatModelProviders.AZURE_OPENAI,
-          ChatModelProviders.ANTHROPIC,
-          ChatModelProviders.GOOGLE,
-          ChatModelProviders.OPENROUTERAI,
-          ChatModelProviders.OLLAMA,
-          ChatModelProviders.LM_STUDIO,
-          ChatModelProviders.OPENAI_FORMAT,
-          ChatModelProviders.MISTRAL,
-          ChatModelProviders.DEEPSEEK,
-          ChatModelProviders.SILICONFLOW,
-        ].includes(provider)
-      ) {
-        params.topP = customModel.topP;
-      }
-    }
-
-    // Add frequencyPenalty only if defined
-    if (customModel.frequencyPenalty !== undefined) {
-      // These providers support frequencyPenalty
-      if (
-        [
-          ChatModelProviders.OPENAI,
-          ChatModelProviders.AZURE_OPENAI,
-          ChatModelProviders.OPENROUTERAI,
-          ChatModelProviders.OLLAMA,
-          ChatModelProviders.LM_STUDIO,
-          ChatModelProviders.OPENAI_FORMAT,
-          ChatModelProviders.MISTRAL,
-          ChatModelProviders.DEEPSEEK,
-          ChatModelProviders.SILICONFLOW,
-        ].includes(provider)
-      ) {
-        params.frequencyPenalty = customModel.frequencyPenalty;
-      }
-    }
-
-    return params;
+  private async resolveApiKeyForLegacyModel(customModel: CustomModel): Promise<string | undefined> {
+    const provider = customModel.provider as ChatModelProviders;
+    const fallback = this.resolveDefaultApiKey(provider);
+    const source = customModel.apiKey || fallback;
+    if (!source) return undefined;
+    return getDecryptedKey(source);
   }
 
   // Build a map of modelKey to model config
   public buildModelMap() {
     const activeModels = getSettings().activeModels;
-    ChatModelManager.modelMap = {};
-    const modelMap = ChatModelManager.modelMap;
+    this.modelMap = {};
+    const modelMap = this.modelMap;
 
     const allModels = activeModels ?? BUILTIN_CHAT_MODELS;
 
     allModels.forEach((model) => {
       if (model.enabled) {
         if (!Object.values(ChatModelProviders).contains(model.provider as ChatModelProviders)) {
-          console.warn(`Unknown provider: ${model.provider} for model: ${model.name}`);
+          logWarn(`Unknown provider: ${model.provider} for model: ${model.name}`);
           return;
         }
 
-        const constructor = this.getProviderConstructor(model);
         const hasCredentials = this.hasProviderCredentials(model);
         const modelKey = getModelKeyFromModel(model);
         modelMap[modelKey] = {
           hasApiKey: hasCredentials,
-          AIConstructor: constructor,
           vendor: model.provider,
         };
       }
@@ -666,37 +309,18 @@ export default class ChatModelManager {
    * @returns True when the provider requirements are satisfied, otherwise false.
    */
   private hasProviderCredentials(model: CustomModel): boolean {
-    if ((model.provider as ChatModelProviders) === ChatModelProviders.AMAZON_BEDROCK) {
-      const settings = getSettings();
-      const apiKey = model.apiKey || settings.amazonBedrockApiKey;
-      // Region defaults to us-east-1 if not specified, so API key is the only requirement
-      return Boolean(apiKey);
-    }
-
-    const getDefaultApiKey = this.providerApiKeyMap[model.provider as ChatModelProviders];
-    if (!getDefaultApiKey) {
-      return Boolean(model.apiKey);
-    }
-
-    return Boolean(model.apiKey || getDefaultApiKey());
-  }
-
-  getProviderConstructor(model: CustomModel): ChatConstructorType {
-    const constructor: ChatConstructorType = CHAT_PROVIDER_CONSTRUCTORS[
-      model.provider as ChatModelProviders
-    ] as unknown as ChatConstructorType;
-    if (!constructor) {
-      console.warn(`Unknown provider: ${model.provider} for model: ${model.name}`);
-      throw new Error(`Unknown provider: ${model.provider} for model: ${model.name}`);
-    }
-    return constructor;
+    // Bedrock region defaults to us-east-1; only the API key is required.
+    // Resolved via the same registry path as every other provider — no
+    // special-case settings field anymore.
+    const provider = model.provider as ChatModelProviders;
+    return Boolean(model.apiKey || this.resolveDefaultApiKey(provider));
   }
 
   getChatModel(): BaseChatModel {
-    if (!ChatModelManager.chatModel) {
+    if (!this.chatModel) {
       throw new Error("No valid chat model available. Please check your API key settings.");
     }
-    return ChatModelManager.chatModel;
+    return this.chatModel;
   }
 
   /**
@@ -705,7 +329,7 @@ export default class ChatModelManager {
    */
   private isModelConfigValid(model: CustomModel, settings: CopilotSettings): boolean {
     const modelKey = getModelKeyFromModel(model);
-    const modelInfo = ChatModelManager.modelMap[modelKey];
+    const modelInfo = this.modelMap[modelKey];
 
     // Check if model exists in map and has API key
     if (!modelInfo || !modelInfo.hasApiKey) {
@@ -780,12 +404,11 @@ export default class ChatModelManager {
   async setChatModel(model: CustomModel): Promise<void> {
     try {
       const modelInstance = await this.createModelInstance(model);
-      ChatModelManager.chatModel = modelInstance;
+      this.chatModel = modelInstance;
 
       // Log if Responses API is enabled for GPT-5
-      const modelInfo = getModelInfo(model.name);
       if (
-        modelInfo.isGPT5 &&
+        isOpenAIGPT5(model.name) &&
         ((model.provider as ChatModelProviders) === ChatModelProviders.OPENAI ||
           (model.provider as ChatModelProviders) === ChatModelProviders.OPENAI_FORMAT)
       ) {
@@ -798,9 +421,8 @@ export default class ChatModelManager {
   }
 
   async createModelInstance(model: CustomModel): Promise<BaseChatModel> {
-    // Create and return the appropriate model
     const modelKey = getModelKeyFromModel(model);
-    const selectedModel = ChatModelManager.modelMap[modelKey];
+    const selectedModel = this.modelMap[modelKey];
     if (!selectedModel) {
       throw new Error(`No model found for: ${modelKey}`);
     }
@@ -814,44 +436,10 @@ export default class ChatModelManager {
       throw new MissingApiKeyError(errorMessage);
     }
 
-    const modelConfig = await this.getModelConfig(model);
-    const modelInfo = getModelInfo(model.name);
-
-    // For GPT-5 models, automatically use Responses API for proper verbosity support
-    const constructorConfig: Record<string, unknown> = { ...modelConfig };
-    const useCopilotResponses = shouldUseGitHubCopilotResponsesApi(model);
-    if (
-      modelInfo.isGPT5 &&
-      ((selectedModel.vendor as ChatModelProviders) === ChatModelProviders.OPENAI ||
-        (selectedModel.vendor as ChatModelProviders) === ChatModelProviders.OPENAI_FORMAT)
-    ) {
-      constructorConfig.useResponsesApi = true;
-      logInfo(`Enabling Responses API for GPT-5 model: ${model.name} (${selectedModel.vendor})`);
-    }
-
-    if (useCopilotResponses) {
-      constructorConfig.useResponsesApi = true;
-      logInfo(`Enabling Responses API for GitHub Copilot model: ${model.name}`);
-    }
-
-    // For LM Studio, use ChatLMStudio by default for Responses API compatibility.
-    // Opt out by setting useResponsesApi to false.
-    if (
-      (model.provider as ChatModelProviders) === ChatModelProviders.LM_STUDIO &&
-      model.useResponsesApi !== false
-    ) {
-      const lmStudioInstance = new ChatLMStudio(constructorConfig);
-      logInfo(`[ChatModelManager] Using Responses API for LM Studio model: ${model.name}`);
-      return lmStudioInstance;
-    }
-
-    if (useCopilotResponses) {
-      return new GitHubCopilotResponsesModel(constructorConfig);
-    }
-
-    const newModelInstance = new selectedModel.AIConstructor(constructorConfig);
-
-    return newModelInstance;
+    // All per-provider construction logic (Responses API routing, thinking
+    // budgets, Bedrock endpoints, …) now lives in the adapter modules and
+    // is dispatched through `ChatModelFactory.create()`.
+    return this.buildModelInstance(model);
   }
 
   validateChatModel(chatModel: BaseChatModel): boolean {
@@ -870,68 +458,40 @@ export default class ChatModelManager {
   }
 
   async countTokens(inputStr: string): Promise<number> {
-    return ChatModelManager.chatModel?.getNumTokens(inputStr) ?? this.estimateTokens(inputStr);
+    return this.chatModel?.getNumTokens(inputStr) ?? this.estimateTokens(inputStr);
   }
 
   private validateCurrentModel(): void {
-    if (!ChatModelManager.chatModel) return;
+    if (!this.chatModel) return;
 
     const currentModelKey = getModelKey();
     if (!currentModelKey) return;
 
     // Get the model configuration
-    const selectedModel = ChatModelManager.modelMap[currentModelKey];
+    const selectedModel = this.modelMap[currentModelKey];
 
     // If API key is missing or model doesn't exist in map
     if (!selectedModel?.hasApiKey) {
       // Clear the current chat model
-      ChatModelManager.chatModel = null;
+      this.chatModel = null;
       logInfo("Failed to reinitialize model due to missing API key");
     }
   }
 
   async ping(model: CustomModel): Promise<boolean> {
     const tryPing = async (enableCors: boolean) => {
-      const modelToTest = { ...model, enableCors };
-      const modelConfig = await this.getModelConfig(modelToTest);
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { streaming, maxTokens, maxCompletionTokens, ...pingConfig } = modelConfig;
-
-      // Check model capabilities to determine appropriate maxTokens
-      const modelInfo = getModelInfo(model.name);
-
-      // For thinking-enabled models, maxTokens must be greater than thinking.budget_tokens (2048)
-      // For other models, use minimal tokens for a fast ping
-      const pingMaxTokens = modelInfo.isThinkingEnabled ? 4096 : 30;
-      const tokenConfig = { maxTokens: pingMaxTokens };
-
-      const constructorConfig: Record<string, unknown> = {
-        ...pingConfig,
-        ...tokenConfig,
-      };
-      const useCopilotResponses = shouldUseGitHubCopilotResponsesApi(model);
-
-      if (
-        modelInfo.isGPT5 &&
-        ((model.provider as ChatModelProviders) === ChatModelProviders.OPENAI ||
-          (model.provider as ChatModelProviders) === ChatModelProviders.OPENAI_FORMAT)
-      ) {
-        constructorConfig.useResponsesApi = true;
-      }
-
-      if (useCopilotResponses) {
-        constructorConfig.useResponsesApi = true;
-      }
-
-      // For LM Studio with Responses API, ping via ChatLMStudio so the
-      // connectivity check hits the same /v1/responses endpoint used in chats.
-      const testModel =
-        (model.provider as ChatModelProviders) === ChatModelProviders.LM_STUDIO &&
-        model.useResponsesApi !== false
-          ? new ChatLMStudio(constructorConfig)
-          : useCopilotResponses
-            ? new GitHubCopilotResponsesModel(constructorConfig)
-            : new (this.getProviderConstructor(modelToTest))(constructorConfig);
+      // For thinking-enabled models, maxTokens must be greater than
+      // thinking.budget_tokens (2048). For other models, use a tiny budget
+      // for a fast ping. Only Anthropic-family ids carry the thinking
+      // config we'd need a larger budget for.
+      const pingMaxTokens = isAnthropicThinkingModel(model.name) ? 4096 : 30;
+      // Adapters own all per-provider construction; the factory wires the
+      // ping-only overrides through `BuildChatModelInput.overrides`.
+      const testModel = await this.buildModelInstance(model, {
+        maxTokens: pingMaxTokens,
+        forceNonStreaming: true,
+        enableCors,
+      });
       await testModel.invoke([{ role: "user", content: "hello" }], {
         timeout: 8000,
       });
@@ -960,9 +520,146 @@ export default class ChatModelManager {
       }
     }
   }
-
-  findModelByName(modelName: string): CustomModel | undefined {
-    const settings = getSettings();
-    return settings.activeModels.find((model) => model.name === modelName);
-  }
 }
+
+/**
+ * Resolve the `ProviderConfig` for a legacy `CustomModel`.
+ *
+ * Prefers the real `ProviderConfig` stored under `settings.providers[adapterKey]`
+ * so adapter-side reads of `provider.extra` (Azure deployment names, Bedrock
+ * region, OpenAI org id, …) see the post-M9 source of truth. Falls back to a
+ * shape synthesized from the `CustomModel` for providers the user has not
+ * configured through the BYOK panel yet (e.g. local Ollama, OPENAI_FORMAT,
+ * or the Copilot-Plus fake provider).
+ */
+function resolveProviderConfig(model: CustomModel, adapterKey: string): ProviderConfig {
+  const stored = ProviderRegistry.getInstance().get(adapterKey);
+  if (stored) return stored;
+
+  // Synthesized fallback. Carry the OpenAI org id (legacy per-model field)
+  // through `provider.extra.openAIOrgId` so the OpenAI adapter can read it
+  // from its canonical post-M9 location.
+  const extra: Record<string, unknown> = {};
+  if (adapterKey === "openai" && model.openAIOrgId) {
+    extra.openAIOrgId = model.openAIOrgId;
+  }
+
+  return {
+    id: adapterKey,
+    kind: "builtin",
+    displayName: adapterKey,
+    type: ADAPTER_KEY_TO_PROVIDER_TYPE[adapterKey],
+    baseUrl: model.baseUrl,
+    apiKeyRef: model.apiKey ? { kind: "inline", value: model.apiKey } : null,
+    ...(Object.keys(extra).length > 0 ? { extra } : {}),
+    addedAt: 0,
+  };
+}
+
+/**
+ * Resolve the `RegistryEntry` for a legacy `CustomModel`.
+ *
+ * Prefers the real entry stored in `settings.registry` (so adapters see the
+ * v0→v2 migration's `entry.extra` payload — `numCtx`, `useResponsesApi`,
+ * `enablePromptCaching`, Azure deployment overrides, Bedrock region, etc.).
+ * Falls back to a synthesized entry that hoists the relevant per-model fields
+ * from the legacy `CustomModel` into `entry.extra` so the in-memory
+ * `mergedModel` path (chainManager merges project overrides) keeps behaving
+ * identically.
+ */
+function resolveRegistryEntry(model: CustomModel, adapterKey: string): RegistryEntry {
+  const stored = ModelRegistry.getInstance().get(adapterKey, model.name);
+  if (stored) return stored;
+
+  const extra: Record<string, unknown> = {};
+  if (typeof model.baseUrl === "string" && model.baseUrl.length > 0) {
+    extra.baseUrl = model.baseUrl;
+  }
+  if (typeof model.enableCors === "boolean") {
+    extra.enableCors = model.enableCors;
+  }
+  if (typeof model.numCtx === "number") {
+    extra.numCtx = model.numCtx;
+  }
+  if (typeof model.useResponsesApi === "boolean") {
+    extra.useResponsesApi = model.useResponsesApi;
+  }
+  if (typeof model.enablePromptCaching === "boolean") {
+    extra.enablePromptCaching = model.enablePromptCaching;
+  }
+  if (typeof model.bedrockRegion === "string" && model.bedrockRegion.length > 0) {
+    extra.bedrockRegion = model.bedrockRegion;
+  }
+  if (
+    typeof model.azureOpenAIApiInstanceName === "string" &&
+    model.azureOpenAIApiInstanceName.length > 0
+  ) {
+    extra.azureInstanceName = model.azureOpenAIApiInstanceName;
+  }
+  if (
+    typeof model.azureOpenAIApiDeploymentName === "string" &&
+    model.azureOpenAIApiDeploymentName.length > 0
+  ) {
+    extra.azureDeploymentName = model.azureOpenAIApiDeploymentName;
+  }
+  if (typeof model.azureOpenAIApiVersion === "string" && model.azureOpenAIApiVersion.length > 0) {
+    extra.azureApiVersion = model.azureOpenAIApiVersion;
+  }
+
+  return {
+    providerId: adapterKey,
+    modelId: model.name,
+    displayName: model.displayName || model.name,
+    addedAt: 0,
+    ...(Object.keys(extra).length > 0 ? { extra } : {}),
+  };
+}
+
+/**
+ * Build the Copilot Plus chat model — a `ChatOpenAI` wired against the
+ * Brevilabs proxy. Plus is a system provider (no user-configured BYOK
+ * surface) so it doesn't go through the adapter registry; the proxy
+ * itself enforces auth via the user's Plus license key.
+ */
+async function buildCopilotPlusChatModel(
+  customModel: CustomModel,
+  settings: CopilotSettings,
+  overrides: BuildChatModelOverrides | undefined
+): Promise<BaseChatModel> {
+  const maxTokens = overrides?.maxTokens ?? customModel.maxTokens ?? settings.maxTokens;
+  const streaming = overrides?.forceNonStreaming ? false : (customModel.stream ?? true);
+  // Match legacy: temperature is set only for non-thinking models. Copilot
+  // Plus proxies both Anthropic and OpenAI ids, so check both families.
+  const temperature = isAnthropicThinkingModel(customModel.name)
+    ? undefined
+    : isOpenAIOSeries(customModel.name) || isOpenAIGPT5(customModel.name)
+      ? 1
+      : (customModel.temperature ?? settings.temperature);
+
+  const config: Record<string, unknown> = {
+    modelName: customModel.name,
+    apiKey: await getDecryptedKey(settings.plusLicenseKey),
+    streaming,
+    maxRetries: 3,
+    maxConcurrency: 3,
+    enableCors: customModel.enableCors,
+    configuration: {
+      baseURL: BREVILABS_MODELS_BASE_URL,
+      fetch: safeFetch,
+    },
+    maxTokens,
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(customModel.topP !== undefined ? { topP: customModel.topP } : {}),
+    ...(customModel.frequencyPenalty !== undefined
+      ? { frequencyPenalty: customModel.frequencyPenalty }
+      : {}),
+  };
+
+  return new ChatOpenAI(config);
+}
+
+// The class above is exported as `default` AND `ChatModelManager` (named).
+// Legacy callers use `import ChatModelManager from "..."` (default form).
+// The `@/modelManagement` barrel re-exports it as a named export.
+export { ChatModelManager };
+export default ChatModelManager;

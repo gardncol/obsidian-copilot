@@ -143,12 +143,29 @@ export interface VerificationResult {
  * Global chat defaults — user-editable in Chat settings and applied to
  * ALL chat invocations after the M9 redesign (per-model overrides have
  * been removed). Threaded into adapters via `BuildChatModelInput`.
+ *
+ * The optional knobs (`topP`, `frequencyPenalty`, `streamUsage`) currently
+ * have no UI surface for editing globally — they are surfaced here for
+ * adapter parity with the legacy per-model shape, and may be wired into
+ * the Chat settings UI in a future pass. Adapters treat `undefined` as
+ * "not set" and omit the field from their LangChain config.
  */
 export interface ChatDefaults {
   temperature: number;
   maxTokens: number;
-  reasoningEffort?: string;
-  verbosity?: string;
+  /**
+   * Reasoning effort for OpenAI-family reasoning models (o-series, GPT-5)
+   * and downstream OpenAI-compatible reasoning clients (OpenRouter, LM Studio).
+   */
+  reasoningEffort?: "minimal" | "low" | "medium" | "high";
+  /** Verbosity for GPT-5 + Responses API. */
+  verbosity?: "low" | "medium" | "high";
   /** Streaming on/off. */
   streaming?: boolean;
+  /** Nucleus sampling threshold. */
+  topP?: number;
+  /** Frequency penalty for OpenAI-shaped APIs. */
+  frequencyPenalty?: number;
+  /** Emit `stream_options.include_usage` for OpenAI-shaped APIs. */
+  streamUsage?: boolean;
 }

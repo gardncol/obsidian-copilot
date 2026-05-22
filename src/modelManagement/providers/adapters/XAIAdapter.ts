@@ -24,13 +24,13 @@ export const entryExtraSchema = z.object({}).strict();
 
 /** Build an xAI LangChain chat model. */
 export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
-  const { legacyModel, apiKey } = input;
+  const { apiKey } = input;
   const config = {
     ...buildBaseChatConfig(input),
     apiKey,
-    model: legacyModel.name,
+    model: input.entry.modelId,
     maxTokens: resolveMaxTokens(input),
-    ...buildProviderSpecificParams(ChatModelProviders.XAI, legacyModel),
+    ...buildProviderSpecificParams(ChatModelProviders.XAI, input.defaults),
   };
   return new ChatXAI(config);
 }

@@ -11,8 +11,8 @@
  */
 import { ChatModelProviders, DEFAULT_OLLAMA_NUM_CTX } from "@/constants";
 
-import type { CustomModel } from "@/aiParams";
 import type { BuildChatModelInput } from "@/modelManagement/chatModel/ChatModelFactory";
+import type { ChatDefaults } from "@/modelManagement/types";
 
 /**
  * OpenAI-family id pattern helpers.
@@ -79,8 +79,8 @@ export function isAnthropicAdaptiveThinkingModel(modelName: string): boolean {
  * Those adapters do not rely on this helper for `think` mode (only
  * for the temperature omission rule above).
  */
-function isThinkingModel(legacyModel: CustomModel): boolean {
-  return isAnthropicThinkingModel(legacyModel.name);
+function isThinkingModel(modelId: string): boolean {
+  return isAnthropicThinkingModel(modelId);
 }
 
 /**
@@ -88,8 +88,8 @@ function isThinkingModel(legacyModel: CustomModel): boolean {
  * Matches the legacy `getModelInfo` semantics: id pattern only, no provider
  * gate. Used by OpenAI-family adapters to pin `temperature: 1`.
  */
-function isOpenAIReasoningFamily(legacyModel: CustomModel): boolean {
-  return isOpenAIOSeries(legacyModel.name) || isOpenAIGPT5(legacyModel.name);
+function isOpenAIReasoningFamily(modelId: string): boolean {
+  return isOpenAIOSeries(modelId) || isOpenAIGPT5(modelId);
 }
 
 /**
@@ -111,54 +111,102 @@ export const ANTHROPIC_THINKING_BUDGET_TOKENS = 2048;
  *
  * - Thinking-enabled models: `undefined` (do not send `temperature`).
  * - OpenAI o-series / GPT-5: `1` (API rejects other values).
- * - Anything else: per-model override → global default.
+ * - Anything else: the global default from `ChatDefaults`.
  */
 export function resolveTemperature(input: BuildChatModelInput): number | undefined {
-  const { legacyModel, defaults } = input;
-
-  if (isThinkingModel(legacyModel)) {
+  const modelId = input.entry.modelId;
+  if (isThinkingModel(modelId)) {
     return undefined;
   }
-  if (isOpenAIReasoningFamily(legacyModel)) {
+  if (isOpenAIReasoningFamily(modelId)) {
     return REASONING_MODEL_TEMPERATURE;
   }
-  return legacyModel.temperature ?? defaults.temperature;
+  return input.defaults.temperature;
 }
 
 /**
  * Returns the effective max-output-tokens budget.
  *
  * - `overrides.maxTokens` (used by `ping`) wins absolutely.
- * - Otherwise: per-model override → global default.
+ * - Otherwise: the global default from `ChatDefaults`.
  */
 export function resolveMaxTokens(input: BuildChatModelInput): number {
   if (input.overrides?.maxTokens !== undefined) {
     return input.overrides.maxTokens;
   }
-  return input.legacyModel.maxTokens ?? input.defaults.maxTokens;
+  return input.defaults.maxTokens;
 }
 
 /**
  * Returns the streaming flag.
  *
  * - `ping` forces non-streaming because it only calls `.invoke()`.
- * - Otherwise: per-model override → `true` (LangChain default).
+ * - Otherwise: the global default from `ChatDefaults`, falling back to
+ *   `true` when unset (matches the legacy LangChain default).
  */
 export function resolveStreaming(input: BuildChatModelInput): boolean {
   if (input.overrides?.forceNonStreaming) {
     return false;
   }
-  return input.legacyModel.stream ?? true;
+  return input.defaults.streaming ?? true;
+}
+
+/**
+ * Returns the effective endpoint base URL for this call. Sources, in order:
+ * 1. `entry.extra.baseUrl` (per-model registry override — OpenAI-compatible
+ *    custom endpoints can swap the host per-model).
+ * 2. `provider.baseUrl` (provider-level configuration — the canonical
+ *    source for most providers).
+ *
+ * Returns `undefined` when neither source has a non-empty value; adapters
+ * fall back to their hard-coded SDK default (e.g. Ollama's `localhost:11434`).
+ */
+export function resolveBaseUrl(input: BuildChatModelInput): string | undefined {
+  const fromEntry = input.entry.extra?.baseUrl;
+  if (typeof fromEntry === "string" && fromEntry.length > 0) {
+    return fromEntry;
+  }
+  if (typeof input.provider.baseUrl === "string" && input.provider.baseUrl.length > 0) {
+    return input.provider.baseUrl;
+  }
+  return undefined;
+}
+
+/**
+ * Returns the effective `enableCors` flag for this call. Sources, in order:
+ * 1. `overrides.enableCors` (used by `ping` to retry through `safeFetch`).
+ * 2. `entry.extra.enableCors` (per-model registry override).
+ * 3. `provider.extra.enableCors` (provider-level default).
+ *
+ * Returns `undefined` when not set; adapters interpret that as "do not
+ * inject the `safeFetch` wrapper".
+ */
+export function resolveEnableCors(input: BuildChatModelInput): boolean | undefined {
+  if (input.overrides?.enableCors !== undefined) {
+    return input.overrides.enableCors;
+  }
+  const fromEntry = input.entry.extra?.enableCors;
+  if (typeof fromEntry === "boolean") {
+    return fromEntry;
+  }
+  const fromProvider = input.provider.extra?.enableCors;
+  if (typeof fromProvider === "boolean") {
+    return fromProvider;
+  }
+  return undefined;
 }
 
 /**
  * Provider-specific parameter bag — only includes `topP` /
  * `frequencyPenalty` for providers whose LangChain client accepts them.
  * Mirrors the legacy `getProviderSpecificParams` exactly.
+ *
+ * `topP` and `frequencyPenalty` source from `ChatDefaults`; when unset the
+ * field is omitted entirely so the SDK can apply its own default.
  */
 export function buildProviderSpecificParams(
   provider: ChatModelProviders,
-  legacyModel: CustomModel
+  defaults: ChatDefaults
 ): Record<string, unknown> {
   const params: Record<string, unknown> = {};
 
@@ -175,8 +223,8 @@ export function buildProviderSpecificParams(
     ChatModelProviders.DEEPSEEK,
     ChatModelProviders.SILICONFLOW,
   ]);
-  if (legacyModel.topP !== undefined && TOP_P_PROVIDERS.has(provider)) {
-    params.topP = legacyModel.topP;
+  if (defaults.topP !== undefined && TOP_P_PROVIDERS.has(provider)) {
+    params.topP = defaults.topP;
   }
 
   const FREQUENCY_PENALTY_PROVIDERS = new Set<ChatModelProviders>([
@@ -190,8 +238,8 @@ export function buildProviderSpecificParams(
     ChatModelProviders.DEEPSEEK,
     ChatModelProviders.SILICONFLOW,
   ]);
-  if (legacyModel.frequencyPenalty !== undefined && FREQUENCY_PENALTY_PROVIDERS.has(provider)) {
-    params.frequencyPenalty = legacyModel.frequencyPenalty;
+  if (defaults.frequencyPenalty !== undefined && FREQUENCY_PENALTY_PROVIDERS.has(provider)) {
+    params.frequencyPenalty = defaults.frequencyPenalty;
   }
 
   return params;
@@ -202,26 +250,29 @@ export function buildProviderSpecificParams(
  * (o-series / GPT-5), verbosity (GPT-5 + Responses API only, NOT Azure).
  * Returns a config bag to spread alongside `maxTokens` / `temperature`.
  *
+ * Reasoning effort / verbosity now source from `ChatDefaults` (global)
+ * rather than per-model `CustomModel` fields.
+ *
  * NOTE: `useResponsesApi` flag is added by the adapter, not here — it
  * depends on whether the adapter is the OpenAI adapter (true for GPT-5)
  * vs. Azure (always false). Mirrors legacy `getOpenAISpecialConfig`.
  */
 export function buildOpenAIReasoningOverlay(
-  legacyModel: CustomModel,
+  modelId: string,
+  defaults: ChatDefaults,
   options: { allowVerbosity: boolean }
 ): Record<string, unknown> {
   const config: Record<string, unknown> = {};
-  const modelName = legacyModel.name;
-  const oSeries = isOpenAIOSeries(modelName);
-  const gpt5 = isOpenAIGPT5(modelName);
+  const oSeries = isOpenAIOSeries(modelId);
+  const gpt5 = isOpenAIGPT5(modelId);
 
-  if ((oSeries || gpt5) && legacyModel.reasoningEffort) {
-    config.reasoning = { effort: legacyModel.reasoningEffort };
+  if ((oSeries || gpt5) && defaults.reasoningEffort) {
+    config.reasoning = { effort: defaults.reasoningEffort };
 
     // Verbosity is GPT-5 + Responses API only. Azure does not support
     // Responses API so the adapter passes `allowVerbosity: false`.
-    if (gpt5 && legacyModel.verbosity && options.allowVerbosity) {
-      config.text = { verbosity: legacyModel.verbosity };
+    if (gpt5 && defaults.verbosity && options.allowVerbosity) {
+      config.text = { verbosity: defaults.verbosity };
     }
   }
 
@@ -234,16 +285,16 @@ export function buildOpenAIReasoningOverlay(
  * spread additional provider-specific fields on top.
  */
 export function buildBaseChatConfig(input: BuildChatModelInput): Record<string, unknown> {
-  const { legacyModel } = input;
+  const modelId = input.entry.modelId;
   const temperature = resolveTemperature(input);
-  const thinking = isThinkingModel(legacyModel);
+  const thinking = isThinkingModel(modelId);
 
   return {
-    modelName: legacyModel.name,
+    modelName: modelId,
     streaming: resolveStreaming(input),
     maxRetries: 3,
     maxConcurrency: 3,
-    enableCors: legacyModel.enableCors,
+    enableCors: resolveEnableCors(input),
     // Match legacy: only attach `temperature` for non-thinking models when
     // a value resolved. Provider-specific overlays may overwrite it.
     ...(!thinking && temperature !== undefined ? { temperature } : {}),

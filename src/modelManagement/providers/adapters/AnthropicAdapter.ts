@@ -27,6 +27,8 @@ import {
   buildProviderSpecificParams,
   isAnthropicAdaptiveThinkingModel,
   isAnthropicThinkingModel,
+  resolveBaseUrl,
+  resolveEnableCors,
   resolveMaxTokens,
 } from "@/modelManagement/providers/adapters/adapterUtils";
 import { safeFetch } from "@/utils";
@@ -39,29 +41,31 @@ export const entryExtraSchema = z.object({}).strict();
 
 /** Build an Anthropic LangChain chat model. */
 export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
-  const { legacyModel, apiKey } = input;
+  const { apiKey } = input;
+  const modelId = input.entry.modelId;
+  const enableCors = resolveEnableCors(input);
 
   const config: Record<string, unknown> = {
     ...buildBaseChatConfig(input),
     anthropicApiKey: apiKey,
-    model: legacyModel.name,
-    anthropicApiUrl: legacyModel.baseUrl,
+    model: modelId,
+    anthropicApiUrl: resolveBaseUrl(input),
     clientOptions: {
       // Required to bypass CORS restrictions in the renderer.
       defaultHeaders: {
         "anthropic-dangerous-direct-browser-access": "true",
       },
-      fetch: legacyModel.enableCors ? safeFetch : undefined,
+      fetch: enableCors ? safeFetch : undefined,
     },
     maxTokens: resolveMaxTokens(input),
-    ...buildProviderSpecificParams(ChatModelProviders.ANTHROPIC, legacyModel),
+    ...buildProviderSpecificParams(ChatModelProviders.ANTHROPIC, input.defaults),
   };
 
-  if (isAnthropicThinkingModel(legacyModel.name)) {
+  if (isAnthropicThinkingModel(modelId)) {
     // Opus 4.7+ defaults `thinking.display` to "omitted" so thinking summaries
     // never reach the UI; force "summarized" for the adaptive branch. Pre-4.7
     // models default to "summarized" server-side and don't need this.
-    config.thinking = isAnthropicAdaptiveThinkingModel(legacyModel.name)
+    config.thinking = isAnthropicAdaptiveThinkingModel(modelId)
       ? { type: "adaptive" as const, display: "summarized" as const }
       : {
           type: "enabled" as const,

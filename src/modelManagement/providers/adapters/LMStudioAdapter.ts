@@ -1,7 +1,7 @@
 /**
  * LM Studio adapter — local OpenAI-compatible server. Uses the bespoke
  * `LMStudioChatModel` (Responses API) by default; users can opt out via
- * `legacyModel.useResponsesApi === false` and fall back to
+ * `entry.extra.useResponsesApi === false` and fall back to
  * `OpenRouterChatModel` (which is the same OpenAI-compatible shape with
  * reasoning extraction).
  *
@@ -16,6 +16,8 @@ import type { BuildChatModelInput } from "@/modelManagement/chatModel/ChatModelF
 import {
   buildBaseChatConfig,
   buildProviderSpecificParams,
+  resolveBaseUrl,
+  resolveEnableCors,
   resolveMaxTokens,
 } from "@/modelManagement/providers/adapters/adapterUtils";
 import { LMStudioChatModel } from "@/modelManagement/providers/clients/LMStudioChatModel";
@@ -34,35 +36,33 @@ export const entryExtraSchema = z
 
 /** Build an LM Studio LangChain chat model. */
 export function buildChatModel(input: BuildChatModelInput): BaseChatModel {
-  const { legacyModel, apiKey } = input;
+  const { apiKey } = input;
+  const modelId = input.entry.modelId;
+  const enableCors = resolveEnableCors(input);
   const config = {
     ...buildBaseChatConfig(input),
-    modelName: legacyModel.name,
+    modelName: modelId,
     apiKey: apiKey || "default-key",
-    streamUsage: legacyModel.streamUsage ?? false,
+    streamUsage: input.defaults.streamUsage ?? false,
     configuration: {
-      baseURL: legacyModel.baseUrl || "http://localhost:1234/v1",
-      fetch: legacyModel.enableCors ? safeFetch : undefined,
+      baseURL: resolveBaseUrl(input) || "http://localhost:1234/v1",
+      fetch: enableCors ? safeFetch : undefined,
     },
     // Pass reasoning hints unconditionally — the SDK ignores them for
     // non-reasoning models, and the previous capability gate added the risk
     // of mis-tagged custom models getting the wrong behavior.
     enableReasoning: true,
-    reasoningEffort: legacyModel.reasoningEffort,
+    reasoningEffort: input.defaults.reasoningEffort,
     maxTokens: resolveMaxTokens(input),
-    ...buildProviderSpecificParams(ChatModelProviders.LM_STUDIO, legacyModel),
+    ...buildProviderSpecificParams(ChatModelProviders.LM_STUDIO, input.defaults),
   };
 
   // Default to Responses-API-aware client for Responses API compatibility.
-  // Opt out by setting `useResponsesApi` to false on the model. Read from
-  // the per-model `entry.extra` first; fall back to the legacy `CustomModel`
-  // field for in-memory lookups that still go through it.
+  // Opt out by setting `useResponsesApi` to false on `entry.extra`.
   const rawUseResponsesApi = input.entry.extra?.useResponsesApi;
-  const entryUseResponsesApi =
-    typeof rawUseResponsesApi === "boolean" ? rawUseResponsesApi : undefined;
-  const useResponsesApi = entryUseResponsesApi ?? legacyModel.useResponsesApi;
+  const useResponsesApi = typeof rawUseResponsesApi === "boolean" ? rawUseResponsesApi : undefined;
   if (useResponsesApi !== false) {
-    logInfo(`[LMStudioAdapter] Using Responses API for LM Studio model: ${legacyModel.name}`);
+    logInfo(`[LMStudioAdapter] Using Responses API for LM Studio model: ${modelId}`);
     return new LMStudioChatModel(config);
   }
   return new OpenRouterChatModel(config);

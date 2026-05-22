@@ -13,33 +13,35 @@
  */
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 
-import type { CustomModel } from "@/aiParams";
 import type { ModelCatalogService } from "@/modelManagement/catalog/ModelCatalogService";
 import { ADAPTERS } from "@/modelManagement/providers/adapters";
 import type { ChatDefaults, ProviderConfig, RegistryEntry } from "@/modelManagement/types";
 
 /**
- * Optional per-call overrides. Today only `ping` uses this to swap
- * `maxTokens` for a cheap connectivity check without rebuilding the
- * whole `BuildChatModelInput`.
+ * Optional per-call overrides. Used by `ping` to swap `maxTokens` for a
+ * cheap connectivity check, force non-streaming, and override the CORS
+ * fetch wrapper for the retry-with-cors fallback path.
  */
 export interface BuildChatModelOverrides {
   /** Override the resolved max-output-tokens budget. */
   maxTokens?: number;
   /** Force streaming off (used by ping which calls `.invoke()` only). */
   forceNonStreaming?: boolean;
+  /**
+   * Override `enableCors` for this call. Used by `ping` to retry through
+   * Obsidian's `requestUrl` wrapper after a CORS-failed attempt.
+   */
+  enableCors?: boolean;
 }
 
 /**
  * Input every adapter's `buildChatModel` receives.
  *
- * `provider`, `entry`, `defaults`, and `catalog` are the new-shape data
- * sources. `legacyModel` is a transitional escape hatch: many per-call
- * fields (per-model temperature/maxTokens/topP overrides, `enableCors`,
- * `capabilities`, Bedrock region, Azure deployment overrides, …) still
- * live on `CustomModel` in M9. They will migrate to `ProviderConfig.extra`
- * / `RegistryEntry` in later tasks; for now adapters consult the legacy
- * model so behavior parity holds.
+ * All per-model overrides live on `entry.extra` (populated by the v0→v2
+ * migration); provider-level config (baseUrl, credentials, OpenAI org id,
+ * Azure deployment defaults, Bedrock region) lives on `provider` and
+ * `provider.extra`. Global per-call knobs (`temperature`, `maxTokens`,
+ * `reasoningEffort`, `verbosity`, `streaming`) flow through `defaults`.
  *
  * `apiKey` is the resolved (decrypted) API key, or `undefined` for
  * providers that don't need one (local Ollama, etc.).
@@ -50,19 +52,6 @@ export interface BuildChatModelInput {
   defaults: ChatDefaults;
   catalog: ModelCatalogService;
   apiKey: string | undefined;
-  /**
-   * Adapter-specific extra secrets the manager resolves alongside the
-   * primary `apiKey`. Currently only OpenAI needs this (organization id);
-   * Task 9 will migrate it to `ProviderConfig.extra` so this slot can
-   * disappear.
-   */
-  extraSecrets?: { openAIOrgId?: string };
-  /**
-   * Transitional: pre-v2 `CustomModel` carrying per-model overrides and
-   * provider-specific fields not yet migrated to `ProviderConfig.extra` /
-   * `RegistryEntry`. Tasks 8 / 9 will eliminate this slot.
-   */
-  legacyModel: CustomModel;
   /** Optional per-call overrides (`maxTokens`, streaming forced off, …). */
   overrides?: BuildChatModelOverrides;
 }
