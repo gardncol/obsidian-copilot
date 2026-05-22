@@ -51,20 +51,23 @@ import type {
   RegistryEntry,
 } from "@/modelManagement/types";
 
-/** Per-model override fields dropped by step 5 — surfaced in the toast. */
+/**
+ * Per-model override fields dropped by step 5 — surfaced in the toast.
+ *
+ * Fields routed into `RegistryEntry.extra` by step 4 are NOT listed here
+ * (see `extractEntryExtra` below). Specifically: `enableCors`, `numCtx`,
+ * `useResponsesApi`, `enablePromptCaching` are preserved when they have a
+ * destination adapter, so they no longer appear as dropped.
+ */
 const DROPPED_PER_MODEL_OVERRIDE_FIELDS = [
   "temperature",
   "maxTokens",
   "topP",
   "frequencyPenalty",
-  "numCtx",
   "reasoningEffort",
   "verbosity",
   "stream",
   "streamUsage",
-  "useResponsesApi",
-  "enablePromptCaching",
-  "enableCors",
   "capabilities",
 ] as const;
 
@@ -312,6 +315,75 @@ interface CustomGroup {
 }
 
 /**
+ * Collect per-model runtime fields off a legacy `CustomModel` into the
+ * shape `RegistryEntry.extra` carries. Routed by the legacy provider id so
+ * preservation matches the field's canonical adapter — e.g. an Ollama
+ * model carries `numCtx`, an OpenRouter model carries `enablePromptCaching`.
+ *
+ * The migration intentionally writes these keys onto every entry that
+ * originates from the matching legacy provider, even when the entry's
+ * resolved adapter (driven by `ProviderConfig.type`) does not currently
+ * read them. Adapters read individual fields off `entry.extra` by name,
+ * so unknown-to-them keys pass through harmlessly while the data stays
+ * preserved for future cleanup tasks.
+ *
+ * Returns `undefined` when no relevant fields are present (so we don't
+ * spray empty `extra: {}` blobs across the registry).
+ */
+function extractEntryExtra(
+  m: Record<string, unknown>,
+  legacyProvider: string
+): Record<string, unknown> | undefined {
+  const extra: Record<string, unknown> = {};
+
+  // Custom / per-model `baseUrl` override (overrides the provider-level
+  // `baseUrl`). Applies to OpenAI-compatible custom endpoints — Ollama,
+  // LM Studio, OpenRouter, OPENAI_FORMAT all flow through this path.
+  const baseUrl = nonEmptyString(m.baseUrl);
+  if (baseUrl) extra.baseUrl = baseUrl;
+
+  // `enableCors`: route through Obsidian's `requestUrl` to bypass renderer
+  // CORS restrictions. Common to all openai-compatible-shaped adapters.
+  if (typeof m.enableCors === "boolean") extra.enableCors = m.enableCors;
+
+  // Ollama-specific: context window length.
+  if (legacyProvider === "ollama" && typeof m.numCtx === "number") {
+    extra.numCtx = m.numCtx;
+  }
+
+  // LM Studio-specific: Responses API opt-out.
+  if (legacyProvider === "lm-studio" && typeof m.useResponsesApi === "boolean") {
+    extra.useResponsesApi = m.useResponsesApi;
+  }
+
+  // OpenRouter-specific: prompt caching toggle.
+  if (legacyProvider === "openrouterai" && typeof m.enablePromptCaching === "boolean") {
+    extra.enablePromptCaching = m.enablePromptCaching;
+  }
+
+  // Bedrock-specific: AWS region override.
+  if (legacyProvider === "amazon-bedrock") {
+    const region = nonEmptyString(m.bedrockRegion);
+    if (region) extra.bedrockRegion = region;
+  }
+
+  // Azure-specific: per-model deployment/instance/version overrides.
+  // Rename keys to drop the `azureOpenAIApi` prefix to match the adapter's
+  // `entryExtraSchema` (azureInstanceName / azureDeploymentName /
+  // azureApiVersion).
+  if (legacyProvider === "azure openai") {
+    const instance = nonEmptyString(m.azureOpenAIApiInstanceName);
+    const deployment = nonEmptyString(m.azureOpenAIApiDeploymentName);
+    const version = nonEmptyString(m.azureOpenAIApiVersion);
+    if (instance) extra.azureInstanceName = instance;
+    if (deployment) extra.azureDeploymentName = deployment;
+    if (version) extra.azureApiVersion = version;
+  }
+
+  return Object.keys(extra).length > 0 ? extra : undefined;
+}
+
+/**
  * Top-level migration entry point. Mutates a deep clone of `raw` and returns
  * the new shape plus the list of dropped field-paths for forensics.
  *
@@ -539,22 +611,26 @@ export function migrateV0toV2(raw: Record<string, unknown>): {
     // so we forward it as-is.
     if (legacyProvider === OPENCODE_BUNDLED_PROVIDER) {
       ensureSystemProvider(OPENCODE_BUNDLED_PROVIDER);
+      const entryExtra = extractEntryExtra(m, legacyProvider);
       registry.push({
         providerId: OPENCODE_BUNDLED_PROVIDER,
         modelId,
         displayName: nonEmptyString(m.displayName) ?? modelId,
         addedAt: now,
+        ...(entryExtra ? { extra: entryExtra } : {}),
       });
       openCodeOverrides[modelId] = true;
       continue;
     }
     if (legacyProvider === COPILOT_PLUS_PROVIDER) {
       ensureSystemProvider(COPILOT_PLUS_PROVIDER);
+      const entryExtra = extractEntryExtra(m, legacyProvider);
       registry.push({
         providerId: COPILOT_PLUS_PROVIDER,
         modelId,
         displayName: nonEmptyString(m.displayName) ?? modelId,
         addedAt: now,
+        ...(entryExtra ? { extra: entryExtra } : {}),
       });
       openCodeOverrides[`copilot-plus/${modelId}`] = true;
       continue;
@@ -567,11 +643,13 @@ export function migrateV0toV2(raw: Record<string, unknown>): {
         droppedFields.push(`activeModels[${modelId}].isBuiltIn-no-key`);
         continue;
       }
+      const entryExtra = extractEntryExtra(m, legacyProvider);
       registry.push({
         providerId: mappedId,
         modelId,
         displayName: nonEmptyString(m.displayName) ?? modelId,
         addedAt: now,
+        ...(entryExtra ? { extra: entryExtra } : {}),
       });
       continue;
     }
@@ -582,11 +660,13 @@ export function migrateV0toV2(raw: Record<string, unknown>): {
     const groupKey = `${legacyProvider}|${baseUrl ?? ""}|${apiKey}`;
     const group = customGroups.get(groupKey);
     if (group) {
+      const entryExtra = extractEntryExtra(m, legacyProvider);
       registry.push({
         providerId: group.providerId,
         modelId,
         displayName: nonEmptyString(m.displayName) ?? modelId,
         addedAt: now,
+        ...(entryExtra ? { extra: entryExtra } : {}),
       });
       continue;
     }
@@ -595,11 +675,13 @@ export function migrateV0toV2(raw: Record<string, unknown>): {
     // (e.g. user added a custom Claude model under their Anthropic key).
     const mappedId = LEGACY_PROVIDER_TO_ID[legacyProvider];
     if (mappedId && providers[mappedId]) {
+      const entryExtra = extractEntryExtra(m, legacyProvider);
       registry.push({
         providerId: mappedId,
         modelId,
         displayName: nonEmptyString(m.displayName) ?? modelId,
         addedAt: now,
+        ...(entryExtra ? { extra: entryExtra } : {}),
       });
       continue;
     }

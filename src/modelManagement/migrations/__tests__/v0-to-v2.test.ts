@@ -546,4 +546,188 @@ describe("v0 → v2 settings migration", () => {
     const s = settings as Record<string, unknown>;
     expect(s.defaultModelRef).toBeNull();
   });
+
+  // ---------------------------------------------------------------------------
+  // Step 4 — per-model `RegistryEntry.extra` population
+  // ---------------------------------------------------------------------------
+
+  it("step 4 — Azure built-in model with per-model deployment overrides → entry.extra", () => {
+    const raw = {
+      azureOpenAIApiKey: "az-key",
+      azureOpenAIApiInstanceName: "providerInst",
+      azureOpenAIApiDeploymentName: "providerDeploy",
+      azureOpenAIApiVersion: "2024-01-01",
+      activeModels: [
+        {
+          name: "azure-model-with-override",
+          provider: "azure openai",
+          isBuiltIn: true,
+          enabled: true,
+          // Per-model deployment override — should land on entry.extra with
+          // the renamed (prefix-stripped) keys.
+          azureOpenAIApiInstanceName: "modelInst",
+          azureOpenAIApiDeploymentName: "modelDeploy",
+          azureOpenAIApiVersion: "2024-09-01",
+        },
+      ],
+      agentMode: { enabled: true, backends: {} },
+    };
+    const { settings } = runModelManagementMigrations(raw);
+    const s = settings as Record<string, unknown>;
+    const registry = s.registry as Array<{
+      providerId: string;
+      modelId: string;
+      extra?: Record<string, unknown>;
+    }>;
+    expect(registry).toHaveLength(1);
+    expect(registry[0].providerId).toBe("azure");
+    expect(registry[0].extra).toEqual({
+      azureInstanceName: "modelInst",
+      azureDeploymentName: "modelDeploy",
+      azureApiVersion: "2024-09-01",
+    });
+  });
+
+  it("step 4 — Bedrock built-in model with per-model bedrockRegion → entry.extra", () => {
+    const raw = {
+      amazonBedrockApiKey: "aws-key",
+      amazonBedrockRegion: "us-east-1",
+      activeModels: [
+        {
+          name: "anthropic.claude-sonnet-4-5",
+          provider: "amazon-bedrock",
+          isBuiltIn: true,
+          enabled: true,
+          bedrockRegion: "us-west-2",
+        },
+      ],
+      agentMode: { enabled: true, backends: {} },
+    };
+    const { settings } = runModelManagementMigrations(raw);
+    const s = settings as Record<string, unknown>;
+    const registry = s.registry as Array<{ extra?: Record<string, unknown> }>;
+    expect(registry).toHaveLength(1);
+    expect(registry[0].extra).toEqual({ bedrockRegion: "us-west-2" });
+  });
+
+  it("step 4 — custom Ollama provider with baseUrl + enableCors + numCtx → entry.extra", () => {
+    const raw = {
+      activeModels: [
+        {
+          name: "llama3.2",
+          provider: "ollama",
+          isBuiltIn: false,
+          enabled: true,
+          baseUrl: "http://localhost:11434",
+          enableCors: true,
+          numCtx: 8192,
+        },
+      ],
+      agentMode: { enabled: true, backends: {} },
+    };
+    const { settings } = runModelManagementMigrations(raw);
+    const s = settings as Record<string, unknown>;
+    const registry = s.registry as Array<{ extra?: Record<string, unknown> }>;
+    expect(registry).toHaveLength(1);
+    expect(registry[0].extra).toEqual({
+      baseUrl: "http://localhost:11434",
+      enableCors: true,
+      numCtx: 8192,
+    });
+  });
+
+  it("step 4 — custom LM Studio provider with useResponsesApi → entry.extra", () => {
+    const raw = {
+      activeModels: [
+        {
+          name: "qwen2.5-7b",
+          provider: "lm-studio",
+          isBuiltIn: false,
+          enabled: true,
+          baseUrl: "http://localhost:1234/v1",
+          useResponsesApi: false,
+        },
+      ],
+      agentMode: { enabled: true, backends: {} },
+    };
+    const { settings } = runModelManagementMigrations(raw);
+    const s = settings as Record<string, unknown>;
+    const registry = s.registry as Array<{ extra?: Record<string, unknown> }>;
+    expect(registry).toHaveLength(1);
+    expect(registry[0].extra).toEqual({
+      baseUrl: "http://localhost:1234/v1",
+      useResponsesApi: false,
+    });
+  });
+
+  it("step 4 — built-in OpenRouter model with enablePromptCaching → entry.extra", () => {
+    const raw = {
+      openRouterAiApiKey: "or-key",
+      activeModels: [
+        {
+          name: "anthropic/claude-sonnet-4-5",
+          provider: "openrouterai",
+          isBuiltIn: true,
+          enabled: true,
+          enablePromptCaching: false,
+        },
+      ],
+      agentMode: { enabled: true, backends: {} },
+    };
+    const { settings } = runModelManagementMigrations(raw);
+    const s = settings as Record<string, unknown>;
+    const registry = s.registry as Array<{ extra?: Record<string, unknown> }>;
+    expect(registry).toHaveLength(1);
+    expect(registry[0].extra).toEqual({ enablePromptCaching: false });
+  });
+
+  it("step 4 — model with no per-model overrides → entry has no `extra` slot", () => {
+    const raw = {
+      anthropicApiKey: "sk-ant",
+      activeModels: [
+        {
+          name: "claude-sonnet-4-5",
+          provider: "anthropic",
+          isBuiltIn: true,
+          enabled: true,
+        },
+      ],
+      agentMode: { enabled: true, backends: {} },
+    };
+    const { settings } = runModelManagementMigrations(raw);
+    const s = settings as Record<string, unknown>;
+    const registry = s.registry as Array<{ extra?: Record<string, unknown> }>;
+    expect(registry).toHaveLength(1);
+    expect(registry[0].extra).toBeUndefined();
+  });
+
+  it("step 4 — enableCors and numCtx are not in droppedFields when routed to extra", () => {
+    const raw = {
+      activeModels: [
+        {
+          name: "llama3.2",
+          provider: "ollama",
+          isBuiltIn: false,
+          enabled: true,
+          baseUrl: "http://localhost:11434",
+          enableCors: true,
+          numCtx: 4096,
+          // These should still be dropped (in the legacy list).
+          temperature: 0.5,
+          maxTokens: 2048,
+        },
+      ],
+      agentMode: { enabled: true, backends: {} },
+    };
+    const { settings } = runModelManagementMigrations(raw);
+    const s = settings as Record<string, unknown>;
+    const crumbs = s._migrationBreadcrumbs as Array<{ droppedFields?: string[] }>;
+    const dropped = crumbs[0]?.droppedFields ?? [];
+    // enableCors and numCtx are routed into extra → NOT in droppedFields.
+    expect(dropped.some((f) => f.includes("enableCors"))).toBe(false);
+    expect(dropped.some((f) => f.includes("numCtx"))).toBe(false);
+    // temperature and maxTokens remain dropped knobs.
+    expect(dropped.some((f) => f.includes("temperature"))).toBe(true);
+    expect(dropped.some((f) => f.includes("maxTokens"))).toBe(true);
+  });
 });
