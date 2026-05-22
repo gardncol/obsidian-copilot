@@ -28,6 +28,16 @@ const AUTOSAVE_DEBOUNCE_MS = 500;
 
 export type PermissionPrompter = (req: PermissionPrompt) => Promise<PermissionDecision>;
 
+/**
+ * A user's last explicit effort pick, recorded as both the canonical value
+ * and the index it occupied in the source model's `effortOptions`. The
+ * picker resolver re-maps this onto any new model's options.
+ */
+export interface EffortPreference {
+  value: string | null;
+  index: number;
+}
+
 // Injected by the barrel so `session/` doesn't have to import
 // `backends/registry` directly (would breach the layer boundary).
 export type DescriptorResolver = (id: BackendId) => BackendDescriptor | undefined;
@@ -73,6 +83,24 @@ export class AgentSessionManager {
   private readonly pendingBackendRestarts = new Map<BackendId, string>();
   private readonly restartingBackends = new Set<BackendId>();
   private readonly preloader: AgentModelPreloader;
+  /**
+   * Per-backend most-recent (model, effort) used in this runtime. Seeds new
+   * sessions on the same backend so the user's last pick carries forward
+   * without persistence — wiped on plugin reload, at which point we fall
+   * back to the backend's catalog-declared default.
+   */
+  private readonly lastSelectionByBackend = new Map<BackendId, ModelSelection>();
+  /**
+   * Most recent effort the user *explicitly* picked, alongside the index it
+   * occupied in that model's `effortOptions`. Survives model swaps —
+   * including swaps through models that don't expose effort at all — so the
+   * intent can be re-resolved against any new model's options (value match,
+   * then same index, clamped to the available range). In-memory only,
+   * wiped on plugin reload to mirror `lastSelectionByBackend`. Set only by
+   * explicit user picks (effort sibling or atomic model+effort commit) —
+   * never by the implicit resolver that runs during a model-only swap.
+   */
+  private userEffortPreference: EffortPreference | null = null;
   /**
    * Per-backend preload status. The chat UI gates its first render on the
    * *active* backend's status; the model picker shows a "Loading…" or
@@ -178,10 +206,10 @@ export class AgentSessionManager {
    * to `settings.agentMode.activeBackend` (the model-picker keeps that in
    * sync with the user's most recently selected default model).
    *
-   * The new session's initial (model, effort) is read from the persisted
-   * default for `backendId` via `getDefaultSelection`. Picker call sites that
-   * want a specific selection on a new backend should call
-   * `persistDefaultSelection` first.
+   * The new session's initial (model, effort) is read from the in-memory
+   * last-used selection for `backendId` via `getLastSelection`. Picker call
+   * sites that want a specific selection on a new backend should call
+   * `rememberLastSelection` first.
    */
   async createSession(backendId?: BackendId): Promise<AgentSession> {
     if (this.disposed) {
@@ -219,7 +247,7 @@ export class AgentSessionManager {
       throw new Error("AgentSessionManager was shut down during session creation");
     }
 
-    const seedSelection = this.getDefaultSelection(resolvedId) ?? undefined;
+    const seedSelection = this.getLastSelection(resolvedId) ?? undefined;
 
     let session: AgentSession;
     if (warm) {
@@ -235,6 +263,7 @@ export class AgentSessionManager {
         backendId: resolvedId,
         initialState: warm.state,
         defaultModelSelection: seedSelection,
+        defaultEffort: seedSelection?.effort ?? null,
         cwd: vaultBasePath,
         getDescriptor: () => this.opts.resolveDescriptor(resolvedId),
       });
@@ -248,6 +277,7 @@ export class AgentSessionManager {
         internalId: uuidv4(),
         backendId: resolvedId,
         defaultModelSelection: seedSelection,
+        defaultEffort: seedSelection?.effort ?? null,
         initialCachedState: this.preloader.getCachedBackendState(resolvedId),
         getDescriptor: () => this.opts.resolveDescriptor(resolvedId),
       });
@@ -270,7 +300,7 @@ export class AgentSessionManager {
       .then(async () => {
         if (descriptor.applyInitialSessionConfig) {
           try {
-            await descriptor.applyInitialSessionConfig(session, getSettings());
+            await descriptor.applyInitialSessionConfig(session);
           } catch (e) {
             logWarn(
               `[AgentMode] applyInitialSessionConfig failed for ${resolvedId}; continuing`,
@@ -313,33 +343,41 @@ export class AgentSessionManager {
     this.notify();
   }
 
-  /** Read the user's sticky model preference for `backendId`, or `null` if none. */
-  getDefaultSelection(backendId: BackendId): ModelSelection | null {
-    const backends = getSettings().agentMode?.backends as
-      | Record<string, { defaultModel?: ModelSelection | null } | undefined>
-      | undefined;
-    return backends?.[backendId]?.defaultModel ?? null;
+  /**
+   * Most recent (model, effort) used on `backendId` in this runtime, or `null`
+   * if no session on that backend has chosen one yet. In-memory only — the
+   * map is wiped on plugin reload, at which point new sessions fall back to
+   * the backend's catalog-declared default.
+   */
+  getLastSelection(backendId: BackendId): ModelSelection | null {
+    return this.lastSelectionByBackend.get(backendId) ?? null;
   }
 
-  /** Persist a sticky model preference for `backendId`. Pass `null` to clear. */
-  async persistDefaultSelection(
-    backendId: BackendId,
-    selection: ModelSelection | null
-  ): Promise<void> {
-    setSettings((cur) => {
-      const existing = (cur.agentMode.backends as Record<string, unknown> | undefined)?.[
-        backendId
-      ] as Record<string, unknown> | undefined;
-      return {
-        agentMode: {
-          ...cur.agentMode,
-          backends: {
-            ...cur.agentMode.backends,
-            [backendId]: { ...(existing ?? {}), defaultModel: selection },
-          },
-        },
-      };
-    });
+  /**
+   * Record `selection` as the most recent pick for `backendId`. Called after
+   * every user-driven model/effort change so the next new session on the
+   * same backend inherits it.
+   */
+  rememberLastSelection(backendId: BackendId, selection: ModelSelection): void {
+    this.lastSelectionByBackend.set(backendId, selection);
+  }
+
+  /**
+   * Read the user's explicit-effort preference, if any. Returned by reference
+   * — callers must not mutate the object.
+   */
+  getUserEffortPreference(): EffortPreference | null {
+    return this.userEffortPreference;
+  }
+
+  /**
+   * Record the user's explicit effort pick + its index in the source model's
+   * `effortOptions`. The picker resolver consults this on model swaps so the
+   * intent carries across models that don't share an effort vocabulary (or
+   * don't expose effort at all).
+   */
+  setUserEffortPreference(value: string | null, index: number): void {
+    this.userEffortPreference = { value, index };
   }
 
   /**
@@ -356,8 +394,9 @@ export class AgentSessionManager {
    * might fire after a session swap.
    *
    * After a successful descriptor apply, the resolved selection is also
-   * written to the persisted default for the active backend — symmetric
-   * with `applyMode`. If the descriptor throws, no persistence occurs.
+   * remembered in memory as the latest pick for the active backend, so the
+   * next new session on the same backend inherits it. If the descriptor
+   * throws, nothing is remembered.
    */
   async applySelection(
     patch: { baseModelId?: string; effort?: string | null },
@@ -374,7 +413,7 @@ export class AgentSessionManager {
       effort: patch.effort !== undefined ? patch.effort : current.effort,
     };
     await descriptor.applySelection(session, resolved);
-    await this.persistDefaultSelection(session.backendId, resolved);
+    this.rememberLastSelection(session.backendId, resolved);
   }
 
   /**
@@ -1050,6 +1089,7 @@ export class AgentSessionManager {
       app: this.app,
       clientVersion: this.plugin.manifest.version,
       descriptor,
+      getSeedSelection: () => this.getLastSelection(backendId),
     });
     const startPromise = (async () => {
       // ACP backends declare `start()` to spawn the subprocess and run the

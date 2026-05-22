@@ -1,9 +1,10 @@
 import { BREVILABS_MODELS_BASE_URL, ChatModelProviders } from "@/constants";
 import { getDecryptedKey } from "@/encryptionService";
-import { logInfo, logWarn } from "@/logger";
+import { logInfo } from "@/logger";
+import { ModelRegistry, ProviderRegistry } from "@/modelManagement";
 import { getSettings } from "@/settings/model";
-import { AcpBackend, AcpSpawnDescriptor } from "@/agentMode/acp/types";
-import type { CopilotMode } from "@/agentMode/session/types";
+import { AcpBackend, AcpSpawnContext, AcpSpawnDescriptor } from "@/agentMode/acp/types";
+import type { CopilotMode, ModelSelection } from "@/agentMode/session/types";
 import {
   buildPillSyntaxDirective,
   buildSkillCreationDirective,
@@ -12,8 +13,12 @@ import {
   getManagedSkills,
   SkillManager,
 } from "@/agentMode/skills";
+import { buildByokOpencodeProviderConfig } from "./byokBridge";
 import { OpencodeBackendDescriptor } from "./descriptor";
+import { PLUS_MODELS } from "./plusModels";
 import { selectCopilotPrompt } from "./prompts";
+
+const BYOK_DIAG = true;
 
 /**
  * Map from Copilot's `ChatModelProviders` enum value (as stored in
@@ -75,7 +80,7 @@ export class OpencodeBackend implements AcpBackend {
   readonly id = "opencode" as const;
   readonly displayName = "opencode";
 
-  async buildSpawnDescriptor(ctx: { vaultBasePath: string }): Promise<AcpSpawnDescriptor> {
+  async buildSpawnDescriptor(ctx: AcpSpawnContext): Promise<AcpSpawnDescriptor> {
     const binaryPath = getSettings().agentMode?.backends?.opencode?.binaryPath;
     if (!binaryPath) {
       throw new Error(
@@ -83,7 +88,7 @@ export class OpencodeBackend implements AcpBackend {
       );
     }
 
-    const config = await buildOpencodeConfig();
+    const config = await buildOpencodeConfig(ctx.seedSelection ?? null);
     const envOverrides = getSettings().agentMode?.backends?.opencode?.envOverrides ?? {};
 
     return {
@@ -103,47 +108,24 @@ export class OpencodeBackend implements AcpBackend {
 /**
  * Build the `OPENCODE_CONFIG_CONTENT` payload from current Copilot settings.
  *
- *   - Per-provider `options.apiKey` is set for any BYOK key configured in
- *     Copilot, decrypted in-process.
- *   - Each enabled `activeModel` whose provider is in `OPENCODE_PROVIDER_MAP`
- *     is registered under `provider.<id>.models.<modelName>` so OpenCode
- *     reports it in `NewSessionResponse.models.availableModels`. Built-in
- *     providers (anthropic, openai, …) carry their own models.dev snapshot
- *     so this is largely additive there; for the custom Copilot Plus
- *     provider — and for OpenRouter models the snapshot doesn't cover —
- *     the registration is what makes the model visible at all. The
- *     Agents-tab catalog modal then curates from opencode's reported
- *     `availableModels`.
+ *   - BYOK providers (`settings.providers`) and their registry models
+ *     (`settings.registry`) are the sole source of `provider.<id>` entries
+ *     — assembled by `buildByokOpencodeProviderConfig` from `byokBridge.ts`.
+ *   - Copilot Plus is registered separately as the system-managed
+ *     `copilot-plus` pseudo-provider: a custom `@ai-sdk/openai-compatible`
+ *     entry pointing at brevilabs and authed via `plusLicenseKey`. It never
+ *     lives in BYOK. The hard-coded `PLUS_MODELS` list is registered under
+ *     its `models` map so opencode lists them in `availableModels`.
  *   - The top-level `model` field carries the user's sticky preference so
  *     a fresh session boots with the right default, even before
  *     `unstable_setSessionModel` is called.
  *
  * Exported for unit tests.
  */
-export async function buildOpencodeConfig(): Promise<Record<string, unknown>> {
+export async function buildOpencodeConfig(
+  seedSelection: ModelSelection | null = null
+): Promise<Record<string, unknown>> {
   const s = getSettings();
-
-  type Mapping = { providerId: string; settingsKey: keyof typeof s };
-  const mappings: Mapping[] = [
-    { providerId: "anthropic", settingsKey: "anthropicApiKey" },
-    { providerId: "openai", settingsKey: "openAIApiKey" },
-    { providerId: "google", settingsKey: "googleApiKey" },
-    { providerId: "groq", settingsKey: "groqApiKey" },
-    { providerId: "mistral", settingsKey: "mistralApiKey" },
-    { providerId: "deepseek", settingsKey: "deepseekApiKey" },
-    { providerId: "openrouter", settingsKey: "openRouterAiApiKey" },
-    { providerId: "xai", settingsKey: "xaiApiKey" },
-  ];
-
-  const decrypted = await Promise.all(
-    mappings.map(async (m) => {
-      const raw = s[m.settingsKey];
-      if (typeof raw !== "string" || !raw) return null;
-      const apiKey = await getDecryptedKey(raw);
-      if (!apiKey) return null;
-      return { providerId: m.providerId, apiKey };
-    })
-  );
 
   type ProviderConfig = {
     npm?: string;
@@ -151,61 +133,53 @@ export async function buildOpencodeConfig(): Promise<Record<string, unknown>> {
     options?: { apiKey?: string; baseURL?: string; headers?: Record<string, string> };
     models?: Record<string, Record<string, unknown>>;
   };
-  const provider: Record<string, ProviderConfig> = {};
-  for (const entry of decrypted) {
-    if (entry) provider[entry.providerId] = { options: { apiKey: entry.apiKey } };
-  }
+  const provider: Record<string, ProviderConfig> = {
+    ...buildByokOpencodeProviderConfig(ProviderRegistry.getInstance(), ModelRegistry.getInstance()),
+  };
 
   // Copilot Plus speaks OpenAI's wire format but isn't a built-in OpenCode
-  // provider. Register it as a custom `@ai-sdk/openai-compatible` entry
-  // pointing at brevilabs and authed via the user's `plusLicenseKey`.
+  // provider, and it never lives in BYOK (system-managed pseudo-provider per
+  // §2.1 of the redesign spec). Register it here when `plusLicenseKey` is
+  // configured, including the hard-coded `PLUS_MODELS` list so opencode
+  // surfaces them in `availableModels` without depending on legacy
+  // `activeModels`.
   if (typeof s.plusLicenseKey === "string" && s.plusLicenseKey) {
     const licenseKey = await getDecryptedKey(s.plusLicenseKey);
     if (licenseKey) {
-      provider[COPILOT_PLUS_PROVIDER_ID] = {
+      const plusEntry: ProviderConfig = {
         npm: "@ai-sdk/openai-compatible",
         name: "Copilot Plus",
         options: { baseURL: BREVILABS_MODELS_BASE_URL, apiKey: licenseKey },
       };
-    }
-  }
-
-  // Register Copilot-configured models under their respective providers so
-  // OpenCode treats them as known when reporting `availableModels`. When the
-  // top-level provider key is absent, fall back to the per-model `apiKey` so
-  // models the user configured with a model-specific key still reach the
-  // agent. Without this fallback any such model would be silently dropped.
-  const injected: string[] = [];
-  for (const model of s.activeModels ?? []) {
-    if (!model.enabled) continue;
-    if (model.isEmbeddingModel) continue;
-    const providerId = OPENCODE_PROVIDER_MAP[model.provider as ChatModelProviders];
-    if (!providerId) continue;
-
-    if (!provider[providerId]) {
-      const perModel = model.apiKey ? await getDecryptedKey(model.apiKey) : null;
-      if (!perModel) {
-        logWarn(
-          `[AgentMode] skipping ${model.provider}/${model.name}: no API key (set the provider key in Copilot settings or on the model itself)`
-        );
-        continue;
+      if (PLUS_MODELS.length > 0) {
+        plusEntry.models = {};
+        for (const m of PLUS_MODELS) plusEntry.models[m.id] = {};
       }
-      provider[providerId] = { options: { apiKey: perModel } };
+      provider[COPILOT_PLUS_PROVIDER_ID] = plusEntry;
     }
-
-    if (!provider[providerId].models) provider[providerId].models = {};
-    provider[providerId].models[model.name] = {};
-    injected.push(`${providerId}/${model.name}`);
   }
 
-  if (injected.length > 0) {
+  if (Object.keys(provider).length === 0) {
     logInfo(
-      `[AgentMode] injected ${injected.length} model(s) into opencode config: ${injected.join(", ")}`
+      "[AgentMode] no providers configured for opencode (BYOK empty, no Copilot Plus license). Add a provider in the BYOK tab to use Agent Mode end-to-end."
     );
-  } else if (Object.keys(provider).length === 0) {
-    logInfo(
-      "[AgentMode] no BYOK keys found; opencode will rely on its own auth. Set provider keys in Copilot settings to use Agent Mode end-to-end."
-    );
+  }
+
+  if (BYOK_DIAG) {
+    logInfo("[BYOK-DIAG] buildOpencodeConfig merged provider slice", {
+      providerIds: Object.keys(provider),
+      perProvider: Object.fromEntries(
+        Object.entries(provider).map(([id, cfg]) => [
+          id,
+          {
+            npm: cfg.npm,
+            hasApiKey: !!cfg.options?.apiKey,
+            baseURL: cfg.options?.baseURL,
+            modelIds: Object.keys(cfg.models ?? {}),
+          },
+        ])
+      ),
+    });
   }
 
   const config: Record<string, unknown> = { provider };
@@ -222,9 +196,7 @@ export async function buildOpencodeConfig(): Promise<Record<string, unknown>> {
   // CLI-coding-agent prompt — wrong domain for an Obsidian vault assistant.
   // opencode's `cfg.agent.<id>` merge is field-wise, so adding `prompt` to
   // the built-in `build` agent leaves its native permissions intact.
-  const basePrompt = selectCopilotPrompt(
-    s.agentMode?.backends?.opencode?.defaultModel?.baseModelId
-  );
+  const basePrompt = selectCopilotPrompt(seedSelection?.baseModelId);
   // Append the spawn-time skill-creation directive so agent-authored skills
   // land in the canonical managed folder instead of `.opencode/skills/`.
   // Folder is read live from settings on each spawn — see the Skills
@@ -246,15 +218,16 @@ export async function buildOpencodeConfig(): Promise<Record<string, unknown>> {
     },
   };
 
-  // Apply sticky model preference at spawn so the very first turn (before
-  // `unstable_setSessionModel` lands) uses the user's pick. The persisted
-  // shape is `{ baseModelId, effort }` where `baseModelId` is opencode's
-  // `<provider>/<model>` form — append the effort suffix when present.
-  const defaultModel = s.agentMode?.backends?.opencode?.defaultModel;
-  if (defaultModel?.baseModelId) {
-    config.model = defaultModel.effort
-      ? `${defaultModel.baseModelId}/${defaultModel.effort}`
-      : defaultModel.baseModelId;
+  // Apply the seed (model, effort) at spawn so the very first turn (before
+  // `unstable_setSessionModel` lands) uses the user's pick. The seed comes
+  // from `AgentSessionManager.getLastSelection(backendId)` via the spawn
+  // ctx; `null` here means the user hasn't picked a model on this backend
+  // yet, so we leave `config.model` unset and let opencode fall back to
+  // its own catalog default.
+  if (seedSelection?.baseModelId) {
+    config.model = seedSelection.effort
+      ? `${seedSelection.baseModelId}/${seedSelection.effort}`
+      : seedSelection.baseModelId;
   }
 
   // Always spawn in canonical `default` (ask-before-write `copilot-build`).

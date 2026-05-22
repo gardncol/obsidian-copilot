@@ -1,29 +1,49 @@
-import {
-  ChatModelProviders,
-  ChatModels,
-  ProviderSettingsKeyMap,
-  SettingKeyProviders,
-} from "@/constants";
+import { ChatModelProviders, ChatModels, SettingKeyProviders } from "@/constants";
+import { getProviderApiKeySync } from "@/modelManagement";
 import { getSettings } from "@/settings/model";
 import { CustomModel } from "@/aiParams";
 
 /**
- * Get API key for a provider, with model-specific key taking precedence over global settings.
+ * Map `SettingKeyProviders` (legacy `ChatModelProviders` enum string values)
+ * to canonical `ProviderRegistry` provider ids. Copilot-Plus and GitHub
+ * Copilot are handled inline below — neither is a BYOK credential.
+ */
+const SETTING_PROVIDER_TO_REGISTRY_ID: Partial<Record<SettingKeyProviders, string>> = {
+  [ChatModelProviders.OPENAI]: "openai",
+  [ChatModelProviders.ANTHROPIC]: "anthropic",
+  [ChatModelProviders.AZURE_OPENAI]: "azure",
+  [ChatModelProviders.GOOGLE]: "google",
+  [ChatModelProviders.GROQ]: "groq",
+  [ChatModelProviders.OPENROUTERAI]: "openrouter",
+  [ChatModelProviders.COHEREAI]: "cohere",
+  [ChatModelProviders.XAI]: "xai",
+  [ChatModelProviders.MISTRAL]: "mistral",
+  [ChatModelProviders.DEEPSEEK]: "deepseek",
+  [ChatModelProviders.AMAZON_BEDROCK]: "amazon-bedrock",
+  [ChatModelProviders.SILICONFLOW]: "siliconflow",
+};
+
+/**
+ * Get API key for a provider, with model-specific key taking precedence over
+ * `ProviderRegistry`. Post-M9 source of truth is `settings.providers[id]`;
+ * Copilot-Plus and GitHub Copilot read from their dedicated settings fields.
  *
  * @param provider - The provider to get the API key for
- * @param model - Optional model instance; if provided and has apiKey, it will be used instead of global key
- * @returns The API key (model-specific if available, otherwise global provider key, or empty string)
- *
- * @example
- * // Get global API key for OpenAI
- * const globalKey = getApiKeyForProvider(ChatModelProviders.OPENAI);
- *
- * // Get model-specific key (falls back to global if model.apiKey is empty)
- * const modelKey = getApiKeyForProvider(ChatModelProviders.OPENAI, customModel);
+ * @param model - Optional model instance; if provided and has apiKey, it will be used instead of the registry value
+ * @returns The API key (model-specific if available, otherwise the registry value, or empty string)
  */
 export function getApiKeyForProvider(provider: SettingKeyProviders, model?: CustomModel): string {
-  const settings = getSettings();
-  return model?.apiKey || (settings[ProviderSettingsKeyMap[provider]] as string | undefined) || "";
+  if (model?.apiKey) return model.apiKey;
+  if (provider === ChatModelProviders.COPILOT_PLUS) {
+    return getSettings().plusLicenseKey ?? "";
+  }
+  if (provider === ChatModelProviders.GITHUB_COPILOT) {
+    const settings = getSettings();
+    return settings.githubCopilotToken || settings.githubCopilotAccessToken || "";
+  }
+  const registryId = SETTING_PROVIDER_TO_REGISTRY_ID[provider];
+  if (!registryId) return "";
+  return getProviderApiKeySync(registryId) ?? "";
 }
 
 /**

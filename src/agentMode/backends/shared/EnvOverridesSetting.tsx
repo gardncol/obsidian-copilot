@@ -115,11 +115,17 @@ export const EnvOverridesSetting: React.FC<Props> = ({
 
   return (
     <div className="tw-flex tw-flex-col tw-gap-2 tw-py-4">
-      <div className="tw-flex tw-flex-col tw-gap-1">
-        <div className="tw-text-sm tw-font-medium tw-leading-none">Environment variables</div>
-        <div className="tw-text-xs tw-text-muted">
-          Set values for {backendDisplayName}, like <code>{hintA}</code> or <code>{hintB}</code>.
+      <div className="tw-flex tw-items-center tw-justify-between tw-gap-2">
+        <div className="tw-flex tw-flex-col tw-gap-1">
+          <div className="tw-text-sm tw-font-medium tw-leading-none">Environment variables</div>
+          <div className="tw-text-xs tw-text-muted">
+            Set values for {backendDisplayName}, like <code>{hintA}</code> or <code>{hintB}</code>.
+          </div>
         </div>
+        <Button variant="secondary" onClick={addRow}>
+          <Plus className="tw-size-icon-xs" />
+          Add variable
+        </Button>
       </div>
       <div className="tw-flex tw-w-full tw-flex-col tw-gap-2">
         {rows.map((row) => {
@@ -167,12 +173,6 @@ export const EnvOverridesSetting: React.FC<Props> = ({
             </div>
           );
         })}
-        <div className="tw-flex tw-justify-end">
-          <Button variant="secondary" size="sm" onClick={addRow}>
-            <Plus className="tw-size-icon-xs" />
-            Add variable
-          </Button>
-        </div>
       </div>
     </div>
   );

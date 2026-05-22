@@ -8,6 +8,17 @@ interface TabContextType {
 
 const TabContext = createContext<TabContextType | undefined>(undefined);
 
+/**
+ * Optional accessor for the tab context — returns `undefined` rather than
+ * throwing when there's no `TabProvider` in the tree. Use when a component
+ * may be rendered in tests or contexts outside the settings shell (e.g.
+ * model-management dialogs that should still mount under jsdom without a
+ * provider wrapper).
+ */
+export const useTabOptional = (): TabContextType | undefined => {
+  return useContext(TabContext);
+};
+
 export const TabProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [selectedTab, setSelectedTab] = useState("basic");
   // Compute the modal container lazily once; activeDocument is stable at provider

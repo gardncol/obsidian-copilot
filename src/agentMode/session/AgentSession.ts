@@ -142,6 +142,13 @@ export interface AgentSessionStartOptions {
    */
   initialCachedState?: BackendState | null;
   /**
+   * Effort half of the seed (model, effort) selection. Stored on the
+   * session so `descriptor.applyInitialSessionConfig` can read it back
+   * without reaching into settings (which no longer carry per-backend
+   * defaults).
+   */
+  defaultEffort?: string | null;
+  /**
    * Optional descriptor accessor. The session uses it to resolve mode mappings
    * without coupling to specific backends. Manager-supplied; tests omit it.
    */
@@ -165,6 +172,8 @@ export interface AgentSessionStateOptions {
    * seed on failure.
    */
   defaultModelSelection?: ModelSelection;
+  /** Effort half of the seed selection. See `AgentSessionStartOptions.defaultEffort`. */
+  defaultEffort?: string | null;
   cwd?: string | null;
   getDescriptor?: () => BackendDescriptor | undefined;
 }
@@ -215,6 +224,13 @@ export class AgentSession {
    * `setSession*` responses.
    */
   private currentState: BackendState | null = null;
+  /**
+   * Effort the session was seeded with at construction. Replayed once by
+   * `descriptor.applyInitialSessionConfig` after the backend reports a
+   * model catalog. Null when no seed was supplied (fresh runtime, first
+   * session on this backend).
+   */
+  private defaultEffort: string | null = null;
   private label: string | null = null;
   // Tracks who set the current label so an agent-pushed `session_info_update`
   // can't clobber a label the user explicitly chose via Rename.
@@ -274,6 +290,7 @@ export class AgentSession {
       this.backendSessionId = opts.backendSessionId;
       const originalState = opts.initialState ?? null;
       this.currentState = seedSelectionIntoState(originalState, opts.defaultModelSelection);
+      this.defaultEffort = opts.defaultEffort ?? null;
       this.unregisterSessionHandler = this.backend.registerSessionHandler(
         opts.backendSessionId,
         (event) => this.handleSessionEvent(event)
@@ -296,6 +313,7 @@ export class AgentSession {
         opts.initialCachedState ?? null,
         opts.defaultModelSelection
       );
+      this.defaultEffort = opts.defaultEffort ?? null;
       this.ready = this.initialize(opts);
     }
   }
@@ -313,6 +331,16 @@ export class AgentSession {
   /** The backend session id, or null while still starting. */
   getBackendSessionId(): SessionId | null {
     return this.backendSessionId;
+  }
+
+  /**
+   * Effort the session was seeded with. Consumed by
+   * `descriptor.applyInitialSessionConfig` so descriptor-style backends can
+   * replay it once their model catalog reports an effort dimension. Null
+   * when the session was seeded without an effort preference.
+   */
+  getDefaultEffort(): string | null {
+    return this.defaultEffort;
   }
 
   private async initialize(opts: AgentSessionStartOptions): Promise<void> {

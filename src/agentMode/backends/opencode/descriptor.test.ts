@@ -6,6 +6,28 @@ jest.mock("@/logger", () => ({
   logError: jest.fn(),
 }));
 
+const registeredProviderIds = new Set<string>();
+const registeredModelKeys = new Set<string>();
+
+jest.mock("@/modelManagement", () => ({
+  ProviderRegistry: {
+    getInstance: () => ({
+      get: (id: string) => (registeredProviderIds.has(id) ? { id } : undefined),
+    }),
+  },
+  ModelRegistry: {
+    getInstance: () => ({
+      get: (providerId: string, modelId: string) =>
+        registeredModelKeys.has(`${providerId}|${modelId}`) ? { providerId, modelId } : undefined,
+    }),
+  },
+}));
+
+beforeEach(() => {
+  registeredProviderIds.clear();
+  registeredModelKeys.clear();
+});
+
 describe("OpencodeBackendDescriptor.wire.decode", () => {
   const decode = OpencodeBackendDescriptor.wire.decode;
 
@@ -134,18 +156,59 @@ describe("OpencodeBackendDescriptor.isModelEnabledByDefault", () => {
   const fn = OpencodeBackendDescriptor.isModelEnabledByDefault!;
 
   it("matches 'Big Pickle' in name", () => {
-    expect(fn({ modelId: "anthropic/foo", name: "Big Pickle" })).toBe(true);
-    expect(fn({ modelId: "anthropic/foo", name: "BIG PICKLE" })).toBe(true);
-    expect(fn({ modelId: "anthropic/foo", name: "big-pickle" })).toBe(true);
+    expect(fn({ modelId: "bigpickle/foo", name: "Big Pickle" })).toBe(true);
+    expect(fn({ modelId: "bigpickle/foo", name: "BIG PICKLE" })).toBe(true);
+    expect(fn({ modelId: "bigpickle/foo", name: "big-pickle" })).toBe(true);
   });
 
   it("matches 'big-pickle' in modelId", () => {
-    expect(fn({ modelId: "openai/big-pickle", name: "Some Display" })).toBe(true);
-    expect(fn({ modelId: "openai/big_pickle", name: "Some Display" })).toBe(true);
+    expect(fn({ modelId: "bigpickle/big-pickle", name: "Some Display" })).toBe(true);
+    expect(fn({ modelId: "bigpickle/big_pickle", name: "Some Display" })).toBe(true);
   });
 
-  it("returns false for unrelated models", () => {
+  it("returns false for non-BYOK, non-Big-Pickle models", () => {
+    // No providers registered in BYOK → unrelated models stay opt-in.
     expect(fn({ modelId: "anthropic/claude-sonnet-4-5", name: "Claude Sonnet 4.5" })).toBe(false);
     expect(fn({ modelId: "openai/gpt-5", name: "GPT-5" })).toBe(false);
+  });
+
+  it("default-enables models whose (providerId, modelId) is in ModelRegistry", () => {
+    registeredProviderIds.add("openrouter");
+    registeredProviderIds.add("custom:abc-uuid");
+    registeredModelKeys.add("openrouter|anthropic/claude-sonnet-4.5");
+    registeredModelKeys.add("custom:abc-uuid|llama-3.3");
+    expect(
+      fn({ modelId: "openrouter/anthropic/claude-sonnet-4.5", name: "Claude Sonnet 4.5" })
+    ).toBe(true);
+    expect(fn({ modelId: "custom:abc-uuid/llama-3.3", name: "Llama 3.3" })).toBe(true);
+    // Other providers without a BYOK entry remain opt-in.
+    expect(fn({ modelId: "groq/llama-3.1-70b", name: "Llama 3.1 70B" })).toBe(false);
+  });
+
+  it("does NOT default-enable models from a BYOK provider when the modelId isn't in ModelRegistry", () => {
+    // Real scenario: user registered OpenRouter but only picked 2 models.
+    // OpenCode's bundled snapshot reports the other ~50 openrouter rows.
+    // Those must stay opt-in even though the provider is registered.
+    registeredProviderIds.add("openrouter");
+    registeredModelKeys.add("openrouter|moonshotai/kimi-k2-thinking");
+    expect(
+      fn({
+        modelId: "openrouter/moonshotai/kimi-k2-thinking",
+        name: "Kimi K2 Thinking",
+      })
+    ).toBe(true);
+    expect(fn({ modelId: "openrouter/google/gemini-2.5-pro", name: "Gemini 2.5 Pro" })).toBe(false);
+  });
+
+  it("does not default-enable copilot-plus rows (system provider, not BYOK)", () => {
+    // Plus rows flow through the OpenCode picker but are NOT BYOK; they
+    // should stay subject to the Big Pickle regex / explicit user toggle.
+    expect(fn({ modelId: "copilot-plus/copilot-plus-flash", name: "Plus Flash" })).toBe(false);
+  });
+
+  it("does not default-enable single-segment modelIds (no provider segment to look up)", () => {
+    registeredProviderIds.add("anthropic");
+    registeredModelKeys.add("anthropic|"); // even if registry happened to contain it, no slash → no match
+    expect(fn({ modelId: "anthropic", name: "Anthropic" })).toBe(false);
   });
 });

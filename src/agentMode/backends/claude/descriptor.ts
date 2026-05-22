@@ -194,7 +194,7 @@ export const ClaudeBackendDescriptor: BackendDescriptor = {
       getEnableThinking: () => Boolean(getSettings().agentMode?.backends?.claude?.enableThinking),
       getEnvOverrides: () => getSettings().agentMode?.backends?.claude?.envOverrides,
       isPlanModePlanFilePath: isClaudePlanModePlanFilePath,
-      getDefaultModelId: () => getSettings().agentMode?.backends?.claude?.defaultModel?.baseModelId,
+      getDefaultModelId: () => args.getSeedSelection?.()?.baseModelId,
       // Spawn-time skill-creation directive: read the current
       // `agentMode.skills.folder` so the directive templates the live value
       // on every new session. See the Skills Management spec.
@@ -232,17 +232,20 @@ export const ClaudeBackendDescriptor: BackendDescriptor = {
   },
 
   /**
-   * Replay the persisted effort on a freshly created session. The Claude
-   * SDK adapter probes the model catalog asynchronously, so the effort
+   * Replay the seed effort on a freshly created session. The Claude SDK
+   * adapter probes the model catalog asynchronously, so the effort
    * `SessionConfigOption` may not be present yet when this runs;
-   * `replayPersistedEffort` subscribes to the session and applies once the
-   * option arrives (with a timeout guard to avoid leaking listeners on
-   * agents that never report effort). Mode is never persisted — the
+   * `replayPersistedEffort` subscribes to the session and applies once
+   * the option arrives (with a timeout guard to avoid leaking listeners
+   * on agents that never report effort). Mode is never persisted — the
    * Claude SDK's natural starting mode is already canonical `default`.
+   *
+   * The seed effort is read off `AgentSession.getDefaultEffort()`, populated
+   * by the manager from its in-memory `lastSelectionByBackend` cache.
    */
-  async applyInitialSessionConfig(session: AgentSession, settings: CopilotSettings): Promise<void> {
-    const persistedEffort = settings.agentMode?.backends?.claude?.defaultModel?.effort ?? null;
-    await replayPersistedEffort(session, persistedEffort ?? undefined);
+  async applyInitialSessionConfig(session: AgentSession): Promise<void> {
+    const seedEffort = session.getDefaultEffort();
+    await replayPersistedEffort(session, seedEffort ?? undefined);
   },
 };
 

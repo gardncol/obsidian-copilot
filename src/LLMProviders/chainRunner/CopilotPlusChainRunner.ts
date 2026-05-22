@@ -4,7 +4,6 @@ import {
   COMPOSER_OUTPUT_INSTRUCTIONS,
   LOADING_MESSAGES,
   MAX_CHARS_FOR_LOCAL_SEARCH_CONTEXT,
-  ModelCapability,
 } from "@/constants";
 import { LayerToMessagesConverter } from "@/context/LayerToMessagesConverter";
 import {
@@ -559,17 +558,6 @@ Include your extracted terms as: [SALIENT_TERMS: term1, term2, term3]`;
     return messageContent;
   }
 
-  protected hasCapability(model: BaseChatModel, capability: ModelCapability): boolean {
-    const modelWithName = model as BaseChatModel & { modelName?: string; model?: string };
-    const modelName: string = modelWithName.modelName || modelWithName.model || "";
-    const customModel = this.chainManager.chatModelManager.findModelByName(modelName);
-    return customModel?.capabilities?.includes(capability) ?? false;
-  }
-
-  protected isMultimodalModel(model: BaseChatModel): boolean {
-    return this.hasCapability(model, ModelCapability.VISION);
-  }
-
   /**
    * If userMessage.message contains '@composer', append COMPOSER_OUTPUT_INSTRUCTIONS to the text content.
    * Handles both string and MessageContent[] types.
@@ -596,7 +584,6 @@ Include your extracted terms as: [SALIENT_TERMS: term1, term2, term3]`;
 
     // Get chat model
     const chatModel = this.chainManager.chatModelManager.getChatModel();
-    const isMultimodalCurrent = this.isMultimodalModel(chatModel);
 
     // Create messages array
     const messages: { role: string; content: string | MessageContent[] }[] = [];
@@ -691,10 +678,12 @@ Include your extracted terms as: [SALIENT_TERMS: term1, term2, term3]`;
         }
       }
 
-      // Build message content with text and images for multimodal models
-      const content: string | MessageContent[] = isMultimodalCurrent
-        ? await this.buildMessageContent(finalUserContent, userMessage)
-        : finalUserContent;
+      // Always forward image content. If the model can't handle images, the
+      // provider's error surfaces to the user via the standard error path.
+      const content: string | MessageContent[] = await this.buildMessageContent(
+        finalUserContent,
+        userMessage
+      );
 
       messages.push({
         role: "user",
@@ -750,12 +739,9 @@ Include your extracted terms as: [SALIENT_TERMS: term1, term2, term3]`;
   ): Promise<string> {
     const { updateLoadingMessage } = options;
 
-    // Check if the current model has reasoning capability
-    const chatModel = this.chainManager.chatModelManager.getChatModel();
-    const hasReasoning = this.hasCapability(chatModel, ModelCapability.REASONING);
-    const excludeThinking = !hasReasoning;
-
-    const thinkStreamer = new ThinkBlockStreamer(updateCurrentAiMessage, excludeThinking);
+    // Always render thinking content if the model returns it. Non-thinking models
+    // simply don't produce thinking sections, so this is a no-op for them.
+    const thinkStreamer = new ThinkBlockStreamer(updateCurrentAiMessage);
     let sources: { title: string; path: string; score: number; explanation?: unknown }[] = [];
 
     const isPlusUser = await checkIsPlusUser({

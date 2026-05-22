@@ -1,5 +1,5 @@
 import { getSettings } from "@/settings/model";
-import { AcpBackend, AcpSpawnDescriptor } from "@/agentMode/acp/types";
+import { AcpBackend, AcpSpawnContext, AcpSpawnDescriptor } from "@/agentMode/acp/types";
 import { buildSimpleSpawnDescriptor } from "@/agentMode/backends/shared/simpleBinaryBackend";
 import {
   buildPillSyntaxDirective,
@@ -21,7 +21,7 @@ export class CodexBackend implements AcpBackend {
   readonly id = "codex" as const;
   readonly displayName = "Codex";
 
-  async buildSpawnDescriptor(_ctx: { vaultBasePath: string }): Promise<AcpSpawnDescriptor> {
+  async buildSpawnDescriptor(_ctx: AcpSpawnContext): Promise<AcpSpawnDescriptor> {
     const descriptor = buildSimpleSpawnDescriptor(
       getSettings().agentMode?.backends?.codex?.binaryPath,
       "Codex binary path not configured. Open Agent Mode settings and set the path to codex-acp.",

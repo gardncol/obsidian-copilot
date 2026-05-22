@@ -1,14 +1,14 @@
 import { ChatOpenAI } from "@langchain/openai";
 
 /**
- * ChatLMStudio extends ChatOpenAI with the Responses API (/v1/responses)
+ * LMStudioChatModel extends ChatOpenAI with the Responses API (/v1/responses)
  * for LM Studio local inference.
  *
  * Patches LangChain/OpenAI SDK compatibility issues with LM Studio:
  * - Ensures text.format is always set (LM Studio requires it)
  * - Removes strict:null from tool definitions (LM Studio rejects it)
  */
-export interface ChatLMStudioInput {
+export interface LMStudioChatModelInput {
   modelName?: string;
   apiKey?: string;
   configuration?: Record<string, unknown>;
@@ -61,8 +61,8 @@ function createLMStudioFetch(baseFetch?: typeof window.fetch): typeof window.fet
   };
 }
 
-export class ChatLMStudio extends ChatOpenAI {
-  constructor(fields: ChatLMStudioInput) {
+export class LMStudioChatModel extends ChatOpenAI {
+  constructor(fields: LMStudioChatModelInput) {
     const configuration = fields.configuration as { fetch?: typeof window.fetch } | undefined;
     const originalFetch = configuration?.fetch;
 

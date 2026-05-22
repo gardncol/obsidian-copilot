@@ -370,10 +370,7 @@ describe("loadSettingsWithKeychain", () => {
         // Legacy fields intentionally absent — that is the bug scenario.
       };
 
-      await mod.loadSettingsWithKeychain(
-        raw,
-        jest.fn().mockResolvedValue(undefined)
-      );
+      await mod.loadSettingsWithKeychain(raw, jest.fn().mockResolvedValue(undefined));
 
       // Reason: the keychain backfill should have set the vault id before
       // any read so we hit the right namespace.
@@ -434,7 +431,7 @@ describe("loadSettingsWithKeychain", () => {
       // The hydrateFromKeychain path still runs (normal keychain-only load),
       // but the pre-migration getSecret loop should not have probed any of
       // the legacy field names.
-      const probedKeys = (keychain.getSecret).mock.calls.map((c) => c[0] as string);
+      const probedKeys = keychain.getSecret.mock.calls.map((c) => c[0] as string);
       expect(probedKeys).not.toContain("openAIApiKey");
       expect(probedKeys).not.toContain("anthropicApiKey");
     });

@@ -1,0 +1,19 @@
+{
+  "activeModels": [
+    {
+      "name": "llama3.2",
+      "provider": "ollama",
+      "isBuiltIn": false,
+      "enabled": true,
+      "baseUrl": "http://localhost:11434"
+    },
+    {
+      "name": "qwen2.5-coder",
+      "provider": "ollama",
+      "isBuiltIn": false,
+      "enabled": true,
+      "baseUrl": "http://localhost:11434"
+    }
+  ],
+  "agentMode": { "enabled": true, "backends": {} }
+}

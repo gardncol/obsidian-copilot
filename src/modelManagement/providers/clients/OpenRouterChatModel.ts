@@ -11,7 +11,7 @@ type OpenRouterUsage = NonNullable<OpenRouterChatChunk["usage"]>;
 type OpenRouterMessageParam = OpenAI.ChatCompletionMessageParam;
 
 /**
- * ChatOpenRouter extends ChatOpenAI to support OpenRouter-specific features,
+ * OpenRouterChatModel extends ChatOpenAI to support OpenRouter-specific features,
  * particularly reasoning/thinking tokens.
  *
  * OpenRouter exposes thinking tokens via the `reasoning` request parameter
@@ -19,7 +19,7 @@ type OpenRouterMessageParam = OpenAI.ChatCompletionMessageParam;
  *
  * @see https://openrouter.ai/docs/use-cases/reasoning-tokens
  */
-export interface ChatOpenRouterInput extends BaseChatModelParams {
+export interface OpenRouterChatModelInput extends BaseChatModelParams {
   /**
    * Enable reasoning/thinking tokens from OpenRouter
    * When true, requests will include reasoning parameters
@@ -60,7 +60,7 @@ export interface ChatOpenRouterInput extends BaseChatModelParams {
   [key: string]: unknown;
 }
 
-export class ChatOpenRouter extends ChatOpenAI {
+export class OpenRouterChatModel extends ChatOpenAI {
   private enableReasoning: boolean;
   private reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
   private enablePromptCaching: boolean;
@@ -68,7 +68,7 @@ export class ChatOpenRouter extends ChatOpenAI {
   /** True when the configured baseURL belongs to the OpenRouter gateway. */
   private isOpenRouter: boolean;
 
-  constructor(fields: ChatOpenRouterInput) {
+  constructor(fields: OpenRouterChatModelInput) {
     const {
       enableReasoning = false,
       reasoningEffort,

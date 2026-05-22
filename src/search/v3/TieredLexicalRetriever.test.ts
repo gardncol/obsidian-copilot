@@ -28,7 +28,7 @@ jest.mock("./SearchCore", () => ({
     retrieve: retrieveMock,
   })),
 }));
-jest.mock("@/LLMProviders/chatModelManager");
+jest.mock("@/LLMProviders/ChatModelManager");
 jest.mock("@/utils", () => ({
   extractNoteFiles: jest.fn().mockReturnValue([]),
 }));

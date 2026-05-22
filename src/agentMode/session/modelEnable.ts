@@ -5,6 +5,13 @@ import { getSettings, updateAgentModeBackendFields, type CopilotSettings } from 
 /**
  * User overrides win; absent overrides fall through to the descriptor's
  * default policy; absent policy = default-enabled.
+ *
+ * Override keys are the bare `baseModelId` (e.g. `anthropic/claude-sonnet-4-5`,
+ * `bigpickle/big-pickle`, `claude-3-5-sonnet-20241022`). The per-backend
+ * scoping comes from the storage path
+ * (`agentMode.backends.<id>.modelEnabledOverrides`); the key never repeats
+ * the backend id or any other prefix. Settings panels MUST write the same
+ * shape or their toggles won't take effect.
  */
 export function isAgentModelEnabled(
   descriptor: BackendDescriptor,

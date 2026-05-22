@@ -311,6 +311,77 @@ export default [
     },
   },
 
+  // Module boundary: everything in `src/modelManagement/` is private except
+  // `index.ts`. Outside callers (settings UI, agent backends, chat view, …)
+  // MUST import via `@/modelManagement`. Internal cross-references inside
+  // the module use `@/modelManagement/<subpath>` and are NOT restricted by
+  // this rule because the `target` patterns exclude the module itself.
+  //
+  // The `from` zone covers everything under `src/modelManagement/**`; the
+  // `except` carve-out re-allows the single public entry point `index.ts`.
+  // This is the pattern the rule's docs recommend for "one public file per
+  // module" boundaries (the bare `!(index.ts)` extglob only matches direct
+  // children, not nested files, so a glob+except combo is required for
+  // multi-level modules).
+  //
+  // The `import` plugin is already registered globally by
+  // eslint-plugin-obsidianmd's recommended config — we just enable the
+  // specific rule here. Resolver settings are inherited from the boundaries
+  // block above (typescript + node).
+  //
+  // See: designdocs/MODEL_MANAGEMENT_REDESIGN_TECH_SPEC.md §3.0.
+  {
+    files: ["src/**/*.{ts,tsx,js,jsx}"],
+    ignores: ["src/modelManagement/**"],
+    rules: {
+      "import/no-restricted-paths": [
+        "error",
+        {
+          zones: [
+            {
+              target: "./src/**",
+              from: "./src/modelManagement/**",
+              // eslint-plugin-import resolves `from` against the project
+              // basePath but treats glob `except` patterns as-is, against
+              // the absolute import path. Use a `**` prefix so the rule's
+              // minimatch picks up the resolved absolute file path.
+              except: [
+                "**/src/modelManagement/index.*",
+                // Concrete LangChain `BaseChatModel` client classes (Bedrock,
+                // LM Studio, OpenRouter) are imported directly by
+                // `src/LLMProviders/ChatModelManager.ts`, which is itself
+                // legacy and will be replaced by `ChatModelFactory` in M9.
+                // Carving out the `clients/*` files keeps the boundary intact
+                // for all new code while not blocking the legacy manager
+                // during the transition. See:
+                // designdocs/MODEL_MANAGEMENT_REDESIGN_TECH_SPEC.md §3.4.
+                "**/src/modelManagement/providers/clients/*",
+                // `ChatModelFactory` and the `AzureAdapter.normalizeAzureUrl`
+                // helper are imported directly by
+                // `src/LLMProviders/ChatModelManager.ts`. We deliberately
+                // keep them OUT of the module barrel so test suites that
+                // only need the catalog / registry / migration surface
+                // aren't forced to mock every LangChain dependency. See M9
+                // in designdocs/MODEL_MANAGEMENT_REDESIGN_TECH_SPEC.md §3.4.
+                "**/src/modelManagement/chatModel/ChatModelFactory*",
+                "**/src/modelManagement/providers/adapters/AzureAdapter*",
+                // Provider-specific id helpers (`isOpenAIGPT5`, etc.) live
+                // beside the adapters per the Task 8 refactor — they replaced
+                // the legacy `getModelInfo` patterns in `src/utils.ts`. The
+                // legacy `ChatModelManager.ts` / `chainManager.ts` still need
+                // them until M9 deletes those files; the carve-out keeps the
+                // boundary intact for everything else.
+                "**/src/modelManagement/providers/adapters/adapterUtils*",
+              ],
+              message:
+                "Import model management code via @/modelManagement (the module's public API), not from internal files. See designdocs/MODEL_MANAGEMENT_REDESIGN_TECH_SPEC.md §3.0.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   // Only acp/ may import `@agentclientprotocol/sdk`. Tests are exempted via
   // the test block; acp/ itself is exempted below.
   {

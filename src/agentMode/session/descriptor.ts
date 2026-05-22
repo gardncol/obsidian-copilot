@@ -92,6 +92,15 @@ export interface BackendDescriptor {
     app: App;
     clientVersion: string;
     descriptor: BackendDescriptor;
+    /**
+     * Latest in-memory (model, effort) selection for this backend, computed
+     * lazily so spawn-time consumers (e.g. OpenCode's `config.model`) and
+     * per-session seeders (Claude SDK's `newSession`) read it on demand
+     * rather than at registration time. Returns `null` when no session on
+     * this backend has chosen a model yet — backends should fall back to
+     * their catalog-declared default.
+     */
+    getSeedSelection?: () => ModelSelection | null;
   }): BackendProcess;
 
   /** Optional: backend-specific settings panel. Rendered inside the Agent Mode tab. */
@@ -139,10 +148,12 @@ export interface BackendDescriptor {
   ): ModeMapping | null;
 
   /**
-   * Optional: replay persisted state on a freshly created session. Runs
-   * once after `createSession` resolves.
+   * Optional: replay seed state on a freshly created session. Runs once
+   * after `createSession` resolves. The seed (model, effort) was passed to
+   * `AgentSession.start` via `defaultModelId` / `defaultEffort`; descriptors
+   * read it back off the session instead of looking up settings here.
    */
-  applyInitialSessionConfig?(session: AgentSession, settings: CopilotSettings): Promise<void>;
+  applyInitialSessionConfig?(session: AgentSession): Promise<void>;
 
   /**
    * Optional: identify the backend's own plan-mode plan files. Used by the

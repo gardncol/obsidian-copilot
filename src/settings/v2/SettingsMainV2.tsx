@@ -5,25 +5,28 @@ import { PluginProvider } from "@/contexts/PluginContext";
 import { TabProvider, useTab } from "@/contexts/TabContext";
 import { useLatestVersion } from "@/hooks/useLatestVersion";
 import CopilotPlugin from "@/main";
+import { ByokPanel } from "@/modelManagement";
 import { resetSettings } from "@/settings/model";
+import { AgentPanel } from "@/settings/v3/tabs/AgentPanel";
 import { CommandSettings } from "@/settings/v2/components/CommandSettings";
 import { SkillsSettings } from "@/agentMode";
-import { Bot, Cog, Command, Cpu, Database, Sparkle, Sparkles, Wrench } from "lucide-react";
+import { Bot, Cog, Command, Database, KeyRound, Sparkle, Sparkles, Wrench } from "lucide-react";
 import React from "react";
 import { AdvancedSettings } from "./components/AdvancedSettings";
-import { AgentSettings } from "./components/AgentSettings";
 import { BasicSettings } from "./components/BasicSettings";
 import { CopilotPlusSettings } from "./components/CopilotPlusSettings";
-import { ModelSettings } from "./components/ModelSettings";
 import { QASettings } from "./components/QASettings";
 
-const TAB_IDS = ["basic", "model", "agent", "QA", "command", "skills", "plus", "advanced"] as const;
+// M9: legacy "Models" tab removed; tab strip is now
+// Chat (basic) · BYOK · Agent · Commands · Embedding · Skills · Plus · Advanced.
+// Tab IDs are kept stable as route keys for backwards-compatible deep links.
+const TAB_IDS = ["basic", "byok", "agent", "QA", "command", "skills", "plus", "advanced"] as const;
 type TabId = (typeof TAB_IDS)[number];
 
 // tab icons
 const icons: Record<TabId, JSX.Element> = {
   basic: <Cog className="tw-size-5" />,
-  model: <Cpu className="tw-size-5" />,
+  byok: <KeyRound className="tw-size-5" />,
   agent: <Bot className="tw-size-5" />,
   QA: <Database className="tw-size-5" />,
   command: <Command className="tw-size-5" />,
@@ -32,11 +35,19 @@ const icons: Record<TabId, JSX.Element> = {
   advanced: <Wrench className="tw-size-5" />,
 };
 
+interface SettingsTabComponentProps {
+  plugin: CopilotPlugin;
+  /** Switch the settings shell to a different tab. Wired by `SettingsContent`. */
+  setSelectedTab: (id: TabId) => void;
+}
+
 // tab components
-const components: Record<TabId, React.FC> = {
+const components: Record<TabId, React.FC<SettingsTabComponentProps>> = {
   basic: () => <BasicSettings />,
-  model: () => <ModelSettings />,
-  agent: () => <AgentSettings />,
+  byok: ({ plugin }) => <ByokPanel app={plugin.app} />,
+  agent: ({ plugin, setSelectedTab }) => (
+    <AgentPanel app={plugin.app} onNavigateToByok={() => setSelectedTab("byok")} />
+  ),
   QA: () => <QASettings />,
   command: () => <CommandSettings />,
   skills: () => <SkillsSettings />,
@@ -45,13 +56,18 @@ const components: Record<TabId, React.FC> = {
 };
 
 // Tab labels — most tabs derive from the id, but "agent" capitalizes to a
-// human-friendly label.
+// human-friendly label. The "QA" tab id is kept stable as a route key (so
+// existing deep links keep working) while its label was renamed to
+// "Embedding" in M3 of the Model Management redesign, reflecting that the
+// tab now owns embedding-model management alongside indexing settings.
+// M9: "Basic" → "Chat" and "Chat & Commands"/"Command" → "Commands" label
+// renames per the Model Management redesign final tab strip.
 const TAB_LABELS: Record<TabId, string> = {
-  basic: "Basic",
-  model: "Model",
+  basic: "Chat",
+  byok: "BYOK",
   agent: "Agents",
-  QA: "QA",
-  command: "Command",
+  QA: "Embedding",
+  command: "Commands",
   skills: "Skills",
   plus: "Plus",
   advanced: "Advanced",
@@ -64,7 +80,11 @@ const tabs: TabItemType[] = TAB_IDS.map((id) => ({
   label: TAB_LABELS[id],
 }));
 
-const SettingsContent: React.FC = () => {
+interface SettingsContentProps {
+  plugin: CopilotPlugin;
+}
+
+const SettingsContent: React.FC<SettingsContentProps> = ({ plugin }) => {
   const { selectedTab, setSelectedTab } = useTab();
 
   return (
@@ -88,7 +108,7 @@ const SettingsContent: React.FC = () => {
           const Component = components[id];
           return (
             <TabContent key={id} id={id} isSelected={selectedTab === id}>
-              <Component />
+              <Component plugin={plugin} setSelectedTab={setSelectedTab} />
             </TabContent>
           );
         })}
@@ -163,7 +183,7 @@ const SettingsMainV2: React.FC<SettingsMainV2Props> = ({ plugin }) => {
             </div>
           </div>
           {/* Add the key prop to force re-render */}
-          <SettingsContent key={resetKey} />
+          <SettingsContent key={resetKey} plugin={plugin} />
         </div>
       </TabProvider>
     </PluginProvider>

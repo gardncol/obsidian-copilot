@@ -1,0 +1,777 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Model Management — Data-Model Review</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --fg: #1c1c1c;
+    --muted: #5c5c5c;
+    --rule: #d6d6d6;
+    --code-bg: #f2f2f2;
+    --code-fg: #1c1c1c;
+    --link: #1a5fb4;
+    --accent: #b35400;
+    --callout-bg: #fff7e6;
+    --callout-border: #e0b070;
+    --good-bg: #ebf5eb;
+    --good-border: #88c188;
+    --table-stripe: #f4f4f4;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+    font-size: 15px;
+    line-height: 1.55;
+  }
+  .wrap {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 36px 28px 96px;
+  }
+  h1 {
+    font-size: 30px;
+    line-height: 1.2;
+    margin: 0 0 4px;
+    letter-spacing: -0.01em;
+  }
+  h2 {
+    font-size: 22px;
+    margin: 48px 0 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--rule);
+    letter-spacing: -0.01em;
+  }
+  h3 {
+    font-size: 17px;
+    margin: 28px 0 6px;
+  }
+  h4 {
+    font-size: 15px;
+    margin: 18px 0 4px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  p, ul, ol { margin: 8px 0 12px; }
+  ul, ol { padding-left: 22px; }
+  li { margin: 3px 0; }
+  code {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    background: var(--code-bg);
+    color: var(--code-fg);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    padding: 14px 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+    margin: 12px 0;
+  }
+  pre code { background: transparent; padding: 0; }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+    font-size: 13.5px;
+  }
+  th, td {
+    border: 1px solid var(--rule);
+    padding: 6px 9px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--code-bg); font-weight: 600; }
+  tbody tr:nth-child(even) { background: var(--table-stripe); }
+  .callout {
+    background: var(--callout-bg);
+    border: 1px solid var(--callout-border);
+    border-left-width: 4px;
+    padding: 10px 14px;
+    border-radius: 4px;
+    margin: 14px 0;
+  }
+  .callout strong { color: var(--accent); }
+  .good {
+    background: var(--good-bg);
+    border: 1px solid var(--good-border);
+    border-left-width: 4px;
+    padding: 10px 14px;
+    border-radius: 4px;
+    margin: 14px 0;
+  }
+  .muted { color: var(--muted); }
+  .toc {
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    padding: 12px 18px;
+    border-radius: 6px;
+    margin: 18px 0 32px;
+    font-size: 14px;
+  }
+  .toc ol { margin: 0; padding-left: 20px; }
+  .toc li { margin: 2px 0; }
+  .subtitle {
+    color: var(--muted);
+    font-size: 14px;
+    margin: 0 0 18px;
+  }
+  hr {
+    border: 0;
+    border-top: 1px solid var(--rule);
+    margin: 32px 0;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 9px;
+    background: var(--code-bg);
+    color: var(--muted);
+    margin-left: 6px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+  .ascii {
+    font-size: 12px;
+    line-height: 1.4;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Model Management — Data-Model Review</h1>
+<p class="subtitle">Designed from first principles against described behavior. Single-page reference. The implementation on <code>zero/model-settings-redesign</code> does <strong>not</strong> fully match this design — the companion Markdown spec at <code>designdocs/MODEL_DATA_MODEL_SPEC.md</code> includes a reconciliation appendix.</p>
+
+<div class="toc">
+<strong>Contents</strong>
+<ol>
+  <li><a href="#tldr">TL;DR</a></li>
+  <li><a href="#old">Old world (master)</a></li>
+  <li><a href="#behaviors">Behaviors driving the new design</a></li>
+  <li><a href="#entities">Entity catalog</a></li>
+  <li><a href="#adapter">AdapterKind rationale</a></li>
+  <li><a href="#pipeline">Pipeline compatibility</a></li>
+  <li><a href="#er">ER diagram</a></li>
+  <li><a href="#invariants">Invariants</a></li>
+  <li><a href="#traces">Resolution traces</a></li>
+  <li><a href="#picker">Per-consumer picker formulas</a></li>
+  <li><a href="#nongoals">Explicit non-goals</a></li>
+  <li><a href="#questions">Open questions</a></li>
+</ol>
+</div>
+
+<h2 id="tldr">1. TL;DR</h2>
+<ul>
+  <li><strong>Two layers of "provider":</strong> a read-only <em>ProviderType</em> (catalog metadata from models.dev) and a persisted <em>ProviderInstance</em> (the user's credential set). Multiple instances of the same type are allowed — two Anthropic keys live as two ProviderInstance rows.</li>
+  <li><strong>BYOK enrollment is the unit of identity</strong>: a <em>ByokEnrollment</em> row points at <code>(instanceId, modelId)</code>. Everything downstream holds <code>enrollmentRef = ${instanceId}::${modelId}</code>.</li>
+  <li><strong>Custom models attach to instances, not types</strong> — two Ollama machines can declare different model lineups.</li>
+  <li><strong>Per-use-case (consumer) selection</strong>: each consumer (Simple Chat, Vault QA, OpenCode agent, …) holds its own allow-list of model refs. A consumer ref is polymorphic: BYOK / backend-bundled / Copilot Plus.</li>
+  <li><strong>Pipeline reachability is declared per ProviderType</strong> (<code>pipelines: {langchain, opencode}</code>). Single-pipeline-only providers are acceptable; the consumer picker filters by pipeline.</li>
+  <li><strong>Six AdapterKinds, not 30</strong>. The catalog still surfaces dozens of providers; most route through <code>openai-compatible</code> with a custom <code>baseUrl</code>.</li>
+</ul>
+
+<h2 id="old">2. Old world (master, pre-refactor)</h2>
+<p>For context. The master branch (pre-<code>zero/model-settings-redesign</code>) had a much flatter shape. Everything was a <code>CustomModel</code>; credentials lived as a flat bag of fields on <code>CopilotSettings</code>.</p>
+
+<h3>2.1 The <code>CustomModel</code> mega-type</h3>
+<p>Quoted verbatim from <code>git show master:src/aiParams.ts</code>:</p>
+<pre><code>export interface CustomModel {
+  name: string;
+  provider: string;
+  baseUrl?: string;
+  apiKey?: string;
+  enabled: boolean;
+  isEmbeddingModel?: boolean;
+  isBuiltIn?: boolean;
+  enableCors?: boolean;
+  core?: boolean;
+  stream?: boolean;
+  streamUsage?: boolean;
+  temperature?: number;
+  maxTokens?: number;
+  topP?: number;
+  frequencyPenalty?: number;
+
+  // Ollama specific fields
+  numCtx?: number;
+
+  // LM Studio specific fields
+  useResponsesApi?: boolean;
+
+  // OpenRouter specific fields
+  enablePromptCaching?: boolean;
+
+  projectEnabled?: boolean;
+  plusExclusive?: boolean;
+  believerExclusive?: boolean;
+  capabilities?: ModelCapability[];
+  displayName?: string;
+
+  // Embedding models only (Jina at the moment)
+  dimensions?: number;
+  // OpenAI specific fields
+  openAIOrgId?: string;
+
+  // Azure OpenAI specific fields
+  azureOpenAIApiInstanceName?: string;
+  azureOpenAIApiDeploymentName?: string;
+  azureOpenAIApiVersion?: string;
+  azureOpenAIApiEmbeddingDeploymentName?: string;
+
+  // Amazon Bedrock specific fields
+  bedrockRegion?: string;
+
+  // OpenAI GPT-5 and O-series specific fields
+  reasoningEffort?: ReasoningEffort;
+  verbosity?: Verbosity;
+}</code></pre>
+
+<h3>2.2 Settings — credentials as a flat bag</h3>
+<p>Excerpted from <code>git show master:src/settings/model.ts</code> (<code>CopilotSettings</code>):</p>
+<pre><code>  openAIApiKey: string;
+  openAIOrgId: string;
+  huggingfaceApiKey: string;
+  cohereApiKey: string;
+  anthropicApiKey: string;
+  azureOpenAIApiKey: string;
+  azureOpenAIApiInstanceName: string;
+  azureOpenAIApiDeploymentName: string;
+  azureOpenAIApiVersion: string;
+  azureOpenAIApiEmbeddingDeploymentName: string;
+  googleApiKey: string;
+  openRouterAiApiKey: string;
+  xaiApiKey: string;
+  mistralApiKey: string;
+  deepseekApiKey: string;
+  amazonBedrockApiKey: string;
+  amazonBedrockRegion: string;
+  siliconflowApiKey: string;
+  githubCopilotAccessToken: string;
+  githubCopilotToken: string;
+  githubCopilotTokenExpiresAt: number;
+  ...
+  defaultChainType: ChainType;
+  defaultModelKey: string;       // "&lt;name&gt;|&lt;provider&gt;"
+  embeddingModelKey: string;
+  temperature: number;
+  maxTokens: number;
+  ...
+  activeModels: Array&lt;CustomModel&gt;;
+  activeEmbeddingModels: Array&lt;CustomModel&gt;;</code></pre>
+
+<h3>2.3 Provider enum</h3>
+<p>From <code>git show master:src/constants.ts</code>:</p>
+<pre><code>export enum ChatModelProviders {
+  OPENROUTERAI = "openrouterai",
+  OPENAI = "openai",
+  OPENAI_FORMAT = "3rd party (openai-format)",
+  ANTHROPIC = "anthropic",
+  GOOGLE = "google",
+  XAI = "xai",
+  AMAZON_BEDROCK = "amazon-bedrock",
+  AZURE_OPENAI = "azure openai",
+  GROQ = "groq",
+  OLLAMA = "ollama",
+  LM_STUDIO = "lm-studio",
+  COPILOT_PLUS = "copilot-plus",
+  MISTRAL = "mistralai",
+  DEEPSEEK = "deepseek",
+  COHEREAI = "cohereai",
+  SILICONFLOW = "siliconflow",
+  GITHUB_COPILOT = "github-copilot",
+}</code></pre>
+
+<div class="callout"><strong>Takeaway.</strong> Every concept that's now an entity (catalog metadata, credential set, enrollment, consumer selection) was a field — or worse, a string — in one big record. Identity was <code>"&lt;name&gt;|&lt;provider&gt;"</code>; one default per app; one credential per provider type. Multi-instance was structurally impossible.</div>
+
+<h2 id="behaviors">3. Behaviors driving the new design</h2>
+<ol>
+  <li><strong>Provider configuration.</strong> Pick a type, supply name / URL / key, plus adapter-specific extras (Azure deployment name, Bedrock region, OpenAI org id).</li>
+  <li><strong>Multiple instances of the same provider type.</strong> Two Anthropic credential sets ("prod" and "staging"), two Ollama endpoints, etc. Each independently configured and enrolled.</li>
+  <li><strong>Catalog drives the provider list.</strong> Add Provider iterates the full <code>models.dev</code> catalog (dozens of entries).</li>
+  <li><strong>Catalog drives the model list per provider.</strong> Once a provider is configured, the catalog says what models it serves.</li>
+  <li><strong>BYOK enrollment.</strong> The user picks specific models to bring into the pool — separate from "do I have a key for this provider."</li>
+  <li><strong>Custom models on custom providers.</strong> Self-hosted endpoints have no catalog; the user declares models by hand.</li>
+  <li><strong>Per-use-case (consumer) model selection.</strong> Simple Chat, Vault QA, OpenCode agent, Quick Chat, custom commands, etc. — each holds its own allow-list and its own default. Same enrollment can be selected by several consumers.</li>
+  <li><strong>Backend-supplied models.</strong> Agent backends report models at runtime that aren't BYOK (OpenCode bundled, Claude Code subscription, Codex subscription, Copilot Plus hosted). Pickers union BYOK + backend-reported, intersected with the user's per-consumer selection.</li>
+  <li><strong>Per-pipeline reachability is declared, not assumed.</strong> Each provider is reachable from (a) the LangChain direct path or (b) the OpenCode byokBridge path, or both. Single-pipeline-only is acceptable. Subscription backends sit outside this axis.</li>
+  <li><strong>Embeddings parity (deferred).</strong> The same five-layer pipeline applies; rollout sequenced separately.</li>
+</ol>
+
+<h2 id="entities">4. Entity catalog</h2>
+
+<h3>4.1 ProviderType <span class="badge">read-only</span></h3>
+<p>Describes a <em>kind</em> of provider. Sourced from <code>models.dev</code> plus our corrections layer. Not persisted in user settings.</p>
+<pre><code>interface ProviderType {
+  id: string;                          // "anthropic", "openai", "google", "mistral", "groq", "deepseek", "openrouter", …
+  displayName: string;
+  adapter: AdapterKind;                // closed at six values (see §5)
+  defaultBaseUrl?: string;             // catalog-supplied
+  auth: "api-key" | "oauth" | "none";
+  envVars?: string[];
+  pipelines: { langchain: boolean; opencode: boolean };  // see §6
+  models: Record&lt;string, CatalogModel&gt;;
+}
+
+type AdapterKind =
+  | "anthropic"
+  | "openai-compatible"
+  | "google"
+  | "azure"
+  | "bedrock"
+  | "github-copilot";</code></pre>
+
+<h3>4.2 ProviderInstance <span class="badge">persisted</span></h3>
+<p>A user-configured credential set for a <code>ProviderType</code>. <strong>Multiple instances per type are allowed.</strong></p>
+<pre><code>interface ProviderInstance {
+  instanceId: string;                  // UUID — primary key; keychain namespace
+  providerTypeId: string;              // FK to ProviderType.id (non-unique)
+  displayName: string;                 // "Anthropic (prod)" / "Anthropic (staging)"
+  baseUrl?: string;                    // overrides ProviderType.defaultBaseUrl
+  apiKey?: KeychainRef | null;
+  extras?: Record&lt;string, unknown&gt;;    // azure deployment, bedrock region, openai org id, …
+  addedAt: number;
+  lastVerifiedAt?: number;
+  lastVerificationError?: string;
+}
+
+type KeychainRef =
+  | { kind: "keychain"; id: string }   // OS keychain entry, vault-scoped
+  | { kind: "inline"; value: string }; // plaintext fallback</code></pre>
+
+<p>Example:</p>
+<pre><code>{
+  "instanceId": "anthropic-prod-uuid",
+  "providerTypeId": "anthropic",
+  "displayName": "Anthropic (prod)",
+  "apiKey": { "kind": "keychain", "id": "provider-anthropic-prod-uuid-apiKey" },
+  "addedAt": 1716000000000
+}</code></pre>
+
+<h3>4.3 CatalogModel <span class="badge">read-only</span></h3>
+<pre><code>interface CatalogModel {
+  id: string;                          // wire form, e.g. "claude-sonnet-4-5"
+  displayName: string;
+  family?: string;                     // "Claude 4"
+  modalities: { input: string[]; output: string[] };
+  limits: { context: number; output: number };
+  capabilities: {
+    reasoning?: boolean;
+    toolCall?: boolean;
+    attachment?: boolean;
+    temperature?: boolean;
+  };
+  cost?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+  knowledge?: string;
+  releaseDate?: string;
+  lastUpdated?: string;
+  openWeights?: boolean;
+}</code></pre>
+
+<h3>4.4 CustomModel <span class="badge">persisted</span></h3>
+<p>For self-hosted endpoints with no catalog. <strong>Attached to a ProviderInstance, not a ProviderType.</strong></p>
+<pre><code>interface CustomModel {
+  instanceId: string;                  // FK to ProviderInstance (must be synthetic-typed)
+  modelId: string;                     // "llama3.3:70b"
+  displayName: string;
+  declaredCapabilities?: { reasoning?: boolean; toolCall?: boolean; attachment?: boolean };
+  contextLimit?: number;
+  extras?: Record&lt;string, unknown&gt;;    // ollama numCtx, etc.
+  addedAt: number;
+}</code></pre>
+
+<h3>4.5 ByokEnrollment <span class="badge">persisted</span> <span class="badge">unit of identity</span></h3>
+<pre><code>interface ByokEnrollment {
+  instanceId: string;
+  modelId: string;                     // catalog model OR custom model (never both)
+  displayName: string;
+  enrolledAt: number;
+  overrides?: Record&lt;string, unknown&gt;; // per-model knobs — NOT temperature/maxTokens
+  lastVerifiedAt?: number;
+  lastVerificationError?: string;
+}</code></pre>
+<div class="callout"><strong>Stable enrollment key:</strong> <code>enrollmentRef = ${instanceId}::${modelId}</code>. Used everywhere downstream as a single string handle. Double colon avoids collisions with ids that contain <code>/</code>.</div>
+<p>Multi-instance example — same model enrolled under two Anthropic credentials:</p>
+<pre><code>[
+  { "instanceId": "anthropic-prod-uuid", "modelId": "claude-sonnet-4-5", ... },
+  { "instanceId": "anthropic-staging-uuid", "modelId": "claude-sonnet-4-5", ... }
+]</code></pre>
+
+<h3>4.6 ConsumerConfig <span class="badge">persisted</span></h3>
+<pre><code>type ConsumerId =
+  | "chat" | "vault-qa" | "project" | "copilot-plus" | "quick-chat"
+  | "agent:opencode" | "agent:claude-code" | "agent:codex"
+  | `command:${string}`;
+
+interface ConsumerConfig {
+  consumerId: ConsumerId;
+  enabledModels: ConsumerModelRef[];   // empty = "use default heuristic"
+  defaultModel?: ConsumerModelRef | null;
+}</code></pre>
+
+<h3>4.7 ConsumerModelRef</h3>
+<pre><code>type ConsumerModelRef =
+  | { source: "byok"; enrollmentRef: string }
+  | { source: "backend-bundled"; backendId: BackendId; backendModelId: string }
+  | { source: "copilot-plus"; modelId: string };
+
+type BackendId = "opencode" | "claude-code" | "codex";</code></pre>
+<p>Examples:</p>
+<pre><code>// Simple Chat enables GPT-5 via the user's only OpenAI instance
+{ "source": "byok", "enrollmentRef": "openai-uuid-1::gpt-5" }
+
+// OpenCode agent enables an OpenCode-bundled model
+{ "source": "backend-bundled", "backendId": "opencode", "backendModelId": "bigpickle/big-pickle" }
+
+// Quick Chat enables a Copilot Plus hosted model
+{ "source": "copilot-plus", "modelId": "copilot-plus-flash" }
+
+// OpenCode agent enables Sonnet via the prod Anthropic instance (NOT staging)
+{ "source": "byok", "enrollmentRef": "anthropic-prod-uuid::claude-sonnet-4-5" }</code></pre>
+
+<h3>4.8 BackendInventory <span class="badge">runtime-only</span></h3>
+<p>Held in memory; never persisted.</p>
+<pre><code>interface BackendInventory {
+  backendId: BackendId;
+  models: BackendModelEntry[];   // bundled + BYOK-bridged + hosted
+}
+
+interface BackendModelEntry {
+  backendModelId: string;
+  origin:
+    | { kind: "bundled" }
+    | { kind: "byok"; enrollmentRef: string }
+    | { kind: "copilot-plus" };
+  displayName?: string;
+  capabilities?: CatalogModel["capabilities"];
+}</code></pre>
+
+<h2 id="adapter">5. AdapterKind rationale</h2>
+<p><code>AdapterKind</code> is <strong>not</strong> the same thing as <code>ProviderType.id</code>. The id is the catalog handle (one per <code>models.dev</code> entry, potentially 30+). The adapter is the protocol / SDK we wire to internally — closed at six values.</p>
+
+<table>
+  <thead>
+    <tr><th>AdapterKind</th><th>LangChain path</th><th>OpenCode path</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>anthropic</code></td><td><code>@langchain/anthropic</code> (<code>ChatAnthropic</code>)</td><td><code>provider.set type=anthropic</code></td></tr>
+    <tr><td><code>openai-compatible</code></td><td><code>@langchain/openai</code> + custom <code>baseUrl</code></td><td><code>provider.set type=openai-compatible</code></td></tr>
+    <tr><td><code>google</code></td><td><code>@langchain/google-genai</code></td><td><code>provider.set type=google</code></td></tr>
+    <tr><td><code>azure</code></td><td><code>@langchain/openai</code> (Azure path) + deployment knobs</td><td><code>provider.set type=azure</code></td></tr>
+    <tr><td><code>bedrock</code></td><td><code>@langchain/aws</code></td><td><code>provider.set type=bedrock</code></td></tr>
+    <tr><td><code>github-copilot</code></td><td>Custom bridge (OAuth-based)</td><td><code>provider.set type=github-copilot</code></td></tr>
+  </tbody>
+</table>
+
+<p><strong>Why six and not more.</strong> Each one is real wiring in one or both pipelines. Adding an AdapterKind requires shipping LangChain integration code AND ensuring (or explicitly disclaiming via <code>pipelines</code>) OpenCode support. We don't multiply adapter kinds just because a new provider exists.</p>
+
+<p><strong>Why we still surface dozens of providers.</strong> The catalog (e.g. Mistral, Groq, DeepSeek, Together, Perplexity, xAI, OpenRouter, SiliconFlow, …) maps most providers onto <code>openai-compatible</code> with their own <code>defaultBaseUrl</code>. So the Add Provider list mirrors the full <code>models.dev</code> catalog; what differs is the adapter the runtime uses behind the scenes.</p>
+
+<div class="callout"><strong>Surfacing, not silencing.</strong> A provider whose adapter we don't support yet should appear in the Add Provider UI with a "not yet supported in this plugin" affordance — not be silently filtered out. The user should know the gap exists.</div>
+
+<h2 id="pipeline">6. Pipeline compatibility</h2>
+<p><code>ProviderType.pipelines = { langchain, opencode }</code> is load-bearing. It gates which consumer pickers a provider's enrollments can appear in.</p>
+
+<h3>6.1 Consumer ↔ pipeline mapping</h3>
+<table>
+  <thead><tr><th>ConsumerId</th><th>Pipeline</th></tr></thead>
+  <tbody>
+    <tr><td><code>chat</code></td><td><code>langchain</code></td></tr>
+    <tr><td><code>vault-qa</code></td><td><code>langchain</code></td></tr>
+    <tr><td><code>project</code></td><td><code>langchain</code></td></tr>
+    <tr><td><code>copilot-plus</code></td><td><code>langchain</code></td></tr>
+    <tr><td><code>quick-chat</code></td><td><code>langchain</code></td></tr>
+    <tr><td><code>command:*</code></td><td><code>langchain</code></td></tr>
+    <tr><td><code>agent:opencode</code></td><td><code>opencode</code></td></tr>
+    <tr><td><code>agent:claude-code</code></td><td>(subscription)</td></tr>
+    <tr><td><code>agent:codex</code></td><td>(subscription)</td></tr>
+  </tbody>
+</table>
+<p>Subscription consumers don't accept BYOK at all; their <code>enabledModels</code> are all <code>backend-bundled</code> refs.</p>
+
+<h3>6.2 What causes a flag to flip false</h3>
+<h4>pipelines.langchain = false</h4>
+<ul>
+  <li>No LangChain SDK package available; not OpenAI-compatible enough for <code>@langchain/openai</code>.</li>
+  <li>CLI-bound session token or hardware-token auth that the in-process LangChain class can't bind to.</li>
+  <li>Provider is bundled end-to-end by OpenCode (SDK + OAuth) and exposing it via LangChain would require shipping its SDK in the plugin bundle.</li>
+</ul>
+<h4>pipelines.opencode = false</h4>
+<ul>
+  <li>OpenCode's <code>provider.set</code> config doesn't recognize the protocol — LangChain works; OpenCode upstream hasn't wired it up.</li>
+  <li>Per-request state (custom headers, signed URLs) the byokBridge can't inject into OpenCode's HTTP client.</li>
+  <li>Local endpoint OpenCode's subprocess can't reach (rare).</li>
+</ul>
+
+<h3>6.3 Worked examples</h3>
+<table>
+  <thead><tr><th>ProviderType.id</th><th>adapter</th><th>langchain</th><th>opencode</th><th>notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>anthropic</code></td><td><code>anthropic</code></td><td>✓</td><td>✓</td><td></td></tr>
+    <tr><td><code>openai</code></td><td><code>openai-compatible</code></td><td>✓</td><td>✓</td><td></td></tr>
+    <tr><td><code>google</code></td><td><code>google</code></td><td>✓</td><td>✓</td><td></td></tr>
+    <tr><td><code>mistral</code></td><td><code>openai-compatible</code></td><td>✓</td><td>✓</td><td></td></tr>
+    <tr><td><code>groq</code></td><td><code>openai-compatible</code></td><td>✓</td><td>✓</td><td></td></tr>
+    <tr><td><code>openrouter</code></td><td><code>openai-compatible</code></td><td>✓</td><td>✓</td><td></td></tr>
+    <tr><td><code>bedrock</code></td><td><code>bedrock</code></td><td>✓</td><td>✓</td><td>AWS SDK auth in both</td></tr>
+    <tr><td><code>azure</code></td><td><code>azure</code></td><td>✓</td><td>✓</td><td>deployment name in <code>extras</code></td></tr>
+    <tr><td><code>github-copilot</code></td><td><code>github-copilot</code></td><td>✓</td><td>✓</td><td>OAuth refresh handled in both</td></tr>
+    <tr><td><code>ollama</code></td><td><code>openai-compatible</code></td><td>✓</td><td>✓</td><td>synthetic; CustomModels per instance</td></tr>
+    <tr><td><em>hypothetical</em></td><td><code>openai-compatible</code></td><td>✓</td><td>✗</td><td>LangChain works; OpenCode unaware</td></tr>
+    <tr><td><em>hypothetical</em></td><td>(custom OAuth)</td><td>✗</td><td>✓</td><td>OpenCode CLI manages OAuth; can't replicate in-process</td></tr>
+  </tbody>
+</table>
+
+<h2 id="er">7. ER diagram</h2>
+<pre class="ascii">
+                            ┌───────────────────────────────┐
+                            │ ProviderType (read-only)       │
+                            │   id (PK)                      │
+                            │   adapter                      │
+                            │   pipelines {langchain,opencode}│
+                            │   defaultBaseUrl               │
+                            │   models: {id → CatalogModel}  │
+                            └───────────┬───────────────────┘
+                                        │ 1
+                                        │
+                                        │ 1..n
+                            ┌───────────▼───────────┐
+                            │ ProviderInstance       │
+                            │   instanceId (PK)      │
+                            │   providerTypeId (FK)  │
+                            │   displayName          │
+                            │   baseUrl, apiKey,extras│
+                            └───┬────────────┬──────┘
+                                │            │
+                              1 │          1 │
+                                │            │
+                          0..n  │      0..n  │
+              ┌─────────────────▼──┐   ┌────▼──────────────────┐
+              │ CustomModel         │   │ ByokEnrollment        │
+              │   instanceId (FK)   │   │   instanceId (FK)     │
+              │   modelId (PK part) │   │   modelId (PK part)   │
+              │   declaredCaps      │   │   displayName         │
+              └────────┬────────────┘   │   overrides           │
+                       │                │                       │
+                       └─── resolves ──►│   (modelId points     │
+                                        │    at catalog or      │
+                                        │    customModel)       │
+                                        └───────────┬───────────┘
+                                                    │ 1
+                                                    │
+                                              0..n  │
+                       ┌────────────────────────────▼───────────┐
+                       │ ConsumerConfig                          │
+                       │   consumerId (PK)                       │
+                       │   enabledModels[]: ConsumerModelRef     │
+                       │   defaultModel?: ConsumerModelRef       │
+                       └────────────────────────────────────────┘
+                                ▲
+                                │ runtime-only intersection
+                       ┌────────┴────────────────────────────────┐
+                       │ BackendInventory (in-memory)            │
+                       │   per BackendId: bundled + bridged BYOK │
+                       │                  + Copilot Plus models  │
+                       └─────────────────────────────────────────┘
+</pre>
+
+<h2 id="invariants">8. Invariants</h2>
+<ol>
+  <li><code>enrollment.instanceId ∈ keys(providers)</code>. <em>(write path, migration)</em></li>
+  <li><code>(instanceId, modelId)</code> pair resolves either via the instance's ProviderType catalog OR via a <code>CustomModel</code> row — never both. <em>(write path)</em></li>
+  <li>At most one <code>ByokEnrollment</code> per <code>(instanceId, modelId)</code>. <em>(write path)</em></li>
+  <li>At most one <code>CustomModel</code> per <code>(instanceId, modelId)</code>. <em>(write path)</em></li>
+  <li>If <code>ProviderType.auth = "api-key"</code>, <code>ProviderInstance.apiKey</code> is non-null; otherwise the provider is "incomplete" and its enrollments are greyed in pickers. <em>(runtime)</em></li>
+  <li>Every <code>ConsumerModelRef</code> with <code>source: "byok"</code> points at a present enrollment. Broken refs surface in the UI — never silently pruned. <em>(runtime)</em></li>
+  <li>When a consumer's <code>defaultModel</code> is removed from <code>enabledModels</code>, <code>defaultModel</code> is set to <code>null</code>. <em>(write path)</em></li>
+  <li>Deleting a <code>ProviderInstance</code> cascades to its enrollments and custom models. Consumer refs pointing at those enrollments become broken refs (surfaced, not pruned). <em>(write path)</em></li>
+  <li>A consumer whose pipeline is <code>langchain</code> only renders enrollments whose <code>ProviderType.pipelines.langchain = true</code>; same for <code>opencode</code>. Ineligible enrollments are shown as ineligible in the BYOK panel with a reason — not hidden. <em>(runtime)</em></li>
+  <li>NO <code>providerTypeId</code> uniqueness constraint across <code>providers</code>. Multi-instance is the whole point. <em>(explicit non-constraint)</em></li>
+</ol>
+
+<h2 id="traces">9. Resolution traces</h2>
+
+<h3>Trace A — Simple Chat, single OpenAI instance</h3>
+<pre class="ascii">
+1. User opens BYOK panel
+   ── catalog shows OpenAI ProviderType.models
+
+2. User adds OpenAI provider
+   ── providers["openai-uuid-1"] = {
+        instanceId: "openai-uuid-1",
+        providerTypeId: "openai",
+        apiKey: { kind: "keychain", id: "provider-openai-uuid-1-apiKey" }
+      }
+
+3. User enrolls "gpt-5"
+   ── enrollments += { instanceId: "openai-uuid-1", modelId: "gpt-5" }
+
+4. User enables it in Simple Chat
+   ── consumers["chat"] = {
+        consumerId: "chat",
+        enabledModels: [{ source: "byok", enrollmentRef: "openai-uuid-1::gpt-5" }],
+        defaultModel:   { source: "byok", enrollmentRef: "openai-uuid-1::gpt-5" }
+      }
+
+5. Picker renders
+   ── iterate enabledModels → resolve enrollmentRef
+   ── join with catalog → render "GPT-5"
+</pre>
+
+<h3>Trace B — OpenCode-bundled (not BYOK)</h3>
+<pre class="ascii">
+1. Plugin starts → OpenCode CLI launched
+   ── BackendInventory["opencode"].models includes
+        { backendModelId: "bigpickle/big-pickle", origin: { kind: "bundled" }, ... }
+
+2. User enables it in OpenCode consumer
+   ── consumers["agent:opencode"].enabledModels += {
+        source: "backend-bundled",
+        backendId: "opencode",
+        backendModelId: "bigpickle/big-pickle"
+      }
+
+3. Picker renders
+   ── resolve against live BackendInventory["opencode"] by backendModelId
+</pre>
+
+<h3>Trace C — BYOK shared with OpenCode (byokBridge)</h3>
+<pre class="ascii">
+Pre-existing:
+  providers["anthropic-prod-uuid"] = { providerTypeId: "anthropic", displayName: "Anthropic (prod)", apiKey: K1 }
+  enrollments += { instanceId: "anthropic-prod-uuid", modelId: "claude-sonnet-4-5" }
+
+1. User enables it in OpenCode consumer
+   ── consumers["agent:opencode"].enabledModels += {
+        source: "byok",
+        enrollmentRef: "anthropic-prod-uuid::claude-sonnet-4-5"
+      }
+
+2. byokBridge runs at session start
+   ── registers prod Anthropic creds with OpenCode (one bridged provider per ProviderInstance, keyed by instanceId)
+   ── OpenCode now reports a model with origin: { kind: "byok", enrollmentRef: "anthropic-prod-uuid::claude-sonnet-4-5" }
+
+3. Picker reconciles
+   ── matches consumer's "byok" ref to inventory entry by enrollmentRef
+   ── if user also enabled staging-instance enrollment, both render as separate rows
+      disambiguated by parent ProviderInstance.displayName
+</pre>
+
+<h3>Trace D — Two Anthropic keys (multi-instance, catalog-backed)</h3>
+<pre class="ascii">
+1. providers["anthropic-prod-uuid"] = { ..., displayName: "Anthropic (prod)", apiKey: K1 }
+
+2. User clicks "Add Provider → Anthropic" AGAIN
+   ── BYOK UI does NOT filter Anthropic out (multi-instance is allowed)
+   ── providers["anthropic-staging-uuid"] = { ..., displayName: "Anthropic (staging)", apiKey: K2 }
+
+3. User enrolls Sonnet 4.5 on both instances
+   ── enrollments += { instanceId: "anthropic-prod-uuid", modelId: "claude-sonnet-4-5" }
+   ── enrollments += { instanceId: "anthropic-staging-uuid", modelId: "claude-sonnet-4-5" }
+
+4. Simple Chat picker
+   ── shows TWO rows: "Claude Sonnet 4.5 (prod)" and "Claude Sonnet 4.5 (staging)"
+
+5. Delete staging instance
+   ── cascade: enrollment removed
+   ── any consumer ref pointing at it becomes a broken ref (surfaced in UI)
+   ── prod enrollment untouched
+</pre>
+
+<h3>Trace E — Custom providers, multi-instance, custom models</h3>
+<pre class="ascii">
+1. providers["ollama-uuid-1"] = {
+     providerTypeId: "ollama",
+     displayName: "Ollama (laptop)",
+     baseUrl: "http://localhost:11434",
+     apiKey: null
+   }
+
+2. providers["ollama-uuid-2"] = {
+     providerTypeId: "ollama",
+     displayName: "Ollama (workstation)",
+     baseUrl: "http://192.168.1.50:11434",
+     apiKey: null
+   }
+
+3. customModels += { instanceId: "ollama-uuid-1", modelId: "llama3.3:70b" }
+   customModels += { instanceId: "ollama-uuid-2", modelId: "mistral:7b" }
+   (each instance owns its own model list)
+
+4. enrollments += two rows, one per instance
+   (from here, same as Trace A)
+</pre>
+
+<h2 id="picker">10. Per-consumer picker formulas</h2>
+<pre><code>visibleEntries(consumerId) =
+    let pipeline = pipelineOf(consumerId)
+    let inventory = (pipeline === "opencode")
+        ? BackendInventory[backendIdOf(consumerId)]
+        : null
+
+    enabled = consumer.enabledModels        // empty ⇒ default-selection heuristic
+
+    for each ref in enabled:
+        case ref.source:
+          "byok":
+            let e = enrollments[ref.enrollmentRef]
+            let p = providers[e.instanceId]
+            let t = providerTypes[p.providerTypeId]
+            require t.pipelines[pipeline]
+            require p.apiKey != null OR t.auth == "none"
+            if pipeline == "opencode":
+              find matching inventory entry by enrollmentRef
+            emit entry
+
+          "backend-bundled":
+            require inventory != null && inventory.includes(ref.backendModelId)
+            emit entry
+
+          "copilot-plus":
+            require copilotPlusCatalog.includes(ref.modelId)
+            emit entry</code></pre>
+<p class="muted">No capability filtering. No runtime "this model doesn't support tool_call so hide it" check — runtime errors surface incompatibility via the normal error path.</p>
+
+<h2 id="nongoals">11. Explicit non-goals</h2>
+<ul>
+  <li><strong>No global chat knobs.</strong> No <code>temperature</code> / <code>maxTokens</code> / <code>reasoningEffort</code> / <code>verbosity</code> / <code>topP</code> / <code>frequencyPenalty</code> in the data model. Adapter SDK defaults are used. If user-tunable knobs are ever needed, they belong elsewhere (per-invocation, per-skill, per-command).</li>
+  <li><strong>No per-agent capability filtering</strong> at picker render.</li>
+  <li><strong>No per-model <code>temperature</code> / <code>maxTokens</code> / <code>topP</code>.</strong> Same reason.</li>
+  <li><strong>No <code>enabled</code> flag on <code>ByokEnrollment</code>.</strong> "Enabled for which consumer?" is ambiguous; per-consumer <code>enabledModels</code> carries the meaning.</li>
+  <li><strong>No <code>capabilities</code> array on <code>ByokEnrollment</code>.</strong> Read from catalog or <code>CustomModel.declaredCapabilities</code> at query time.</li>
+  <li><strong>No chat-embedding mixing in <code>enrollments</code></strong> at first — embeddings can fold in once the carve-out resolves.</li>
+</ul>
+
+<h2 id="questions">12. Open questions</h2>
+<ol>
+  <li><strong>Embeddings unification timing.</strong> Stay legacy now, fold in later?</li>
+  <li><strong>Project-level chain default storage.</strong> Currently <code>ProjectConfig.projectModelKey</code> is a wire-form string. Becomes <code>ProjectConfig.defaultModelRef: ConsumerModelRef | null</code>? Or does each project override <code>consumers["project"]</code> wholesale?</li>
+  <li><strong>Per-invocation knobs.</strong> If we ever surface a user-facing temperature slider, where? Per-message, per-skill, per-command? Spec says "not in the data model" — does that hold?</li>
+  <li><strong>"Not yet supported in this plugin" affordance</strong> for catalog providers we don't have an adapter for. Disabled list item with tooltip? Separate section?</li>
+  <li><strong>Per-pipeline-only badging.</strong> Do we put "works with chat only" / "works with OpenCode only" copy on the BYOK enrollment row? Or only at the provider level?</li>
+  <li><strong>backend-bundled ref staleness.</strong> OpenCode releases change bundled lists. Broken ref behavior or auto-prune?</li>
+  <li><strong>Custom command consumers.</strong> One <code>ConsumerConfig</code> per command? Or fold into a single record keyed by command id?</li>
+</ol>
+
+<hr />
+<p class="muted">For implementation handoff: see <code>designdocs/MODEL_DATA_MODEL_SPEC.md</code> — same data model in canonical form, plus a reconciliation appendix diffing this design against the current <code>src/modelManagement/</code> branch.</p>
+
+</div>
+</body>
+</html>

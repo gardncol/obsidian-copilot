@@ -626,10 +626,12 @@ export class AutonomousAgentChainRunner extends CopilotPlusChainRunner {
     // Extract user content (L3 smart references + L5) from base messages
     const userMessageContent = baseMessages.find((m) => m.role === "user");
     if (userMessageContent) {
-      const isMultimodal = this.isMultimodalModel(chatModel);
-      const content: string | MessageContent[] = isMultimodal
-        ? await this.buildMessageContent(userMessageContent.content, userMessage)
-        : userMessageContent.content;
+      // Always forward image content. If the model can't handle images, the
+      // provider's error surfaces to the user via the standard error path.
+      const content: string | MessageContent[] = await this.buildMessageContent(
+        userMessageContent.content,
+        userMessage
+      );
       messages.push(new HumanMessage(content));
     }
 

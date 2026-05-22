@@ -1,6 +1,7 @@
 import { OpencodeInstallModal } from "@/agentMode/backends/opencode/OpencodeInstallModal";
 import OpencodeLogo from "@/agentMode/backends/opencode/logo.svg";
 import type CopilotPlugin from "@/main";
+import { ModelRegistry, ProviderRegistry } from "@/modelManagement";
 import {
   subscribeToSettingsChange,
   updateAgentModeBackendFields,
@@ -131,8 +132,25 @@ export const OpencodeBackendDescriptor: BackendDescriptor = {
   },
 
   isModelEnabledByDefault(model) {
-    // Default-enable only "Big Pickle"; users widen the catalog via the
-    // per-model toggles in the Agents tab.
+    // BYOK-picked models default on: their wire form `<providerId>/<rest>`
+    // must match an entry the user actually picked in `ModelRegistry`.
+    // Matching only on `ProviderRegistry` is too broad — OpenCode's
+    // bundled `models.dev` snapshot reports every model under that
+    // provider (e.g. ~50 `openrouter/*` rows) even when the user picked
+    // just two. The classifier in `bundledModels.ts:classifyOpencodeModels`
+    // uses the same rule.
+    const slash = model.modelId.indexOf("/");
+    if (slash > 0) {
+      const seg = model.modelId.slice(0, slash);
+      const rest = model.modelId.slice(slash + 1);
+      if (
+        rest &&
+        ProviderRegistry.getInstance().get(seg) &&
+        ModelRegistry.getInstance().get(seg, rest)
+      ) {
+        return true;
+      }
+    }
     const re = /big[\s_-]*pickle/i;
     return re.test(model.name) || re.test(model.modelId);
   },

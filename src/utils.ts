@@ -1005,30 +1005,6 @@ export async function checkLatestVersion(): Promise<{
   }
 }
 
-// Note: LangChain 0.6.6+ handles O-series and GPT-5 models automatically
-// These functions are kept for backward compatibility and specific checks
-export function isOSeriesModel(model: BaseChatModel | string): boolean {
-  if (typeof model === "string") {
-    return model.startsWith("o1") || model.startsWith("o3") || model.startsWith("o4");
-  }
-
-  // For BaseChatModel instances
-  const m = model as unknown as Record<string, unknown>;
-  const modelName: string = (m.modelName as string) || (m.model as string) || "";
-  return modelName.startsWith("o1") || modelName.startsWith("o3") || modelName.startsWith("o4");
-}
-
-function isGPT5Model(model: BaseChatModel | string): boolean {
-  if (typeof model === "string") {
-    return model.startsWith("gpt-5");
-  }
-
-  // For BaseChatModel instances
-  const m = model as unknown as Record<string, unknown>;
-  const modelName: string = (m.modelName as string) || (m.model as string) || "";
-  return modelName.startsWith("gpt-5");
-}
-
 /**
  * Checks whether a model belongs to the Codex family.
  * Codex model identifiers consistently include the "codex" token.
@@ -1062,49 +1038,26 @@ export function shouldUseGitHubCopilotResponsesApi(
   return isCodexModel(model.name);
 }
 
-/**
- * Utility for determining model characteristics
- * Note: Most of this is handled by LangChain 0.6.6+ internally
- */
-export interface ModelInfo {
-  isOSeries: boolean;
-  isGPT5: boolean;
-  isThinkingEnabled: boolean;
-  usesAdaptiveThinking: boolean;
-}
-
-export function getModelInfo(model: BaseChatModel | string): ModelInfo {
-  const m = model as unknown as Record<string, unknown>;
-  const modelName: string =
-    typeof model === "string" ? model : (m.modelName as string) || (m.model as string) || "";
-
-  const isOSeries = isOSeriesModel(modelName);
-  const isGPT5 = isGPT5Model(modelName);
-  const isThinkingEnabled =
-    modelName.startsWith("claude-3-7-sonnet") ||
-    modelName.startsWith("claude-sonnet-4") ||
-    modelName.startsWith("claude-opus-4");
-
-  // claude-opus-4-7 and later reject the legacy { type: "enabled", budget_tokens } shape
-  // with a 400 and require { type: "adaptive" }. Detect by minor version on the opus-4 line.
-  // Constrain the minor to 1-2 digits followed by a delimiter or end-of-string so dated
-  // snapshot IDs (e.g. "claude-opus-4-20250514") aren't misread as Opus 4.20250514.
-  const opusMinorMatch = modelName.match(/^claude-opus-4-(\d{1,2})(?:[-.]|$)/);
-  const usesAdaptiveThinking = opusMinorMatch ? parseInt(opusMinorMatch[1], 10) >= 7 : false;
-
-  return {
-    isOSeries,
-    isGPT5,
-    isThinkingEnabled,
-    usesAdaptiveThinking,
-  };
-}
-
 export function getMessageRole(
   model: BaseChatModel | string,
   defaultRole: "system" | "human" = "system"
 ): "system" | "human" {
-  return isOSeriesModel(model) ? "human" : defaultRole;
+  // OpenAI o-series models reject the `system` role on chat completions; flip
+  // to `human`. The provider-specific id pattern lives next to the OpenAI
+  // adapter, but inlining the prefix check here avoids a cross-boundary
+  // import from this generic shared file. The canonical helper is
+  // `isOpenAIOSeries` in `@/modelManagement/providers/adapters/adapterUtils`;
+  // keep the two in sync.
+  const modelName =
+    typeof model === "string"
+      ? model
+      : (((model as unknown as Record<string, unknown>).modelName as string) ??
+        ((model as unknown as Record<string, unknown>).model as string) ??
+        "");
+  const isOSeries =
+    typeof modelName === "string" &&
+    (modelName.startsWith("o1") || modelName.startsWith("o3") || modelName.startsWith("o4"));
+  return isOSeries ? "human" : defaultRole;
 }
 
 export function getNeedSetKeyProvider(): Provider[] {
@@ -1131,16 +1084,16 @@ export function checkModelApiKey(
 } {
   const provider = model.provider as ChatModelProviders;
   if (provider === ChatModelProviders.AMAZON_BEDROCK) {
-    const apiKey = model.apiKey || settings.amazonBedrockApiKey;
+    // Sources the key from `ProviderRegistry` (post-M9). Region defaults to
+    // us-east-1, so the API key is the only required credential.
+    const apiKey = getApiKeyForProvider(provider, model);
     if (!apiKey) {
       return {
         hasApiKey: false,
         errorNotice:
-          "Amazon Bedrock API key is missing. Please add a key in Settings > API Keys or update the model configuration.",
+          "Amazon Bedrock API key is missing. Please add a key in Settings > BYOK or update the model configuration.",
       };
     }
-
-    // Region defaults to us-east-1 if not specified, so API key is the only required check
     return { hasApiKey: true };
   }
 

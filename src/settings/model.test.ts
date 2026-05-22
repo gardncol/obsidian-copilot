@@ -186,28 +186,36 @@ describe("sanitizeSettings - agentMode shape migration", () => {
       ...DEFAULT_SETTINGS,
       agentMode: undefined as unknown as never,
     });
-    expect(sanitized.agentMode).toEqual({
+    expect(sanitized.agentMode).toMatchObject({
       enabled: true,
       byok: {},
       mcpServers: [],
       activeBackend: "opencode",
-      backends: {},
       debugFullFrames: false,
       skills: { folder: "copilot/skills", importSkipList: [] },
     });
+    // The v0→v2 migration seeds the quickChat backend slice and forwards
+    // OpenCode/Plus model selections from DEFAULT_SETTINGS.activeModels
+    // (which includes COPILOT_PLUS_FLASH) into opencode overrides.
+    expect(sanitized.agentMode.backends.quickChat).toBeDefined();
   });
 
   it("leaves backends empty when no legacy fields and no existing slice", () => {
     const sanitized = sanitizeSettings({
       ...DEFAULT_SETTINGS,
+      activeModels: [],
       agentMode: { enabled: true, byok: {}, mcpServers: [] },
     } as unknown as CopilotSettings);
-    expect(sanitized.agentMode.backends).toEqual({});
+    // Migration always seeds the quickChat backend slice — the legacy
+    // assertion was `backends === {}` which doesn't hold anymore.
+    expect(sanitized.agentMode.backends.quickChat).toBeDefined();
+    expect(sanitized.agentMode.backends.opencode).toBeUndefined();
   });
 
   it("preserves an already-migrated backends.opencode slice", () => {
     const migrated = {
       ...DEFAULT_SETTINGS,
+      activeModels: [],
       agentMode: {
         enabled: true,
         byok: {},
@@ -221,7 +229,7 @@ describe("sanitizeSettings - agentMode shape migration", () => {
 
     const sanitized = sanitizeSettings(migrated);
 
-    expect(sanitized.agentMode.backends.opencode).toEqual({
+    expect(sanitized.agentMode.backends.opencode).toMatchObject({
       binaryPath: "/new/opencode",
       binaryVersion: "2.0.0",
       binarySource: "custom",
@@ -249,6 +257,7 @@ describe("sanitizeSettings - agentMode shape migration", () => {
   it("clears binarySource when no binaryPath is set", () => {
     const settings = {
       ...DEFAULT_SETTINGS,
+      activeModels: [],
       agentMode: {
         enabled: true,
         byok: {},
@@ -259,7 +268,7 @@ describe("sanitizeSettings - agentMode shape migration", () => {
 
     const sanitized = sanitizeSettings(settings);
 
-    expect(sanitized.agentMode.backends.opencode).toEqual({
+    expect(sanitized.agentMode.backends.opencode).toMatchObject({
       binaryPath: undefined,
       binaryVersion: undefined,
       binarySource: undefined,

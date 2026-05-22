@@ -1,6 +1,6 @@
 // Mock dependencies first to avoid circular dependencies
 jest.mock("./MessageRepository");
-jest.mock("@/LLMProviders/chatModelManager");
+jest.mock("@/LLMProviders/ChatModelManager");
 jest.mock("./ContextCompactor");
 jest.mock("./ContextManager");
 jest.mock("@/logger", () => ({

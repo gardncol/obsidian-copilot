@@ -1,0 +1,7 @@
+{
+  "openAIApiKey": "sk-test-keys-only",
+  "anthropicApiKey": "sk-ant-test-keys-only",
+  "googleApiKey": "google-test-keys-only",
+  "activeModels": [],
+  "agentMode": { "enabled": true, "backends": {} }
+}

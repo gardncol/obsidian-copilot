@@ -15,7 +15,7 @@ async function safeGetChatModel(): Promise<BaseChatModel | null> {
   try {
     if (!getChatModelManagerSingleton) {
       // dynamic import to prevent module load side effects during tests
-      const mod = await import("@/LLMProviders/chatModelManager");
+      const mod = await import("@/LLMProviders/ChatModelManager");
       getChatModelManagerSingleton = () => mod.default.getInstance();
     }
     const chatModelManager = getChatModelManagerSingleton();

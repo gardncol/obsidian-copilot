@@ -1,10 +1,15 @@
 import { Notice } from "obsidian";
-import { logError } from "@/logger";
+import { logError, logInfo } from "@/logger";
+
+const BYOK_DIAG = true;
 import type { ModelSelectorEntry } from "@/components/ui/ModelSelector";
 import { isAgentModelEnabledOrKept } from "@/agentMode/session/modelEnable";
 import type { AgentSession } from "@/agentMode/session/AgentSession";
 import type { AgentChatUIState } from "@/agentMode/session/AgentChatUIState";
-import type { AgentSessionManager } from "@/agentMode/session/AgentSessionManager";
+import type {
+  AgentSessionManager,
+  EffortPreference,
+} from "@/agentMode/session/AgentSessionManager";
 import { MethodUnsupportedError } from "@/agentMode/session/errors";
 import { backendRegistry } from "@/agentMode/backends/registry";
 import { getBackendModelOverrides } from "@/agentMode/session/backendSettingsAccess";
@@ -80,6 +85,28 @@ export function appendBackendSection(
       ctx.keepBaseModelId
     )
   );
+  if (BYOK_DIAG && descriptor.id === "opencode") {
+    const filteredIds = new Set(filtered.map((m) => m.baseModelId));
+    const drops = ctx.backendModels
+      .filter((m) => !filteredIds.has(m.baseModelId))
+      .map((entry) => ({
+        baseModelId: entry.baseModelId,
+        name: entry.name,
+        override: ctx.overrides?.[entry.baseModelId],
+        defaultEnabled:
+          descriptor.isModelEnabledByDefault?.({
+            modelId: entry.baseModelId,
+            name: entry.name,
+          }) ?? null,
+        keepBaseModelId: ctx.keepBaseModelId,
+      }));
+    logInfo("[BYOK-DIAG] appendBackendSection opencode", {
+      total: ctx.backendModels.length,
+      kept: filtered.length,
+      droppedCount: drops.length,
+      drops,
+    });
+  }
   for (const m of filtered) {
     entries.push(synthesizeAgentEntry(m.baseModelId, m.name, descriptor));
   }
@@ -128,6 +155,30 @@ export function synthesizePreloadPlaceholder(
  */
 export function resolveBaseModelId(entry: ModelSelectorEntry): string | undefined {
   return entry.provider === AGENT_PROVIDER ? entry.name : undefined;
+}
+
+/**
+ * Pick the effort value to apply to a model swap, given the user's last
+ * explicit effort intent and the target model's effort options. Fallback
+ * cascade: (1) exact value match, (2) same index, (3) clamp to last
+ * available index. Returns `null` when the target has no effort options
+ * (the model doesn't expose effort at all) or when there is no recorded
+ * preference and the target has no options.
+ *
+ * Match on `value` rather than `label` because `value` is the stable
+ * identifier the backend dispatches against; today's labels happen to be
+ * the lowercased values but that's a translation-layer detail.
+ */
+export function resolveEffortForOptions(
+  preference: EffortPreference | null,
+  options: ReadonlyArray<{ value: string | null; label: string }>
+): string | null {
+  if (options.length === 0) return null;
+  if (!preference) return options[0].value;
+  const exact = options.find((o) => o.value === preference.value);
+  if (exact) return exact.value;
+  const idx = Math.min(Math.max(preference.index, 0), options.length - 1);
+  return options[idx].value;
 }
 
 /** Bundle of session-derived inputs every model+effort builder needs. */
@@ -183,15 +234,34 @@ export function buildPickerEntries(
   const entries: ModelSelectorEntry[] = [];
   for (const descriptor of descriptors) {
     const isActiveBackend = descriptor.id === ctx.activeBackendId;
-    if (!isActiveBackend && ctx.activeSessionHasHistory) continue;
+    if (!isActiveBackend && ctx.activeSessionHasHistory) {
+      if (BYOK_DIAG && descriptor.id === "opencode") {
+        logInfo("[BYOK-DIAG] buildPickerEntries opencode skipped", {
+          reason: "not active backend && active session has history",
+          activeBackendId: ctx.activeBackendId,
+          activeSessionHasHistory: ctx.activeSessionHasHistory,
+        });
+      }
+      continue;
+    }
     const cached = manager.getCachedBackendState(descriptor.id);
     const keepBaseModelId = isActiveBackend
       ? (ctx.activeModelState?.current.baseModelId ?? null)
-      : (manager.getDefaultSelection(descriptor.id)?.baseModelId ?? null);
+      : (manager.getLastSelection(descriptor.id)?.baseModelId ?? null);
     const backendModels = cached?.model?.availableModels ?? null;
+    const overrides = getBackendModelOverrides(settings, descriptor.id);
+    if (BYOK_DIAG && descriptor.id === "opencode") {
+      logInfo("[BYOK-DIAG] buildPickerEntries opencode", {
+        isActiveBackend,
+        activeSessionHasHistory: ctx.activeSessionHasHistory,
+        keepBaseModelId,
+        backendModels: backendModels?.map((m) => m.baseModelId) ?? null,
+        overrides: overrides ?? null,
+      });
+    }
     appendBackendSection(entries, descriptor, {
       backendModels,
-      overrides: getBackendModelOverrides(settings, descriptor.id),
+      overrides,
       keepBaseModelId,
     });
     // No catalog cached yet (and not because the agent intentionally
@@ -231,6 +301,27 @@ export function buildPickerEntries(
 }
 
 /**
+ * Look up the `effortOptions` for a `(backendId, baseModelId)` pair.
+ * Reads the active session's translated state for the active backend (more
+ * authoritative than the shared per-backend cache, which can lag a
+ * sibling-tab swap) and the cached `BackendState` for any other backend.
+ * Returns `[]` when the model isn't in the catalog yet.
+ */
+function lookupEffortOptions(
+  manager: AgentSessionManager,
+  ctx: ModelActiveContext,
+  backendId: BackendId,
+  baseModelId: string
+): ReadonlyArray<{ value: string | null; label: string }> {
+  const modelState =
+    ctx.activeBackendId === backendId
+      ? ctx.activeModelState
+      : (manager.getCachedBackendState(backendId)?.model ?? null);
+  const entry = modelState?.availableModels.find((e) => e.baseModelId === baseModelId);
+  return entry?.effortOptions ?? [];
+}
+
+/**
  * Build the optional effort sibling. Returns `undefined` when the active
  * model has no effort options. `disabled` mirrors
  * `activeChatUIState.canSwitchEffort()` — wire routing
@@ -244,11 +335,17 @@ export function buildEffortSibling(
   if (!activeBackendId || !activeCurrentEntry) return undefined;
   if (activeCurrentEntry.effortOptions.length === 0) return undefined;
   if (!activeModelState) return undefined;
+  const effortOptions = activeCurrentEntry.effortOptions;
   return {
-    options: activeCurrentEntry.effortOptions,
+    options: effortOptions,
     value: activeModelState.current.effort,
     disabled: activeChatUIState?.canSwitchEffort() === false,
     onChange: (value) => {
+      // Record the user's explicit intent before applying — the index here
+      // anchors the same-index fallback used when this preference is later
+      // re-resolved against a different model's effort options.
+      const index = effortOptions.findIndex((o) => o.value === value);
+      manager.setUserEffortPreference(value, index >= 0 ? index : 0);
       manager
         .applySelection({ effort: value }, { expectBackendId: activeBackendId })
         .catch((err) => {
@@ -259,8 +356,9 @@ export function buildEffortSibling(
 }
 
 /**
- * Persist the picked (model, effort) as the target backend's default, then
- * spawn a fresh session on it
+ * Remember the picked (model, effort) for the target backend, then spawn a
+ * fresh session on it. `createSession` reads the remembered selection back
+ * out via `getLastSelection` to seed the new session.
  */
 function runCrossBackendPick(
   manager: AgentSessionManager,
@@ -272,7 +370,7 @@ function runCrossBackendPick(
 ): void {
   void (async () => {
     try {
-      await manager.persistDefaultSelection(targetBackendId, { baseModelId, effort });
+      manager.rememberLastSelection(targetBackendId, { baseModelId, effort });
       await manager.createSession(targetBackendId);
       manager.setDefaultBackend(targetBackendId);
       if (oldSessionId) {
@@ -289,11 +387,14 @@ function runCrossBackendPick(
 
 /**
  * Build the model picker's `onChange` callback. Cross-backend picks seed
- * a fresh session on the target backend with the chosen model + the
- * target backend's persisted effort (no effort plumbed through the
- * legacy single-arg signature) and close the old empty tab in the
- * background. Same-backend picks route through the running session via
- * `applySelection`. Neither path writes to the saved default selection.
+ * a fresh session on the target backend with the chosen model + the best
+ * effort the target supports (the most recently remembered selection on
+ * that backend wins; otherwise the user's global effort intent is
+ * re-resolved against the target model's options). The old empty tab is
+ * closed in the background. Same-backend picks route through the running
+ * session via `applySelection` with the effort re-resolved against the
+ * new model's options so the user's intent carries across models with
+ * differing effort vocabularies (or no effort at all).
  */
 export function buildModelOnChange(
   manager: AgentSessionManager,
@@ -321,16 +422,22 @@ export function buildModelOnChange(
     }
 
     if (!activeSession || activeSession.backendId !== targetBackendId) {
-      // Legacy ModelSelector path: no effort plumbed through. Preserve any
-      // existing persisted effort for this backend.
-      const persistedEffort = manager.getDefaultSelection(targetBackendId)?.effort ?? null;
+      const targetOptions = lookupEffortOptions(manager, ctx, targetBackendId, baseModelId);
+      const rememberedEffort = manager.getLastSelection(targetBackendId)?.effort;
+      // Prefer the user's most-recent explicit pick on that backend.
+      // Fall back to re-resolving the global effort intent against the
+      // target model's options (handles "first time on this backend").
+      const seedEffort =
+        rememberedEffort !== undefined
+          ? rememberedEffort
+          : resolveEffortForOptions(manager.getUserEffortPreference(), targetOptions);
       runCrossBackendPick(
         manager,
         activeSession?.internalId,
         targetBackendId,
         targetDescriptor,
         baseModelId,
-        persistedEffort
+        seedEffort
       );
       return;
     }
@@ -341,7 +448,15 @@ export function buildModelOnChange(
       new Notice("This agent doesn't support runtime model switching.");
       return;
     }
-    manager.applySelection({ baseModelId }).catch((err) => {
+    // Re-resolve the user's effort intent against the new model's options
+    // so a model swap doesn't silently snap to `low` when the previous
+    // effort label isn't present on the target (or doesn't exist at all).
+    const targetOptions = lookupEffortOptions(manager, ctx, targetBackendId, baseModelId);
+    const resolvedEffort = resolveEffortForOptions(
+      manager.getUserEffortPreference(),
+      targetOptions
+    );
+    manager.applySelection({ baseModelId, effort: resolvedEffort }).catch((err) => {
       handlePickerSwitchError(err, "model");
     });
   };
@@ -381,9 +496,10 @@ export function buildEffortOptionsByModelKey(
 /**
  * Build the atomic `(model, effort)` commit callback used by the merged
  * picker. Same-backend picks push both fields through `applySelection` in
- * one call. Cross-backend picks seed a fresh session on the target with
- * the drafted `(baseModelId, effort)` — the user's effort choice survives
- * the backend swap, and the saved default for either backend is left alone.
+ * one call (which also updates the in-memory last-selection cache).
+ * Cross-backend picks remember the drafted `(baseModelId, effort)` on
+ * the target backend and seed a fresh session on it — the user's effort
+ * choice survives the backend swap.
  */
 export function buildCommitSelection(
   manager: AgentSessionManager,
@@ -405,6 +521,15 @@ export function buildCommitSelection(
     if (!targetDescriptor) {
       logError("[AgentMode] commitSelection references unknown backend", targetBackendId);
       return;
+    }
+    // The atomic commit is the user explicitly picking an effort against a
+    // specific model — record it as the new global intent so subsequent
+    // model swaps re-resolve against this index, even if they pass through
+    // a model whose effort vocabulary doesn't contain this value.
+    const targetOptions = lookupEffortOptions(manager, ctx, targetBackendId, baseModelId);
+    if (targetOptions.length > 0) {
+      const index = targetOptions.findIndex((o) => o.value === effort);
+      manager.setUserEffortPreference(effort, index >= 0 ? index : 0);
     }
     if (!activeSession || activeSession.backendId !== targetBackendId) {
       runCrossBackendPick(

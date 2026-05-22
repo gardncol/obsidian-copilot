@@ -6,7 +6,6 @@
 import { FileSystemAdapter, App } from "obsidian";
 import { AgentSession } from "./AgentSession";
 import { AgentSessionManager } from "./AgentSessionManager";
-import { setSettings as mockedSetSettings } from "@/settings/model";
 import type { BackendDescriptor } from "./types";
 
 jest.mock("@/logger", () => ({
@@ -824,29 +823,26 @@ describe("AgentSessionManager.applySelection", () => {
     const session = await mgr.createSession();
 
     // Effort-only patch: baseModelId resolves from current state.
-    (mockedSetSettings as jest.Mock).mockClear();
     await mgr.applySelection({ effort: "high" }, { expectBackendId: "opencode" });
     expect(applySelectionMock).toHaveBeenCalledWith(session, {
       baseModelId: "anthropic/sonnet",
       effort: "high",
     });
-    // Resolved selection is also persisted to settings.
-    const persistedAfterEffort = readPersistedDefault(mockedSetSettings as jest.Mock, "opencode");
-    expect(persistedAfterEffort).toEqual({
+    // Resolved selection is remembered in memory so the next new session
+    // on this backend inherits it.
+    expect(mgr.getLastSelection("opencode")).toEqual({
       baseModelId: "anthropic/sonnet",
       effort: "high",
     });
 
     // Full patch: both fields land verbatim.
     applySelectionMock.mockClear();
-    (mockedSetSettings as jest.Mock).mockClear();
     await mgr.applySelection({ baseModelId: "anthropic/opus", effort: null });
     expect(applySelectionMock).toHaveBeenCalledWith(session, {
       baseModelId: "anthropic/opus",
       effort: null,
     });
-    const persistedAfterFull = readPersistedDefault(mockedSetSettings as jest.Mock, "opencode");
-    expect(persistedAfterFull).toEqual({
+    expect(mgr.getLastSelection("opencode")).toEqual({
       baseModelId: "anthropic/opus",
       effort: null,
     });
@@ -906,32 +902,25 @@ describe("AgentSessionManager.applySelection", () => {
       return s;
     });
     await mgr.createSession();
-    (mockedSetSettings as jest.Mock).mockClear();
     await expect(
       mgr.applySelection({ baseModelId: "anthropic/opus", effort: "high" })
     ).rejects.toThrow("nope");
-    // No persistence after a failed apply.
-    expect(readPersistedDefault(mockedSetSettings as jest.Mock, "opencode")).toBeUndefined();
+    // No in-memory remembered selection after a failed apply.
+    expect(mgr.getLastSelection("opencode")).toBeNull();
   });
 });
 
-/**
- * Walk through `setSettings` calls (each carries an updater function) and
- * return the most recent `defaultModel` written for `backendId`.
- */
-function readPersistedDefault(
-  setSettings: jest.Mock,
-  backendId: string
-): { baseModelId: string; effort: string | null } | undefined {
-  let backends: Record<string, { defaultModel?: { baseModelId: string; effort: string | null } }> =
-    {};
-  for (const call of setSettings.mock.calls) {
-    const updater = call[0];
-    if (typeof updater !== "function") continue;
-    const patch = updater({ agentMode: { backends } });
-    if (patch?.agentMode?.backends) {
-      backends = { ...backends, ...patch.agentMode.backends };
-    }
-  }
-  return backends[backendId]?.defaultModel;
-}
+describe("AgentSessionManager.userEffortPreference", () => {
+  it("starts unset", () => {
+    const mgr = buildManager();
+    expect(mgr.getUserEffortPreference()).toBeNull();
+  });
+
+  it("setUserEffortPreference / getUserEffortPreference round-trip", () => {
+    const mgr = buildManager();
+    mgr.setUserEffortPreference("high", 2);
+    expect(mgr.getUserEffortPreference()).toEqual({ value: "high", index: 2 });
+    mgr.setUserEffortPreference(null, 0);
+    expect(mgr.getUserEffortPreference()).toEqual({ value: null, index: 0 });
+  });
+});

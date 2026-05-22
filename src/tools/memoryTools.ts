@@ -2,7 +2,7 @@ import { z } from "zod";
 import { createLangChainTool } from "./createLangChainTool";
 import { UserMemoryManager } from "@/memory/UserMemoryManager";
 import { logError } from "@/logger";
-import ChatModelManager from "@/LLMProviders/chatModelManager";
+import ChatModelManager from "@/LLMProviders/ChatModelManager";
 
 // Define Zod schema for updateMemoryTool
 const memorySchema = z.object({

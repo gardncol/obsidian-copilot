@@ -11,7 +11,7 @@ import {
   MessagesPlaceholder,
   SystemMessagePromptTemplate,
 } from "@langchain/core/prompts";
-import ChatModelManager from "@/LLMProviders/chatModelManager";
+import ChatModelManager from "@/LLMProviders/ChatModelManager";
 import { CustomModel } from "@/aiParams";
 
 /**

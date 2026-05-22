@@ -5,6 +5,12 @@ export interface TabItem {
   icon: React.ReactNode;
   label: string;
   id: string;
+  /**
+   * When true, render the label with muted text + line-through to signal a
+   * deprecated tab. Used during the BYOK migration (M4) for the legacy
+   * Models tab while both BYOK and Models coexist.
+   */
+  isMuted?: boolean;
 }
 
 interface TabItemProps {
@@ -66,7 +72,8 @@ export const TabItem: React.FC<TabItemProps> = ({ tab, isSelected, onClick, isFi
           "tw-font-medium",
           "tw-transition-all tw-duration-200 tw-ease-in-out",
           "tw-overflow-hidden tw-whitespace-nowrap",
-          "tw-max-w-[100px] tw-translate-x-0 tw-opacity-100"
+          "tw-max-w-[100px] tw-translate-x-0 tw-opacity-100",
+          tab.isMuted && !isSelected && "tw-text-muted tw-line-through tw-opacity-70"
         )}
       >
         {tab.label}

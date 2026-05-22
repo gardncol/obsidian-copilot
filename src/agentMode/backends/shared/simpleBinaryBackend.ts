@@ -3,7 +3,12 @@ import type CopilotPlugin from "@/main";
 import { AcpBackendProcess } from "@/agentMode/acp/AcpBackendProcess";
 import type { AcpBackend, AcpSpawnDescriptor } from "@/agentMode/acp/types";
 import { augmentPathForNodeShebang } from "@/agentMode/acp/nodeShebangPath";
-import type { BackendDescriptor, BackendProcess, InstallState } from "@/agentMode/session/types";
+import type {
+  BackendDescriptor,
+  BackendProcess,
+  InstallState,
+  ModelSelection,
+} from "@/agentMode/session/types";
 
 /**
  * Build a spawn descriptor for a backend whose only configuration is a
@@ -48,8 +53,15 @@ export function simpleBinaryBackendProcess(
     app: App;
     clientVersion: string;
     descriptor: BackendDescriptor;
+    getSeedSelection?: () => ModelSelection | null;
   },
   backend: AcpBackend
 ): BackendProcess {
-  return new AcpBackendProcess(args.app, backend, args.clientVersion, args.descriptor);
+  return new AcpBackendProcess(
+    args.app,
+    backend,
+    args.clientVersion,
+    args.descriptor,
+    args.getSeedSelection
+  );
 }

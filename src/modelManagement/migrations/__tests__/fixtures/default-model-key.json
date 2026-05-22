@@ -1,0 +1,13 @@
+{
+  "anthropicApiKey": "sk-ant-test",
+  "defaultModelKey": "claude-sonnet-4-5-20250929|anthropic",
+  "activeModels": [
+    {
+      "name": "claude-sonnet-4-5-20250929",
+      "provider": "anthropic",
+      "isBuiltIn": true,
+      "enabled": true
+    }
+  ],
+  "agentMode": { "enabled": true, "backends": {} }
+}

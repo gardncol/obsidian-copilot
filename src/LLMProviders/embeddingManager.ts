@@ -3,6 +3,7 @@ import { BREVILABS_MODELS_BASE_URL, EmbeddingModelProviders, ProviderInfo } from
 import { getDecryptedKey } from "@/encryptionService";
 import { CustomError } from "@/error";
 import { logInfo } from "@/logger";
+import { getProviderApiKeySync, ProviderRegistry } from "@/modelManagement";
 import { getModelKeyFromModel, getSettings, subscribeToSettingsChange } from "@/settings/model";
 import { err2String, safeFetch } from "@/utils";
 import { Embeddings } from "@langchain/core/embeddings";
@@ -13,6 +14,47 @@ import { Notice } from "obsidian";
 import { BrevilabsClient } from "./brevilabsClient";
 import { CustomJinaEmbeddings } from "./CustomJinaEmbeddings";
 import { CustomOpenAIEmbeddings } from "./CustomOpenAIEmbeddings";
+
+/**
+ * Maps `EmbeddingModelProviders` enum values to canonical `ProviderRegistry`
+ * provider ids. Local providers and Copilot-Plus pseudo-providers fall back
+ * to their respective dedicated credentials in `resolveDefaultApiKey`.
+ */
+const EMBEDDING_PROVIDER_TO_REGISTRY_ID: Partial<Record<EmbeddingModelProviders, string>> = {
+  [EmbeddingModelProviders.OPENAI]: "openai",
+  [EmbeddingModelProviders.COHEREAI]: "cohere",
+  [EmbeddingModelProviders.GOOGLE]: "google",
+  [EmbeddingModelProviders.AZURE_OPENAI]: "azure",
+  [EmbeddingModelProviders.SILICONFLOW]: "siliconflow",
+  [EmbeddingModelProviders.OPENROUTERAI]: "openrouter",
+};
+
+/** Resolve a default API key for an embedding provider via `ProviderRegistry`. */
+function resolveDefaultEmbeddingApiKey(provider: EmbeddingModelProviders): string {
+  switch (provider) {
+    case EmbeddingModelProviders.COPILOT_PLUS:
+    case EmbeddingModelProviders.COPILOT_PLUS_JINA:
+      return getSettings().plusLicenseKey ?? "";
+    case EmbeddingModelProviders.OLLAMA:
+    case EmbeddingModelProviders.LM_STUDIO:
+    case EmbeddingModelProviders.OPENAI_FORMAT:
+      return "default-key";
+    default: {
+      const registryId = EMBEDDING_PROVIDER_TO_REGISTRY_ID[provider];
+      if (!registryId) return "";
+      return getProviderApiKeySync(registryId) ?? "";
+    }
+  }
+}
+
+/** Read a string extras field from the OpenAI / Azure provider registry entry. */
+function getAzureExtra(
+  field: "azureInstanceName" | "azureDeploymentName" | "azureApiVersion"
+): string | undefined {
+  const provider = ProviderRegistry.getInstance().get("azure");
+  const value = provider?.extra?.[field];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
 
 type EmbeddingConstructorType = new (config: Record<string, unknown>) => Embeddings;
 
@@ -46,17 +88,28 @@ export default class EmbeddingManager {
   >;
 
   private readonly providerApiKeyMap: Record<EmbeddingModelProviders, () => string> = {
-    [EmbeddingModelProviders.COPILOT_PLUS]: () => getSettings().plusLicenseKey,
-    [EmbeddingModelProviders.COPILOT_PLUS_JINA]: () => getSettings().plusLicenseKey,
-    [EmbeddingModelProviders.OPENAI]: () => getSettings().openAIApiKey,
-    [EmbeddingModelProviders.COHEREAI]: () => getSettings().cohereApiKey,
-    [EmbeddingModelProviders.GOOGLE]: () => getSettings().googleApiKey,
-    [EmbeddingModelProviders.AZURE_OPENAI]: () => getSettings().azureOpenAIApiKey,
-    [EmbeddingModelProviders.OLLAMA]: () => "default-key",
-    [EmbeddingModelProviders.LM_STUDIO]: () => "default-key",
-    [EmbeddingModelProviders.OPENAI_FORMAT]: () => "default-key",
-    [EmbeddingModelProviders.SILICONFLOW]: () => getSettings().siliconflowApiKey,
-    [EmbeddingModelProviders.OPENROUTERAI]: () => getSettings().openRouterAiApiKey,
+    [EmbeddingModelProviders.COPILOT_PLUS]: () =>
+      resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.COPILOT_PLUS),
+    [EmbeddingModelProviders.COPILOT_PLUS_JINA]: () =>
+      resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.COPILOT_PLUS_JINA),
+    [EmbeddingModelProviders.OPENAI]: () =>
+      resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.OPENAI),
+    [EmbeddingModelProviders.COHEREAI]: () =>
+      resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.COHEREAI),
+    [EmbeddingModelProviders.GOOGLE]: () =>
+      resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.GOOGLE),
+    [EmbeddingModelProviders.AZURE_OPENAI]: () =>
+      resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.AZURE_OPENAI),
+    [EmbeddingModelProviders.OLLAMA]: () =>
+      resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.OLLAMA),
+    [EmbeddingModelProviders.LM_STUDIO]: () =>
+      resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.LM_STUDIO),
+    [EmbeddingModelProviders.OPENAI_FORMAT]: () =>
+      resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.OPENAI_FORMAT),
+    [EmbeddingModelProviders.SILICONFLOW]: () =>
+      resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.SILICONFLOW),
+    [EmbeddingModelProviders.OPENROUTERAI]: () =>
+      resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.OPENROUTERAI),
   };
 
   private constructor() {
@@ -230,7 +283,9 @@ export default class EmbeddingManager {
       },
       [EmbeddingModelProviders.OPENAI]: {
         modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.openAIApiKey),
+        apiKey: await getDecryptedKey(
+          customModel.apiKey || resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.OPENAI)
+        ),
         timeout: 10000,
         batchSize: getSettings().embeddingBatchSize,
         configuration: {
@@ -240,7 +295,9 @@ export default class EmbeddingManager {
       },
       [EmbeddingModelProviders.COHEREAI]: {
         modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.cohereApiKey),
+        apiKey: await getDecryptedKey(
+          customModel.apiKey || resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.COHEREAI)
+        ),
         timeout: 10000,
         batchSize: getSettings().embeddingBatchSize,
         configuration: {
@@ -250,17 +307,26 @@ export default class EmbeddingManager {
       },
       [EmbeddingModelProviders.GOOGLE]: {
         modelName: modelName,
-        apiKey: await getDecryptedKey(settings.googleApiKey),
+        apiKey: await getDecryptedKey(
+          resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.GOOGLE)
+        ),
       },
       [EmbeddingModelProviders.AZURE_OPENAI]: {
         modelName,
-        azureOpenAIApiKey: await getDecryptedKey(customModel.apiKey || settings.azureOpenAIApiKey),
+        azureOpenAIApiKey: await getDecryptedKey(
+          customModel.apiKey || resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.AZURE_OPENAI)
+        ),
         azureOpenAIApiInstanceName:
-          customModel.azureOpenAIApiInstanceName || settings.azureOpenAIApiInstanceName,
+          customModel.azureOpenAIApiInstanceName || getAzureExtra("azureInstanceName") || "",
+        // Embedding-specific deployment override on the legacy CustomModel
+        // wins; otherwise fall back to the provider-level deployment in
+        // `extra.azureDeploymentName`.
         azureOpenAIApiDeploymentName:
           customModel.azureOpenAIApiEmbeddingDeploymentName ||
-          settings.azureOpenAIApiEmbeddingDeploymentName,
-        azureOpenAIApiVersion: customModel.azureOpenAIApiVersion || settings.azureOpenAIApiVersion,
+          getAzureExtra("azureDeploymentName") ||
+          "",
+        azureOpenAIApiVersion:
+          customModel.azureOpenAIApiVersion || getAzureExtra("azureApiVersion") || "",
       },
       [EmbeddingModelProviders.OLLAMA]: {
         baseUrl: customModel.baseUrl || "http://localhost:11434",
@@ -290,7 +356,9 @@ export default class EmbeddingManager {
       },
       [EmbeddingModelProviders.SILICONFLOW]: {
         modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.siliconflowApiKey),
+        apiKey: await getDecryptedKey(
+          customModel.apiKey || resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.SILICONFLOW)
+        ),
         batchSize: getSettings().embeddingBatchSize,
         configuration: {
           baseURL: customModel.baseUrl || ProviderInfo[EmbeddingModelProviders.SILICONFLOW].host,
@@ -299,7 +367,9 @@ export default class EmbeddingManager {
       },
       [EmbeddingModelProviders.OPENROUTERAI]: {
         modelName,
-        apiKey: await getDecryptedKey(customModel.apiKey || settings.openRouterAiApiKey),
+        apiKey: await getDecryptedKey(
+          customModel.apiKey || resolveDefaultEmbeddingApiKey(EmbeddingModelProviders.OPENROUTERAI)
+        ),
         batchSize: getSettings().embeddingBatchSize,
         configuration: {
           baseURL: customModel.baseUrl || "https://openrouter.ai/api/v1",

@@ -10,6 +10,7 @@ import { getModelDisplayWithIcons } from "@/components/ui/model-display";
 import { SettingItem } from "@/components/ui/setting-item";
 import { VAULT_VECTOR_STORE_STRATEGIES } from "@/constants";
 import { getModelKeyFromModel, updateSetting, useSettingsValue } from "@/settings/model";
+import { EmbeddingModelsSection } from "@/settings/v2/components/EmbeddingModelsSection";
 import { PatternListEditor } from "@/settings/v2/components/PatternListEditor";
 
 export const QASettings: React.FC = () => {
@@ -315,6 +316,16 @@ export const QASettings: React.FC = () => {
           />
         </div>
       </section>
+
+      {/*
+       * Embedding model registry. Lives at the bottom of the Embedding tab
+       * (formerly QA) — was relocated here from the deprecated Model tab as
+       * part of M3 of the Model Management redesign. The default embedding
+       * model selector is still rendered above (inside the indexing
+       * settings); this section manages the full list of available
+       * embedding models (add / edit / remove / reorder / refresh).
+       */}
+      <EmbeddingModelsSection />
     </div>
   );
 };

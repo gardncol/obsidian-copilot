@@ -34,7 +34,8 @@ export interface AgentModelPickerOverride {
    * Atomically commit both the model and its effort. Same-backend picks
    * route through `applySelection({ baseModelId, effort })`; cross-backend
    * picks seed a fresh session on the target with the drafted selection.
-   * Neither path writes to the saved default.
+   * Both paths update the manager's in-memory last-selection cache so the
+   * next new session on the same backend inherits this pick.
    */
   commitSelection?: (modelKey: string, effort: string | null) => void;
 }

@@ -30,11 +30,7 @@ export const TokenLimitWarning: React.FC<TokenLimitWarningProps> = ({ message, a
     }
 
     // Create update handler
-    const handleModelUpdate = (
-      isEmbedding: boolean,
-      original: CustomModel,
-      updated: CustomModel
-    ) => {
+    const handleModelUpdate = (original: CustomModel, updated: CustomModel) => {
       const updatedModels = settings.activeModels.map((m) => (m === original ? updated : m));
       updateSetting("activeModels", updatedModels);
     };

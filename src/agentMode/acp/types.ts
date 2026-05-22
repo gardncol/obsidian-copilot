@@ -1,4 +1,4 @@
-import type { BackendId } from "@/agentMode/session/types";
+import type { BackendId, ModelSelection } from "@/agentMode/session/types";
 
 /**
  * Spawn descriptor for an ACP-speaking agent backend. Backends produce these
@@ -9,6 +9,18 @@ export interface AcpSpawnDescriptor {
   command: string;
   args: string[];
   env: NodeJS.ProcessEnv;
+}
+
+/**
+ * Context passed to `AcpBackend.buildSpawnDescriptor`. `seedSelection`
+ * carries the in-memory last-used (model, effort) for this backend so
+ * suffix-style backends (e.g. opencode) can boot their first turn on
+ * the right model before `unstable_setSessionModel` lands. `null` when
+ * no session on this backend has chosen a model yet.
+ */
+export interface AcpSpawnContext {
+  vaultBasePath: string;
+  seedSelection?: ModelSelection | null;
 }
 
 /**
@@ -23,5 +35,5 @@ export interface AcpBackend {
   /** Human-readable name surfaced in the UI. */
   readonly displayName: string;
   /** Build the spawn descriptor (BYOK keys decrypted, env composed). */
-  buildSpawnDescriptor(ctx: { vaultBasePath: string }): Promise<AcpSpawnDescriptor>;
+  buildSpawnDescriptor(ctx: AcpSpawnContext): Promise<AcpSpawnDescriptor>;
 }

@@ -27,11 +27,7 @@ import { ModelParametersEditor } from "@/components/ui/ModelParametersEditor";
 interface ModelEditModalContentProps {
   model: CustomModel;
   isEmbeddingModel: boolean;
-  onUpdate: (
-    isEmbeddingModel: boolean,
-    originalModel: CustomModel,
-    updatedModel: CustomModel
-  ) => void;
+  onUpdate: (originalModel: CustomModel, updatedModel: CustomModel) => void;
   onCancel: () => void;
 }
 
@@ -59,9 +55,9 @@ const ModelEditModalContent: React.FC<ModelEditModalContentProps> = ({
   const debouncedOnUpdate = useMemo(
     () =>
       debounce((currentOriginalModel: CustomModel, updatedModel: CustomModel) => {
-        onUpdate(isEmbeddingModel, currentOriginalModel, updatedModel);
+        onUpdate(currentOriginalModel, updatedModel);
       }, 500),
-    [isEmbeddingModel, onUpdate]
+    [onUpdate]
   );
 
   // Function to update local state immediately
@@ -352,11 +348,7 @@ export class ModelEditModal extends Modal {
     app: App,
     private model: CustomModel,
     private isEmbeddingModel: boolean,
-    private onUpdate: (
-      isEmbeddingModel: boolean,
-      originalModel: CustomModel,
-      updatedModel: CustomModel
-    ) => void
+    private onUpdate: (originalModel: CustomModel, updatedModel: CustomModel) => void
   ) {
     super(app);
     // @ts-ignore
@@ -371,14 +363,6 @@ export class ModelEditModal extends Modal {
     }
     this.root = createPluginRoot(contentEl, this.app);
 
-    const handleUpdate = (
-      isEmbeddingModel: boolean,
-      originalModel: CustomModel,
-      updatedModel: CustomModel
-    ) => {
-      this.onUpdate(isEmbeddingModel, originalModel, updatedModel);
-    };
-
     const handleCancel = () => {
       this.close();
     };
@@ -387,7 +371,7 @@ export class ModelEditModal extends Modal {
       <ModelEditModalContent
         model={this.model}
         isEmbeddingModel={this.isEmbeddingModel}
-        onUpdate={handleUpdate}
+        onUpdate={this.onUpdate}
         onCancel={handleCancel}
       />
     );

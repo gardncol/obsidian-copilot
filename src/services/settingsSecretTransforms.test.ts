@@ -20,13 +20,26 @@ import {
   stripKeychainFields,
 } from "./settingsSecretTransforms";
 
-/** Create a lightweight settings object for transform tests. */
-function makeSettings(overrides: Partial<CopilotSettings> = {}): CopilotSettings {
+/**
+ * Create a lightweight settings object for transform tests.
+ *
+ * Accepts arbitrary keys via `Record<string, unknown>` because these tests
+ * historically pass legacy `*ApiKey` fields that were removed from the
+ * `CopilotSettings` interface in M9. The persistence machinery still
+ * encounters those keys on disk for un-migrated installs, so the tests
+ * exercise the dynamic-keys behavior of `isSensitiveKey`.
+ */
+function makeSettings(overrides: Record<string, unknown> = {}): CopilotSettings {
   return {
     activeModels: [],
     activeEmbeddingModels: [],
     ...overrides,
   } as unknown as CopilotSettings;
+}
+
+/** Coerce a settings-shaped object to `Record<string, unknown>` for legacy-field assertions. */
+function asRecord(value: CopilotSettings): Record<string, unknown> {
+  return value as unknown as Record<string, unknown>;
 }
 
 /** JSON-safe clone helper for mutation assertions. */
@@ -98,8 +111,8 @@ describe("stripKeychainFields", () => {
     const result = stripKeychainFields(settings);
 
     expect(result).not.toBe(settings);
-    expect(result.openAIApiKey).toBe("");
-    expect(result.googleApiKey).toBe("");
+    expect(asRecord(result).openAIApiKey).toBe("");
+    expect(asRecord(result).googleApiKey).toBe("");
     expect((result as unknown as Record<string, unknown>).defaultModelKey).toBe("gpt-4|openai");
     expect(result.activeModels[0].apiKey).toBe("");
     expect(result.activeModels[1].apiKey).toBe("");
@@ -133,7 +146,7 @@ describe("cleanupLegacyFields", () => {
     const result = cleanupLegacyFields(settings);
 
     expect(result).not.toBe(settings);
-    expect(result.openAIApiKey).toBe("sk-123");
+    expect(asRecord(result).openAIApiKey).toBe("sk-123");
     expect(settings).toEqual(before);
   });
 
@@ -154,7 +167,7 @@ describe("cleanupLegacyFields", () => {
     const settings = makeSettings({
       _keychainMigratedAt: "2026-04-01T00:00:00.000Z",
       _migrationModalDismissed: true,
-    } as unknown as Partial<CopilotSettings>);
+    });
 
     const result = cleanupLegacyFields(settings);
     const rec = result as unknown as Record<string, unknown>;
@@ -166,7 +179,7 @@ describe("cleanupLegacyFields", () => {
   it("migrates legacy _diskSecretsCleared → _keychainOnly", () => {
     const settings = makeSettings({
       _diskSecretsCleared: true,
-    } as unknown as Partial<CopilotSettings>);
+    });
 
     const result = cleanupLegacyFields(settings);
     const rec = result as unknown as Record<string, unknown>;
@@ -180,7 +193,7 @@ describe("cleanupLegacyFields", () => {
     const settings = makeSettings({
       _diskSecretsCleared: true,
       _keychainOnly: false,
-    } as unknown as Partial<CopilotSettings>);
+    });
 
     const result = cleanupLegacyFields(settings);
     const rec = result as unknown as Record<string, unknown>;
@@ -202,7 +215,7 @@ describe("cleanupLegacyFields", () => {
       _keychainOnly: true,
       _someFutureField: "future-value",
       anotherUnknownField: 42,
-    } as unknown as Partial<CopilotSettings>);
+    });
 
     const result = cleanupLegacyFields(settings);
     const rec = result as unknown as Record<string, unknown>;

@@ -60,6 +60,7 @@ import {
 } from "@/services/webViewerService/webViewerServiceSingleton";
 import { WebSelectionTracker } from "@/services/webViewerService/webViewerServiceSelection";
 import VectorStoreManager from "@/search/vectorStoreManager";
+import { maybeShowMigrationNotice, registerMigrationStatusCommand } from "@/modelManagement";
 import { CopilotSettingTab } from "@/settings/SettingsPage";
 import {
   getModelKeyFromModel,
@@ -243,6 +244,23 @@ export default class CopilotPlugin extends Plugin {
     );
 
     registerCommands(this, undefined, getSettings());
+
+    // Model-management migration UX: surface a one-time notice if a
+    // migration has been recorded (per §4.4) and register the support-
+    // staff dev command (per §4.5). Both are no-ops when there's nothing
+    // to show.
+    {
+      const settings = getSettings();
+      const breadcrumbs = settings._migrationBreadcrumbs ?? [];
+      maybeShowMigrationNotice(
+        breadcrumbs[breadcrumbs.length - 1],
+        Boolean(settings._migrationNoticeDismissed),
+        () => {
+          setSettings({ _migrationNoticeDismissed: true });
+        }
+      );
+      registerMigrationStatusCommand(this, () => getSettings()._migrationBreadcrumbs ?? []);
+    }
 
     // Tool initialization is now handled automatically in CopilotPlusChainRunner and AutonomousAgentChainRunner
 

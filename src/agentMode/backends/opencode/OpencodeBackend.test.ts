@@ -10,6 +10,47 @@ jest.mock("@/logger", () => ({
   logError: jest.fn(),
 }));
 
+// In-memory BYOK fixture the mocked `@/modelManagement` reads from. Tests
+// mutate these directly to seed providers + registry entries.
+type ProviderConfigStub = {
+  id: string;
+  kind: "builtin" | "custom";
+  displayName: string;
+  type: string;
+  baseUrl?: string;
+  apiKeyRef?: { kind: "inline"; value: string } | null;
+  addedAt: number;
+};
+type RegistryEntryStub = {
+  providerId: string;
+  modelId: string;
+  displayName: string;
+  addedAt: number;
+};
+let mockProviders: ProviderConfigStub[] = [];
+let mockRegistry: RegistryEntryStub[] = [];
+
+jest.mock("@/modelManagement", () => ({
+  ProviderRegistry: {
+    getInstance: () => ({
+      list: () => mockProviders.slice(),
+    }),
+  },
+  ModelRegistry: {
+    getInstance: () => ({
+      list: (filter?: { providerId?: string }) =>
+        filter?.providerId
+          ? mockRegistry.filter((e) => e.providerId === filter.providerId)
+          : mockRegistry.slice(),
+    }),
+  },
+  getProviderApiKeySync: (id: string) => {
+    const p = mockProviders.find((x) => x.id === id);
+    if (!p?.apiKeyRef) return null;
+    return p.apiKeyRef.kind === "inline" ? p.apiKeyRef.value : null;
+  },
+}));
+
 // Mock the skills package so we can drive the deny-list synthesis path
 // without booting the real jotai store / Obsidian App singleton.
 let mockSkills: Skill[] = [];
@@ -48,213 +89,148 @@ function seedSkills(skills: Skill[]): void {
   mockSkillManagerReady = skills.length > 0;
 }
 
-/**
- * Most tests below disable the built-in `activeModels` so injection is a
- * blank slate. The few that exercise injection set their own active models
- * explicitly.
- */
-function clearActiveModels() {
-  setSettings({ activeModels: [] });
+function seedByokProvider(p: ProviderConfigStub): void {
+  mockProviders.push(p);
+}
+
+function seedByokModel(entry: RegistryEntryStub): void {
+  mockRegistry.push(entry);
 }
 
 describe("buildOpencodeConfig", () => {
   beforeEach(() => {
     resetSettings();
-    clearActiveModels();
+    mockProviders = [];
+    mockRegistry = [];
     seedSkills([]);
   });
 
-  it("emits provider entries only for non-empty keys", async () => {
-    updateSetting("anthropicApiKey", "anth-123");
-    updateSetting("openAIApiKey", "");
-    updateSetting("googleApiKey", "g-456");
-    const cfg = (await buildOpencodeConfig()) as { provider: Record<string, unknown> };
-    expect(Object.keys(cfg.provider).sort()).toEqual(["anthropic", "google"]);
-    expect(cfg.provider.anthropic).toEqual({ options: { apiKey: "anth-123" } });
-    expect(cfg.provider.google).toEqual({ options: { apiKey: "g-456" } });
-  });
-
-  it("returns empty provider map when no keys are set", async () => {
+  it("returns an empty provider map when BYOK is empty and no Plus license is set", async () => {
     const cfg = (await buildOpencodeConfig()) as { provider: Record<string, unknown> };
     expect(cfg.provider).toEqual({});
   });
 
-  it("injects enabled active models under their provider's `models` map", async () => {
-    updateSetting("anthropicApiKey", "anth-123");
+  it("ignores any leftover legacy *ApiKey-shaped fields — BYOK is the only source of provider keys", async () => {
+    // Reason: the legacy `anthropicApiKey` / `openAIApiKey` fields were
+    // deleted by the M9 migration. If a downgraded device writes them back
+    // through a synced data.json they must NOT influence the OpenCode config.
+    setSettings({
+      anthropicApiKey: "anth-legacy",
+      openAIApiKey: "oai-legacy",
+    } as unknown as Parameters<typeof setSettings>[0]);
+    const cfg = (await buildOpencodeConfig()) as { provider: Record<string, unknown> };
+    expect(cfg.provider).toEqual({});
+  });
+
+  it("ignores legacy activeModels — BYOK ModelRegistry is the only source of models", async () => {
     setSettings({
       activeModels: [
         {
-          name: "claude-sonnet-4-6",
+          name: "claude-sonnet-legacy",
           provider: ChatModelProviders.ANTHROPIC,
           enabled: true,
         },
-        {
-          name: "claude-haiku",
-          provider: ChatModelProviders.ANTHROPIC,
-          enabled: false, // disabled — should NOT inject
-        },
       ],
+    });
+    const cfg = (await buildOpencodeConfig()) as { provider: Record<string, unknown> };
+    expect(cfg.provider).toEqual({});
+  });
+
+  it("registers a BYOK built-in provider with its API key and registry models", async () => {
+    seedByokProvider({
+      id: "anthropic",
+      kind: "builtin",
+      displayName: "Anthropic",
+      type: "anthropic",
+      apiKeyRef: { kind: "inline", value: "sk-ant-xxx" },
+      addedAt: 1,
+    });
+    seedByokModel({
+      providerId: "anthropic",
+      modelId: "claude-sonnet-4-5",
+      displayName: "Claude Sonnet 4.5",
+      addedAt: 2,
     });
     const cfg = (await buildOpencodeConfig()) as {
       provider: Record<string, { options?: unknown; models?: Record<string, unknown> }>;
     };
-    expect(cfg.provider.anthropic.models).toEqual({ "claude-sonnet-4-6": {} });
-  });
-
-  it("does not inject a model when neither top-level nor per-model key is available", async () => {
-    setSettings({
-      activeModels: [
-        {
-          name: "gpt-5",
-          provider: ChatModelProviders.OPENAI,
-          enabled: true,
-        },
-      ],
+    expect(cfg.provider.anthropic).toEqual({
+      options: { apiKey: "sk-ant-xxx" },
+      models: { "claude-sonnet-4-5": {} },
     });
-    // Neither openAIApiKey nor model.apiKey configured
-    const cfg = (await buildOpencodeConfig()) as { provider: Record<string, unknown> };
-    expect(cfg.provider).toEqual({});
   });
 
-  it("falls back to per-model apiKey when top-level provider key is missing", async () => {
-    setSettings({
-      activeModels: [
-        {
-          name: "gpt-5",
-          provider: ChatModelProviders.OPENAI,
-          enabled: true,
-          apiKey: "per-model-key",
-        },
-      ],
+  it("registers a BYOK custom provider with baseURL + key and its registry models", async () => {
+    seedByokProvider({
+      id: "custom:abc",
+      kind: "custom",
+      displayName: "Local Ollama",
+      type: "openai-compatible",
+      baseUrl: "http://localhost:11434/v1",
+      apiKeyRef: { kind: "inline", value: "ollama-key" },
+      addedAt: 1,
     });
-    // No openAIApiKey configured globally, but the model carries its own key.
-    const cfg = (await buildOpencodeConfig()) as {
-      provider: Record<string, { options?: { apiKey?: string }; models?: Record<string, unknown> }>;
-    };
-    expect(cfg.provider.openai.options).toEqual({ apiKey: "per-model-key" });
-    expect(cfg.provider.openai.models).toEqual({ "gpt-5": {} });
-  });
-
-  it("prefers the top-level provider key when both are present", async () => {
-    updateSetting("openAIApiKey", "global-key");
-    setSettings({
-      activeModels: [
-        {
-          name: "gpt-5",
-          provider: ChatModelProviders.OPENAI,
-          enabled: true,
-          apiKey: "per-model-key",
-        },
-      ],
+    seedByokModel({
+      providerId: "custom:abc",
+      modelId: "llama3:8b",
+      displayName: "Llama 3 8B",
+      addedAt: 2,
     });
     const cfg = (await buildOpencodeConfig()) as {
-      provider: Record<string, { options?: { apiKey?: string } }>;
+      provider: Record<
+        string,
+        {
+          npm?: string;
+          name?: string;
+          options?: { apiKey?: string; baseURL?: string };
+          models?: Record<string, unknown>;
+        }
+      >;
     };
-    // Top-level wins because the provider entry is built before the
-    // per-model fallback runs — keeps the historical behaviour.
-    expect(cfg.provider.openai.options).toEqual({ apiKey: "global-key" });
+    expect(cfg.provider["custom:abc"]).toEqual({
+      npm: "@ai-sdk/openai-compatible",
+      name: "Local Ollama",
+      options: { baseURL: "http://localhost:11434/v1", apiKey: "ollama-key" },
+      models: { "llama3:8b": {} },
+    });
   });
 
-  it("does not inject models for providers OpenCode cannot route", async () => {
-    setSettings({
-      activeModels: [
-        {
-          name: "claude-via-bedrock",
-          provider: ChatModelProviders.AMAZON_BEDROCK,
-          enabled: true,
-        },
-        {
-          name: "llama",
-          provider: ChatModelProviders.OLLAMA,
-          enabled: true,
-        },
-      ],
+  it("skips a BYOK built-in provider that has no API key", async () => {
+    seedByokProvider({
+      id: "groq",
+      kind: "builtin",
+      displayName: "Groq",
+      type: "openai-compatible",
+      apiKeyRef: null,
+      addedAt: 1,
     });
     const cfg = (await buildOpencodeConfig()) as { provider: Record<string, unknown> };
     expect(cfg.provider).toEqual({});
   });
 
-  it("skips embedding models", async () => {
-    updateSetting("openAIApiKey", "key");
-    setSettings({
-      activeModels: [
-        {
-          name: "text-embedding-3-large",
-          provider: ChatModelProviders.OPENAI,
-          enabled: true,
-          isEmbeddingModel: true,
-        },
-        {
-          name: "gpt-test",
-          provider: ChatModelProviders.OPENAI,
-          enabled: true,
-        },
-      ],
-    });
-    const cfg = (await buildOpencodeConfig()) as {
-      provider: Record<string, { models?: Record<string, unknown> }>;
-    };
-    // gpt-test is injected; the embedding model is not, even though both have
-    // the same provider and enabled flag.
-    expect(cfg.provider.openai.models).toHaveProperty("gpt-test");
-    expect(cfg.provider.openai.models).not.toHaveProperty("text-embedding-3-large");
-  });
-
-  it("sets top-level model from the persisted defaultModel.baseModelId", async () => {
-    updateSetting("anthropicApiKey", "anth-123");
-    setSettings({
-      agentMode: {
-        enabled: true,
-        byok: {},
-        mcpServers: [],
-        activeBackend: "opencode",
-        debugFullFrames: false,
-        skills: { folder: "copilot/skills" },
-        backends: {
-          opencode: {
-            binaryPath: "/x",
-            defaultModel: { baseModelId: "anthropic/claude-sonnet-4-6", effort: null },
-          },
-        },
-      },
-    });
-    const cfg = (await buildOpencodeConfig()) as { model?: string };
+  it("sets top-level model from the seed selection baseModelId", async () => {
+    const cfg = (await buildOpencodeConfig({
+      baseModelId: "anthropic/claude-sonnet-4-6",
+      effort: null,
+    })) as { model?: string };
     expect(cfg.model).toBe("anthropic/claude-sonnet-4-6");
   });
 
-  it("appends effort suffix when defaultModel.effort is set", async () => {
-    updateSetting("anthropicApiKey", "anth-123");
-    setSettings({
-      agentMode: {
-        enabled: true,
-        byok: {},
-        mcpServers: [],
-        activeBackend: "opencode",
-        debugFullFrames: false,
-        skills: { folder: "copilot/skills" },
-        backends: {
-          opencode: {
-            binaryPath: "/x",
-            defaultModel: { baseModelId: "anthropic/claude-sonnet-4-6", effort: "high" },
-          },
-        },
-      },
-    });
-    const cfg = (await buildOpencodeConfig()) as { model?: string };
+  it("appends effort suffix when the seed selection includes effort", async () => {
+    const cfg = (await buildOpencodeConfig({
+      baseModelId: "anthropic/claude-sonnet-4-6",
+      effort: "high",
+    })) as { model?: string };
     expect(cfg.model).toBe("anthropic/claude-sonnet-4-6/high");
   });
 
-  it("registers a custom copilot-plus provider when plusLicenseKey is set", async () => {
+  it("leaves config.model unset when no seed selection is provided", async () => {
+    const cfg = (await buildOpencodeConfig()) as { model?: string };
+    expect(cfg.model).toBeUndefined();
+  });
+
+  it("registers a custom copilot-plus provider with PLUS_MODELS when plusLicenseKey is set", async () => {
     updateSetting("plusLicenseKey", "plus-token-123");
-    setSettings({
-      activeModels: [
-        {
-          name: "copilot-plus-flash",
-          provider: ChatModelProviders.COPILOT_PLUS,
-          enabled: true,
-        },
-      ],
-    });
     const cfg = (await buildOpencodeConfig()) as {
       provider: Record<
         string,
@@ -271,49 +247,20 @@ describe("buildOpencodeConfig", () => {
     expect(cp.name).toBe("Copilot Plus");
     expect(cp.options?.baseURL).toBe("https://models.brevilabs.com/v1");
     expect(cp.options?.apiKey).toBe("plus-token-123");
-    expect(cp.models).toEqual({ "copilot-plus-flash": {} });
+    expect(cp.models).toHaveProperty("copilot-plus-flash");
   });
 
   it("does not register copilot-plus provider when plusLicenseKey is empty", async () => {
-    setSettings({
-      activeModels: [
-        {
-          name: "copilot-plus-flash",
-          provider: ChatModelProviders.COPILOT_PLUS,
-          enabled: true,
-        },
-      ],
-    });
     const cfg = (await buildOpencodeConfig()) as { provider: Record<string, unknown> };
     expect(cfg.provider["copilot-plus"]).toBeUndefined();
   });
 
-  it("uses a Copilot-Plus-shaped defaultModel.baseModelId verbatim", async () => {
+  it("uses a Copilot-Plus-shaped seed baseModelId verbatim", async () => {
     updateSetting("plusLicenseKey", "plus-token-123");
-    setSettings({
-      activeModels: [
-        {
-          name: "copilot-plus-flash",
-          provider: ChatModelProviders.COPILOT_PLUS,
-          enabled: true,
-        },
-      ],
-      agentMode: {
-        enabled: true,
-        byok: {},
-        mcpServers: [],
-        activeBackend: "opencode",
-        debugFullFrames: false,
-        skills: { folder: "copilot/skills" },
-        backends: {
-          opencode: {
-            binaryPath: "/x",
-            defaultModel: { baseModelId: "copilot-plus/copilot-plus-flash", effort: null },
-          },
-        },
-      },
-    });
-    const cfg = (await buildOpencodeConfig()) as { model?: string };
+    const cfg = (await buildOpencodeConfig({
+      baseModelId: "copilot-plus/copilot-plus-flash",
+      effort: null,
+    })) as { model?: string };
     expect(cfg.model).toBe("copilot-plus/copilot-plus-flash");
   });
 
@@ -335,9 +282,6 @@ describe("buildOpencodeConfig", () => {
       'metadata.copilot-enabled-agents: "opencode"'
     );
     expect(cfg.agent.build.prompt).toContain('metadata.copilot-enabled-agents: "opencode"');
-    // Regression guard: the copilot-build permission block must survive
-    // alongside the new prompt field — opencode's field-wise merge depends
-    // on us not stomping native fields.
     expect(cfg.agent["copilot-build"].permission).toEqual({ bash: "ask", edit: "ask" });
     expect(cfg.agent["copilot-build"].mode).toBe("primary");
   });
@@ -402,13 +346,10 @@ describe("buildOpencodeConfig", () => {
     const cfg = (await buildOpencodeConfig()) as {
       permission?: { skill?: Record<string, string> };
     };
-    // a is claude-only → denied. e is codex-only → denied (codex also
-    // populates the cross-discovered `.agents/skills/` path). b/c/d not denied.
     expect(cfg.permission?.skill).toEqual({ a: "deny", e: "deny" });
   });
 
   it("skips deny synthesis when SkillManager has not initialised yet", async () => {
-    // Place a skill in the snapshot, but mark the singleton as not ready.
     mockSkills = [makeSkill("foo", ["claude"])];
     mockSkillManagerReady = false;
     const cfg = (await buildOpencodeConfig()) as { permission?: unknown };
@@ -416,9 +357,7 @@ describe("buildOpencodeConfig", () => {
   });
 
   it("omits cfg.model when no defaultModel is set", async () => {
-    updateSetting("anthropicApiKey", "anth-123");
     setSettings({
-      activeModels: [],
       agentMode: {
         enabled: true,
         byok: {},
@@ -439,7 +378,8 @@ describe("buildOpencodeConfig", () => {
 describe("OpencodeBackend.buildSpawnDescriptor", () => {
   beforeEach(() => {
     resetSettings();
-    clearActiveModels();
+    mockProviders = [];
+    mockRegistry = [];
   });
 
   it("throws if no binary is installed", async () => {
@@ -465,14 +405,21 @@ describe("OpencodeBackend.buildSpawnDescriptor", () => {
         },
       },
     });
-    updateSetting("anthropicApiKey", "anth-xyz");
+    seedByokProvider({
+      id: "anthropic",
+      kind: "builtin",
+      displayName: "Anthropic",
+      type: "anthropic",
+      apiKeyRef: { kind: "inline", value: "sk-ant-xyz" },
+      addedAt: 1,
+    });
     const backend = new OpencodeBackend();
     const desc = await backend.buildSpawnDescriptor({ vaultBasePath: "/vault/abs" });
     expect(desc.command).toBe("/path/to/opencode");
     expect(desc.args).toEqual(["acp", "--cwd", "/vault/abs"]);
     expect(desc.env.OPENCODE_CONFIG_CONTENT).toBeDefined();
     const cfg = JSON.parse(desc.env.OPENCODE_CONFIG_CONTENT as string);
-    expect(cfg.provider.anthropic.options).toEqual({ apiKey: "anth-xyz" });
+    expect(cfg.provider.anthropic.options).toEqual({ apiKey: "sk-ant-xyz" });
   });
 });
 
@@ -493,8 +440,6 @@ describe("COPILOT_PROMPT_BASE", () => {
   });
 
   it("does not carry chat-mode-only baggage that misfires in tool-driven agents", () => {
-    // @vault and getCurrentTime/getTimeRangeMs are chat-mode injections that
-    // do not exist in opencode. YouTube auto-transcription is also chat-only.
     expect(COPILOT_PROMPT_BASE).not.toMatch(/@vault/);
     expect(COPILOT_PROMPT_BASE).not.toMatch(/getCurrentTime/);
     expect(COPILOT_PROMPT_BASE).not.toMatch(/getTimeRangeMs/);

@@ -1,9 +1,12 @@
 import {
+  buildCommitSelection,
   buildEffortSibling,
   buildModelOnChange,
   buildPickerEntries,
   resolveActiveDisplayState,
+  resolveEffortForOptions,
 } from "./agentModelPickerHelpers";
+import type { EffortPreference } from "@/agentMode/session/AgentSessionManager";
 import type {
   BackendDescriptor,
   BackendState,
@@ -132,19 +135,23 @@ function makeUIState(opts: {
 
 function makeManager(opts: {
   cachedStateById?: Record<string, BackendState | null>;
-  defaultSelectionById?: Record<string, { baseModelId: string; effort: string | null } | null>;
+  lastSelectionById?: Record<string, { baseModelId: string; effort: string | null } | null>;
+  userEffortPreference?: EffortPreference | null;
   setDefaultBackend?: jest.Mock;
   applySelection?: jest.Mock;
-  persistDefaultSelection?: jest.Mock;
+  rememberLastSelection?: jest.Mock;
   createSession?: jest.Mock;
   closeSession?: jest.Mock;
+  setUserEffortPreference?: jest.Mock;
 }): AgentSessionManager {
   return {
     getCachedBackendState: (id: string) => opts.cachedStateById?.[id] ?? null,
-    getDefaultSelection: (id: string) => opts.defaultSelectionById?.[id] ?? null,
+    getLastSelection: (id: string) => opts.lastSelectionById?.[id] ?? null,
+    getUserEffortPreference: () => opts.userEffortPreference ?? null,
+    setUserEffortPreference: opts.setUserEffortPreference ?? jest.fn(),
     setDefaultBackend: opts.setDefaultBackend ?? jest.fn(),
     applySelection: opts.applySelection ?? jest.fn().mockResolvedValue(undefined),
-    persistDefaultSelection: opts.persistDefaultSelection ?? jest.fn().mockResolvedValue(undefined),
+    rememberLastSelection: opts.rememberLastSelection ?? jest.fn(),
     createSession: opts.createSession ?? jest.fn().mockResolvedValue(undefined),
     closeSession: opts.closeSession ?? jest.fn().mockResolvedValue(undefined),
   } as unknown as AgentSessionManager;
@@ -323,7 +330,10 @@ describe("buildModelOnChange", () => {
     const onChange = buildModelOnChange(manager, ctxFor("codex"), entries);
     onChange("codex:gpt-5|agent");
     expect(setDefaultBackend).toHaveBeenCalledWith("codex");
-    expect(applySelection).toHaveBeenCalledWith({ baseModelId: "gpt-5" });
+    // No effort preference and no effort options on the target → effort is
+    // resolved to null and passed explicitly so the descriptor's
+    // applySelection sees the canonical "no effort" pick.
+    expect(applySelection).toHaveBeenCalledWith({ baseModelId: "gpt-5", effort: null });
   });
 
   it("same-backend pick with canSwitchModel === false does not call applySelection", () => {
@@ -337,36 +347,36 @@ describe("buildModelOnChange", () => {
     expect(applySelection).not.toHaveBeenCalled();
   });
 
-  it("cross-backend pick persists the new (model, effort) on the target backend before creating the session", async () => {
-    const persistDefaultSelection = jest.fn().mockResolvedValue(undefined);
+  it("cross-backend pick remembers the new (model, effort) on the target backend before creating the session", async () => {
+    const rememberLastSelection = jest.fn();
     const createSession = jest.fn().mockResolvedValue(undefined);
     const setDefaultBackend = jest.fn();
     const closeSession = jest.fn().mockResolvedValue(undefined);
     const callOrder: string[] = [];
-    persistDefaultSelection.mockImplementation(async () => {
-      callOrder.push("persist");
+    rememberLastSelection.mockImplementation(() => {
+      callOrder.push("remember");
     });
     createSession.mockImplementation(async () => {
       callOrder.push("create");
     });
     const manager = makeManager({
-      persistDefaultSelection,
+      rememberLastSelection,
       createSession,
       setDefaultBackend,
       closeSession,
-      defaultSelectionById: { claude: { baseModelId: "old", effort: "low" } },
+      lastSelectionById: { claude: { baseModelId: "old", effort: "low" } },
     });
     const entries = [pickerEntry("claude", "opus")];
     const onChange = buildModelOnChange(manager, ctxFor("codex"), entries);
     onChange("claude:opus|agent");
     // Allow the IIFE to run.
     await new Promise((r) => window.setTimeout(r, 0));
-    expect(persistDefaultSelection).toHaveBeenCalledWith("claude", {
+    expect(rememberLastSelection).toHaveBeenCalledWith("claude", {
       baseModelId: "opus",
       effort: "low",
     });
     expect(createSession).toHaveBeenCalledWith("claude");
-    expect(callOrder).toEqual(["persist", "create"]);
+    expect(callOrder).toEqual(["remember", "create"]);
     expect(setDefaultBackend).toHaveBeenCalledWith("claude");
     expect(closeSession).toHaveBeenCalledWith("tab-1");
   });
@@ -383,5 +393,180 @@ describe("buildModelOnChange", () => {
     onChange("no-backend|agent");
     expect(setDefaultBackend).not.toHaveBeenCalled();
     expect(applySelection).not.toHaveBeenCalled();
+  });
+
+  it("same-backend pick re-resolves the effort intent against the target model's options (label match)", () => {
+    const applySelection = jest.fn().mockResolvedValue(undefined);
+    const opus = makeModelEntry("opus");
+    opus.effortOptions = [
+      { value: "low", label: "low" },
+      { value: "medium", label: "medium" },
+      { value: "high", label: "high" },
+    ];
+    const sonnet = makeModelEntry("sonnet");
+    sonnet.effortOptions = [
+      { value: "low", label: "low" },
+      { value: "medium", label: "medium" },
+    ];
+    const ctx = ctxFor("claude");
+    ctx.activeModelState = makeModelState("opus", [opus, sonnet]);
+    const manager = makeManager({
+      applySelection,
+      userEffortPreference: { value: "high", index: 2 },
+    });
+    const entries = [pickerEntry("claude", "sonnet")];
+    const onChange = buildModelOnChange(manager, ctx, entries);
+    onChange("claude:sonnet|agent");
+    // Sonnet has no "high" — fall back to index 2 clamped to last
+    // available, i.e. "medium".
+    expect(applySelection).toHaveBeenCalledWith({ baseModelId: "sonnet", effort: "medium" });
+  });
+
+  it("same-backend pick to a no-effort model passes effort: null without clobbering the preference", () => {
+    const applySelection = jest.fn().mockResolvedValue(undefined);
+    const setUserEffortPreference = jest.fn();
+    const opus = makeModelEntry("opus");
+    opus.effortOptions = [
+      { value: "low", label: "low" },
+      { value: "medium", label: "medium" },
+      { value: "high", label: "high" },
+    ];
+    const haiku = makeModelEntry("haiku");
+    haiku.effortOptions = [];
+    const ctx = ctxFor("claude");
+    ctx.activeModelState = makeModelState("opus", [opus, haiku]);
+    const manager = makeManager({
+      applySelection,
+      setUserEffortPreference,
+      userEffortPreference: { value: "high", index: 2 },
+    });
+    const entries = [pickerEntry("claude", "haiku")];
+    const onChange = buildModelOnChange(manager, ctx, entries);
+    onChange("claude:haiku|agent");
+    expect(applySelection).toHaveBeenCalledWith({ baseModelId: "haiku", effort: null });
+    // Crucial: a model-only swap must not update the preference, so that
+    // swapping back to a model with effort still restores "high".
+    expect(setUserEffortPreference).not.toHaveBeenCalled();
+  });
+});
+
+// ---- buildEffortSibling.onChange ----
+
+describe("buildEffortSibling.onChange", () => {
+  it("records the picked effort + its index in the active model's options", () => {
+    const applySelection = jest.fn().mockResolvedValue(undefined);
+    const setUserEffortPreference = jest.fn();
+    const opus: ModelEntry = {
+      baseModelId: "opus",
+      name: "opus",
+      provider: null,
+      effortOptions: [
+        { value: "low", label: "low" },
+        { value: "medium", label: "medium" },
+        { value: "high", label: "high" },
+      ],
+    };
+    const ctx: ModelActiveContext = {
+      activeSession: { backendId: "claude" } as unknown as AgentSession,
+      activeChatUIState: makeUIState({ canSwitchEffort: true }),
+      activeBackendId: "claude",
+      activeDescriptor: makeDescriptor("claude"),
+      activeSessionHasHistory: false,
+      activeModelState: makeModelState("opus", [opus]),
+      activeCurrentEntry: opus,
+    };
+    const manager = makeManager({ applySelection, setUserEffortPreference });
+    const sibling = buildEffortSibling(manager, ctx);
+    sibling?.onChange("high");
+    expect(setUserEffortPreference).toHaveBeenCalledWith("high", 2);
+    expect(applySelection).toHaveBeenCalledWith({ effort: "high" }, { expectBackendId: "claude" });
+  });
+});
+
+// ---- buildCommitSelection ----
+
+describe("buildCommitSelection", () => {
+  function pickerEntry(backendId: string, baseModelId: string) {
+    return {
+      name: baseModelId,
+      provider: "agent",
+      enabled: true,
+      isBuiltIn: false,
+      displayName: baseModelId,
+      _group: backendId,
+      _backendId: backendId,
+    };
+  }
+
+  function ctxFor(activeBackendId: string | null): ModelActiveContext {
+    const session = activeBackendId
+      ? ({ backendId: activeBackendId, internalId: "tab-1" } as unknown as AgentSession)
+      : null;
+    return {
+      activeSession: session,
+      activeChatUIState: makeUIState({ canSwitchModel: true }),
+      activeBackendId,
+      activeDescriptor: activeBackendId ? makeDescriptor("claude") : undefined,
+      activeSessionHasHistory: false,
+      activeModelState: null,
+      activeCurrentEntry: undefined,
+    };
+  }
+
+  it("records the committed effort + its index before applying the same-backend pick", () => {
+    const applySelection = jest.fn().mockResolvedValue(undefined);
+    const setUserEffortPreference = jest.fn();
+    const opus = makeModelEntry("opus");
+    opus.effortOptions = [
+      { value: "low", label: "low" },
+      { value: "medium", label: "medium" },
+      { value: "high", label: "high" },
+    ];
+    const ctx = ctxFor("claude");
+    ctx.activeModelState = makeModelState("opus", [opus]);
+    const manager = makeManager({ applySelection, setUserEffortPreference });
+    const entries = [pickerEntry("claude", "opus")];
+    const commit = buildCommitSelection(manager, ctx, entries, () => {});
+    commit("claude:opus|agent", "medium");
+    expect(setUserEffortPreference).toHaveBeenCalledWith("medium", 1);
+    expect(applySelection).toHaveBeenCalledWith({ baseModelId: "opus", effort: "medium" });
+  });
+});
+
+// ---- resolveEffortForOptions ----
+
+describe("resolveEffortForOptions", () => {
+  const options = [
+    { value: "low", label: "low" },
+    { value: "medium", label: "medium" },
+    { value: "high", label: "high" },
+  ];
+
+  it("returns null when the target has no effort options", () => {
+    expect(resolveEffortForOptions({ value: "high", index: 2 }, [])).toBeNull();
+  });
+
+  it("returns the first option when there is no preference", () => {
+    expect(resolveEffortForOptions(null, options)).toBe("low");
+  });
+
+  it("returns the exact value when present in the target options", () => {
+    expect(resolveEffortForOptions({ value: "high", index: 2 }, options)).toBe("high");
+  });
+
+  it("falls back to the same index when the value is missing", () => {
+    expect(resolveEffortForOptions({ value: "xhigh", index: 1 }, options)).toBe("medium");
+  });
+
+  it("clamps an out-of-bounds index to the last available option", () => {
+    const shorter = [
+      { value: "low", label: "low" },
+      { value: "medium", label: "medium" },
+    ];
+    expect(resolveEffortForOptions({ value: "xhigh", index: 4 }, shorter)).toBe("medium");
+  });
+
+  it("clamps a negative index to zero", () => {
+    expect(resolveEffortForOptions({ value: "ghost", index: -3 }, options)).toBe("low");
   });
 });

@@ -358,7 +358,7 @@ async function buildAzureOpenAIRequestSpec(
 
   // When a base URL is provided, use it directly (new flow)
   if (model.baseUrl?.trim()) {
-    const { normalizeAzureUrl } = await import("@/LLMProviders/chatModelManager");
+    const { normalizeAzureUrl } = await import("@/LLMProviders/ChatModelManager");
     const { baseUrl, apiVersion } = normalizeAzureUrl(model.baseUrl.trim());
     const version = apiVersion || model.azureOpenAIApiVersion?.trim() || "2024-05-01-preview";
     const url = `${baseUrl}/${endpoint}?api-version=${encodeURIComponent(version)}`;

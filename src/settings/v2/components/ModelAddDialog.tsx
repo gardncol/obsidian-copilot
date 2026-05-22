@@ -32,7 +32,7 @@ import {
 } from "@/constants";
 import { useTab } from "@/contexts/TabContext";
 import { logError } from "@/logger";
-import { getSettings } from "@/settings/model";
+import { readProviderExtra } from "@/settings/legacyApiKeyWrites";
 import { err2String, getProviderInfo, getProviderLabel, omit } from "@/utils";
 import { buildCurlCommandForModel } from "@/utils/curlCommand";
 import { CheckCircle2, ChevronDown, Loader2, XCircle } from "lucide-react";
@@ -66,7 +66,6 @@ export const ModelAddDialog: React.FC<ModelAddDialogProps> = ({
   isEmbeddingModel = false,
 }) => {
   const { modalContainer } = useTab();
-  const settings = getSettings();
   const defaultProvider = isEmbeddingModel
     ? EmbeddingModelProviders.OPENAI
     : ChatModelProviders.OPENROUTERAI;
@@ -169,7 +168,7 @@ export const ModelAddDialog: React.FC<ModelAddDialogProps> = ({
       if (provider === ChatModelProviders.AMAZON_BEDROCK) {
         return {
           ...chatModel,
-          bedrockRegion: settings.amazonBedrockRegion,
+          bedrockRegion: readProviderExtra("amazon-bedrock", "bedrockRegion") || undefined,
         };
       }
 
@@ -243,18 +242,23 @@ export const ModelAddDialog: React.FC<ModelAddDialogProps> = ({
       ...model,
       provider,
       apiKey: getApiKeyForProvider(provider as SettingKeyProviders),
-      ...(provider === ChatModelProviders.OPENAI ? { openAIOrgId: settings.openAIOrgId } : {}),
+      ...(provider === ChatModelProviders.OPENAI
+        ? { openAIOrgId: readProviderExtra("openai", "openAIOrgId") }
+        : {}),
       ...(provider === ChatModelProviders.AZURE_OPENAI
         ? {
-            azureOpenAIApiInstanceName: settings.azureOpenAIApiInstanceName,
-            azureOpenAIApiDeploymentName: settings.azureOpenAIApiDeploymentName,
-            azureOpenAIApiVersion: settings.azureOpenAIApiVersion,
-            azureOpenAIApiEmbeddingDeploymentName: settings.azureOpenAIApiEmbeddingDeploymentName,
+            azureOpenAIApiInstanceName: readProviderExtra("azure", "azureInstanceName"),
+            azureOpenAIApiDeploymentName: readProviderExtra("azure", "azureDeploymentName"),
+            azureOpenAIApiVersion: readProviderExtra("azure", "azureApiVersion"),
+            azureOpenAIApiEmbeddingDeploymentName: readProviderExtra(
+              "azure",
+              "azureEmbeddingDeploymentName"
+            ),
           }
         : {}),
       ...(provider === ChatModelProviders.AMAZON_BEDROCK
         ? {
-            bedrockRegion: settings.amazonBedrockRegion,
+            bedrockRegion: readProviderExtra("amazon-bedrock", "bedrockRegion") || undefined,
           }
         : {
             bedrockRegion: undefined,

@@ -1,5 +1,5 @@
 import { logInfo } from "@/logger";
-import ChatModelManager from "@/LLMProviders/chatModelManager";
+import ChatModelManager from "@/LLMProviders/ChatModelManager";
 import { CompactionResult, ParsedContextItem } from "@/types/compaction";
 import { HumanMessage } from "@langchain/core/messages";
 

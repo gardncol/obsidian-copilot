@@ -25,6 +25,7 @@ import type {
   ListSessionsOutput,
   LoadSessionInput,
   LoadSessionOutput,
+  ModelSelection,
   OpenSessionInput,
   OpenSessionOutput,
   PermissionDecision,
@@ -124,7 +125,14 @@ export class AcpBackendProcess implements BackendProcess {
     private readonly app: App,
     private readonly backend: AcpBackend,
     private readonly clientVersion: string,
-    private readonly descriptor: BackendDescriptor
+    private readonly descriptor: BackendDescriptor,
+    /**
+     * Lazy accessor for the in-memory last-used (model, effort) on this
+     * backend. Forwarded into `buildSpawnDescriptor` so suffix-style
+     * backends can seed their spawn-time `config.model`. Optional — tests
+     * and legacy callers may omit it.
+     */
+    private readonly getSeedSelection?: () => ModelSelection | null
   ) {}
 
   /**
@@ -140,6 +148,7 @@ export class AcpBackendProcess implements BackendProcess {
     }
     const descriptor = await this.backend.buildSpawnDescriptor({
       vaultBasePath: adapter.getBasePath(),
+      seedSelection: this.getSeedSelection?.() ?? null,
     });
 
     const procOpts: AcpProcessManagerOptions = {

@@ -26,6 +26,11 @@ If your plugin does not need CSS, delete this file.
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
+/* Top-only divider — same reason as .copilot-divider-b. */
+.copilot-divider-t {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
 .button-container {
   display: flex;
   justify-content: space-between;

@@ -44,6 +44,20 @@ export { frameSink as acpFrameSink } from "./session/debugSink";
 export { SkillManager, SkillsSettings, useManagedSkills } from "./skills";
 export type { Skill } from "./skills";
 
+// OpenCode picker data sources — exposed through the agentMode barrel so the
+// settings panel doesn't import directly across the host/backend boundary.
+export {
+  listBundledModels as listOpencodeBundledModels,
+  listOpencodeBuckets,
+  type BundledModel as OpencodeBundledModel,
+  type OpencodeModelBuckets,
+  type ProviderRegistryLike as OpencodeProviderRegistryLike,
+} from "./backends/opencode/bundledModels";
+export {
+  listPlusModels as listOpencodePlusModels,
+  type PlusModel as OpencodePlusModel,
+} from "./backends/opencode/plusModels";
+
 /**
  * True when Agent Mode is enabled and the platform supports it. Agent Mode
  * requires subprocess support, so this is always false on mobile regardless
