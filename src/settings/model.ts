@@ -2,8 +2,20 @@ import { CustomModel, ProjectConfig } from "@/aiParams";
 import { atom, createStore, useAtomValue } from "jotai";
 import { v4 as uuidv4 } from "uuid";
 
-import type { ModelSelection } from "@/agentMode";
 import { type ChainType } from "@/chainType";
+// Reason: `runModelManagementMigrations` and the related types live in
+// `@/modelManagement` (the public barrel). There is a known cycle —
+// `@/modelManagement` re-exports `ProviderRegistry` which imports from
+// this file — but ES modules resolve the function reference at call time,
+// not at top-level evaluation, so the cycle is safe in practice. Tests
+// guard against regressions.
+import {
+  runModelManagementMigrations,
+  type MigrationBreadcrumb,
+  type ProviderConfig,
+  type ProviderId,
+  type RegistryEntry,
+} from "@/modelManagement";
 import { type SortStrategy, isSortStrategy } from "@/utils/recentUsageManager";
 import {
   AGENT_MAX_ITERATIONS_LIMIT,
@@ -17,6 +29,14 @@ import {
   EmbeddingModelProviders,
   SEND_SHORTCUT,
 } from "@/constants";
+
+/**
+ * Re-export model-management types so consumers can `import type
+ * { ProviderConfig, RegistryEntry } from "@/settings/model"` instead of
+ * pulling them from `@/modelManagement` directly. Convenient for settings-
+ * shaped code that already imports from this file.
+ */
+export type { ProviderConfig, ProviderId, RegistryEntry };
 
 /**
  * We used to store commands in the settings file with the following interface.
@@ -50,30 +70,45 @@ export interface LegacyCommandSettings {
 export interface CopilotSettings {
   userId: string;
   plusLicenseKey: string;
-  openAIApiKey: string;
-  openAIOrgId: string;
-  huggingfaceApiKey: string;
-  cohereApiKey: string;
-  anthropicApiKey: string;
-  azureOpenAIApiKey: string;
-  azureOpenAIApiInstanceName: string;
-  azureOpenAIApiDeploymentName: string;
-  azureOpenAIApiVersion: string;
-  azureOpenAIApiEmbeddingDeploymentName: string;
-  googleApiKey: string;
-  openRouterAiApiKey: string;
-  xaiApiKey: string;
-  mistralApiKey: string;
-  deepseekApiKey: string;
-  amazonBedrockApiKey: string;
-  amazonBedrockRegion: string;
-  siliconflowApiKey: string;
-  // GitHub Copilot OAuth tokens
+  /**
+   * Monotonic schema version. Migrations run on load when this is less than
+   * the current version. Default 0 for unmigrated settings; current = 2.
+   * See: designdocs/MODEL_MANAGEMENT_REDESIGN_TECH_SPEC.md §2.4.
+   */
+  settingsVersion?: number;
+  /**
+   * Provider credentials & display config, keyed by provider id. Populated
+   * by the v0→v2 migration; new BYOK flows write here directly.
+   */
+  providers?: Record<ProviderId, ProviderConfig>;
+  /**
+   * BYOK model registry. The list of models the user has explicitly added.
+   * Populated by the v0→v2 migration; new BYOK flows write here directly.
+   */
+  registry?: RegistryEntry[];
+  /**
+   * Forensic trail of which versioned migrations have run. Read by the
+   * `Copilot: Show settings migration status` dev command and the §4.4
+   * notice toast.
+   */
+  _migrationBreadcrumbs?: MigrationBreadcrumb[];
+  /** Whether the user has dismissed the post-migration §4.4 notice. */
+  _migrationNoticeDismissed?: boolean;
+  // GitHub Copilot OAuth tokens (NOT BYOK — managed by OAuth flow).
   githubCopilotAccessToken: string;
   githubCopilotToken: string;
   githubCopilotTokenExpiresAt: number;
   defaultChainType: ChainType;
-  defaultModelKey: string;
+  /**
+   * User's default chat model — resolves through the BYOK registry. `null`
+   * means "no default chosen yet"; the resolver falls back to the first
+   * enabled `RegistryEntry`. Wire-format string keys (`"<modelId>|<providerId>"`)
+   * are derived on the fly by `getModelKey()` / the `modelKeyAtom`; the
+   * structured ref is the storage shape.
+   *
+   * Migrated from the legacy `defaultModelKey` string in v0→v2.
+   */
+  defaultModelRef: { providerId: ProviderId; modelId: string } | null;
   embeddingModelKey: string;
   temperature: number;
   maxTokens: number;
@@ -81,8 +116,6 @@ export interface CopilotSettings {
   lastDismissedVersion: string | null;
   // DEPRECATED: Do not use this directly, migrated to file-based system prompts
   userSystemPrompt: string;
-  openAIProxyBaseUrl: string;
-  openAIEmbeddingProxyBaseUrl: string;
   stream: boolean;
   defaultSaveFolder: string;
   defaultConversationTag: string;
@@ -105,7 +138,12 @@ export interface CopilotSettings {
   enableInlineCitations: boolean;
   qaExclusions: string;
   qaInclusions: string;
-  groqApiKey: string;
+  /**
+   * @deprecated The chat half migrates to `registry` in the v0→v2 migration.
+   *   Embedding-model entries continue to live here in `activeEmbeddingModels`
+   *   (not this field). Kept until M9 cleanup so existing call sites
+   *   continue compiling.
+   */
   activeModels: Array<CustomModel>;
   activeEmbeddingModels: Array<CustomModel>;
   promptUsageTimestamps: Record<string, number>;
@@ -222,6 +260,11 @@ export interface CopilotSettings {
   _keychainVaultId?: string;
   /** Agent Mode (ACP-backed BYOK agent harness). Desktop only. */
   agentMode: {
+    /**
+     * @deprecated Desktop is always agent-capable per the model-management
+     *   redesign (§2.3). Migration sets this to `true` and the field stays
+     *   on the interface for legacy reads. Will be removed in M9.
+     */
     enabled: boolean;
     byok: { anthropic?: string; openai?: string; google?: string };
     /**
@@ -238,6 +281,15 @@ export interface CopilotSettings {
       opencode?: OpencodeBackendSettings;
       claude?: ClaudeBackendSettings;
       codex?: CodexBackendSettings;
+      /**
+       * Quick Chat backend — skeleton only in M2 (the runtime routing lands
+       * in `designdocs/QUICK_CHAT_AGENT_INTEGRATION.md`). The slice exists
+       * so settings persist; the per-backend default-model field was
+       * removed (new sessions inherit `AgentSessionManager.getLastSelection`,
+       * falling back to the catalog default). The plugin-wide default
+       * chat model lives on `settings.defaultModelRef`.
+       */
+      quickChat?: QuickChatBackendSettings;
     };
     /**
      * Override path to the user-installed `claude` CLI used by the Claude
@@ -284,8 +336,6 @@ export interface CopilotSettings {
  * descriptor is active.
  */
 export interface ClaudeBackendSettings {
-  /** Sticky model preference — `{ baseModelId, effort }`. Unset = use the agent's default. */
-  defaultModel?: ModelSelection | null;
   /**
    * Sparse user overrides for which agent-reported models should appear in
    * the model picker. Keyed by SDK model id. Absent → fall back to the
@@ -310,8 +360,18 @@ export interface ClaudeBackendSettings {
 export interface CodexBackendSettings {
   /** Path to the user-provided `codex-acp` binary. */
   binaryPath?: string;
-  /** Sticky model preference — `{ baseModelId, effort }`. Unset = use the agent's default. */
-  defaultModel?: ModelSelection | null;
+  /** Sparse user overrides; see `ClaudeBackendSettings.modelEnabledOverrides`. */
+  modelEnabledOverrides?: Record<string, boolean>;
+  /** See `ClaudeBackendSettings.envOverrides`. Applied to the spawned `codex-acp` subprocess. */
+  envOverrides?: Record<string, string>;
+}
+
+/**
+ * Settings slice owned by the Quick Chat agent backend. Skeleton only — the
+ * runtime routing for LangChain-chat-as-agent lands in
+ * `designdocs/QUICK_CHAT_AGENT_INTEGRATION.md`.
+ */
+export interface QuickChatBackendSettings {
   /** Sparse user overrides; see `ClaudeBackendSettings.modelEnabledOverrides`. */
   modelEnabledOverrides?: Record<string, boolean>;
   /** See `ClaudeBackendSettings.envOverrides`. Applied to the spawned `codex-acp` subprocess. */
@@ -329,11 +389,6 @@ export interface OpencodeBackendSettings {
    * when a `binaryPath` exists.
    */
   binarySource?: "managed" | "custom";
-  /**
-   * Sticky model preference — `{ baseModelId, effort }`. For opencode,
-   * `baseModelId` is the `<provider>/<model>` form (no effort suffix).
-   */
-  defaultModel?: ModelSelection | null;
   /**
    * ACP sessionId of the dedicated "probe session" used by AgentModelPreloader
    * to enumerate live models without disturbing user chats. Persisted across
@@ -515,7 +570,22 @@ export function normalizeModelProvider(provider: string): string {
  */
 export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
   // If settings is null/undefined, use DEFAULT_SETTINGS
-  const settingsToSanitize = settings || DEFAULT_SETTINGS;
+  const inputSettings = settings || DEFAULT_SETTINGS;
+
+  // Run model-management migrations FIRST so downstream sanitization sees
+  // the new shape (providers, registry, quickChat backend slice). The
+  // runner is idempotent: a settings object already at v2 passes through
+  // unchanged. See: designdocs/MODEL_MANAGEMENT_REDESIGN_TECH_SPEC.md §4.1.
+  // Reason: the runner returns its input reference when no migration is
+  // needed, so shallow-clone here to keep subsequent mutations from
+  // leaking back to the caller.
+  const { settings: migrated } = runModelManagementMigrations(
+    inputSettings as unknown as Record<string, unknown>
+  );
+  const settingsToSanitize: CopilotSettings = {
+    ...(migrated as unknown as CopilotSettings),
+  };
+
   const rawSettings = settingsToSanitize as unknown as Record<string, unknown>;
   const {
     enableSelfHostedSearch: legacyEnableSelfHostedSearch,
@@ -831,17 +901,22 @@ function sanitizeAgentMode(raw: unknown): CopilotSettings["agentMode"] {
   const existingOpencode = backendsRaw.opencode as Record<string, unknown> | undefined;
   const existingClaude = backendsRaw.claude as Record<string, unknown> | undefined;
   const existingCodex = backendsRaw.codex as Record<string, unknown> | undefined;
+  const existingQuickChat = backendsRaw.quickChat as Record<string, unknown> | undefined;
 
   const opencodeSlice = existingOpencode
     ? sanitizeOpencodeBackendSettings(existingOpencode)
     : undefined;
   const claudeSlice = existingClaude ? sanitizeClaudeBackendSettings(existingClaude) : undefined;
   const codexSlice = existingCodex ? sanitizeCodexBackendSettings(existingCodex) : undefined;
+  const quickChatSlice = existingQuickChat
+    ? sanitizeQuickChatBackendSettings(existingQuickChat)
+    : undefined;
 
   const backends: CopilotSettings["agentMode"]["backends"] = {};
   if (opencodeSlice) backends.opencode = opencodeSlice;
   if (claudeSlice) backends.claude = claudeSlice;
   if (codexSlice) backends.codex = codexSlice;
+  if (quickChatSlice) backends.quickChat = quickChatSlice;
 
   const debugFullFrames =
     typeof r.debugFullFrames === "boolean"
@@ -979,15 +1054,6 @@ function sanitizeModelEnabledOverrides(raw: unknown): Record<string, boolean> | 
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function sanitizeDefaultModel(raw: unknown): ModelSelection | undefined {
-  if (!raw || typeof raw !== "object") return undefined;
-  const r = raw as Record<string, unknown>;
-  const baseModelId = typeof r.baseModelId === "string" && r.baseModelId ? r.baseModelId : null;
-  if (!baseModelId) return undefined;
-  const effort = typeof r.effort === "string" && r.effort ? r.effort : null;
-  return { baseModelId, effort };
-}
-
 /**
  * Strict env-var key check: POSIX-style identifier. Rejects empty strings,
  * leading digits, `=`, whitespace, dots, hyphens, and control chars. Shared
@@ -1020,7 +1086,6 @@ function sanitizeClaudeBackendSettings(raw: unknown): ClaudeBackendSettings {
   if (!raw || typeof raw !== "object") return {};
   const r = raw as Record<string, unknown>;
   return {
-    defaultModel: sanitizeDefaultModel(r.defaultModel),
     modelEnabledOverrides: sanitizeModelEnabledOverrides(r.modelEnabledOverrides),
     enableThinking: typeof r.enableThinking === "boolean" ? r.enableThinking : undefined,
     envOverrides: sanitizeEnvOverrides(r.envOverrides),
@@ -1032,7 +1097,14 @@ function sanitizeCodexBackendSettings(raw: unknown): CodexBackendSettings {
   const r = raw as Record<string, unknown>;
   return {
     binaryPath: nonEmptyString(r.binaryPath),
-    defaultModel: sanitizeDefaultModel(r.defaultModel),
+    modelEnabledOverrides: sanitizeModelEnabledOverrides(r.modelEnabledOverrides),
+  };
+}
+
+function sanitizeQuickChatBackendSettings(raw: unknown): QuickChatBackendSettings {
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  return {
     modelEnabledOverrides: sanitizeModelEnabledOverrides(r.modelEnabledOverrides),
     envOverrides: sanitizeEnvOverrides(r.envOverrides),
   };
@@ -1054,7 +1126,6 @@ function sanitizeOpencodeBackendSettings(raw: unknown): OpencodeBackendSettings 
     binaryPath,
     binaryVersion,
     binarySource,
-    defaultModel: sanitizeDefaultModel(r.defaultModel),
     probeSessionId: nonEmptyString(r.probeSessionId),
     modelEnabledOverrides: sanitizeModelEnabledOverrides(r.modelEnabledOverrides),
     envOverrides: sanitizeEnvOverrides(r.envOverrides),

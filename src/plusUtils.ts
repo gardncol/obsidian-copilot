@@ -345,10 +345,20 @@ export function applyPlusSettings(): void {
     changed: previousEmbeddingModelKey !== embeddingModelKey,
   });
 
+  // Mirror the user's choice through both the structured ref (storage) and
+  // the legacy wire-key (for atom subscribers that don't see settings
+  // changes synchronously). `defaultModelKey` here is the wire-format
+  // string we want subscribers to observe — derive the structured ref so
+  // the next reload resolves through the registry.
+  const defaultModelRef = {
+    providerId: ChatModelProviders.COPILOT_PLUS,
+    modelId: DEFAULT_COPILOT_PLUS_CHAT_MODEL,
+  };
+
   setModelKey(defaultModelKey);
   setChainType(ChainType.COPILOT_PLUS_CHAIN);
   setSettings({
-    defaultModelKey,
+    defaultModelRef,
     embeddingModelKey,
     defaultChainType: ChainType.COPILOT_PLUS_CHAIN,
   });

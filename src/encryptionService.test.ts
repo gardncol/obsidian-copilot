@@ -279,7 +279,7 @@ describe("isSensitiveKey", () => {
   it.each([
     "temperature",
     "userSystemPrompt",
-    "defaultModelKey",
+    "defaultModelRef",
     "activeModels",
     "maxTokens",
     "githubCopilotTokenExpiresAt",

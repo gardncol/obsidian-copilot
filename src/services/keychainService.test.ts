@@ -97,13 +97,23 @@ import type { CopilotSettings } from "@/settings/model";
 import type { CustomModel } from "@/aiParams";
 import { KeychainService, isSecretKey } from "./keychainService";
 
-/** Build a lightweight settings object. */
-function makeSettings(overrides: Partial<CopilotSettings> = {}): CopilotSettings {
+/**
+ * Build a lightweight settings object. Accepts arbitrary keys because tests
+ * still pass legacy `*ApiKey` fields removed from the `CopilotSettings`
+ * interface in M9 — the keychain machinery itself iterates by
+ * `isSensitiveKey` against whatever runtime keys exist on the object.
+ */
+function makeSettings(overrides: Record<string, unknown> = {}): CopilotSettings {
   return {
     activeModels: [],
     activeEmbeddingModels: [],
     ...overrides,
   } as unknown as CopilotSettings;
+}
+
+/** Helper to read arbitrary fields from a settings-shaped object in assertions. */
+function asRec(s: CopilotSettings): Record<string, unknown> {
+  return s as unknown as Record<string, unknown>;
 }
 
 /** Build a minimal custom model. */
@@ -181,7 +191,7 @@ describe("isSecretKey", () => {
     }
   );
 
-  it.each(["temperature", "defaultModelKey", "userId"])("returns false for %s", (key) => {
+  it.each(["temperature", "defaultModelRef", "userId"])("returns false for %s", (key) => {
     expect(isSecretKey(key)).toBe(false);
   });
 });
@@ -227,7 +237,7 @@ describe("hydrateFromKeychain", () => {
       makeSettings({ openAIApiKey: "leftover-from-disk" })
     );
 
-    expect(result.settings.openAIApiKey).toBe("");
+    expect(asRec(result.settings).openAIApiKey).toBe("");
     expect(result.hadFailures).toBe(false);
     // Reason: hydrateFromKeychain is strictly read-only.
     expect(secretStorage.setSecret).not.toHaveBeenCalled();
@@ -242,7 +252,7 @@ describe("hydrateFromKeychain", () => {
       makeSettings({ openAIApiKey: "stale-disk-value" })
     );
 
-    expect(result.settings.openAIApiKey).toBe("kc-value");
+    expect(asRec(result.settings).openAIApiKey).toBe("kc-value");
     expect(secretStorage.setSecret).not.toHaveBeenCalled();
   });
 
@@ -253,7 +263,7 @@ describe("hydrateFromKeychain", () => {
 
     const result = await service.hydrateFromKeychain(makeSettings({ openAIApiKey: "" }));
 
-    expect(result.settings.openAIApiKey).toBe("");
+    expect(asRec(result.settings).openAIApiKey).toBe("");
     expect(result.hadFailures).toBe(false);
     expect(secretStorage.setSecret).not.toHaveBeenCalled();
   });
@@ -317,9 +327,7 @@ describe("hydrateFromKeychain", () => {
     );
     const service = KeychainService.getInstance(makeApp({ secretStorage }));
 
-    const result = await service.hydrateFromKeychain(
-      makeSettings({ legacyProviderApiKey: "" } as unknown as Partial<CopilotSettings>)
-    );
+    const result = await service.hydrateFromKeychain(makeSettings({ legacyProviderApiKey: "" }));
 
     expect((result.settings as unknown as Record<string, string>).legacyProviderApiKey).toBe(
       "legacy-value"
@@ -369,9 +377,9 @@ describe("persistSecrets", () => {
     );
 
     // Reason: persistSecrets must not mutate the input settings objects
-    expect(current.openAIApiKey).toBe("sk-current");
+    expect(asRec(current).openAIApiKey).toBe("sk-current");
     expect(current.activeModels[0].apiKey).toBe("chat-secret");
-    expect(prev.openAIApiKey).toBe("sk-prev");
+    expect(asRec(prev).openAIApiKey).toBe("sk-prev");
     expect(prev.activeModels[0].apiKey).toBe("chat-prev");
   });
 });

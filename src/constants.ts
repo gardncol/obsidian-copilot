@@ -740,24 +740,6 @@ export const ProviderInfo: Record<Provider, ProviderMetadata> = {
   },
 };
 
-// Map provider to its settings key for API key
-export const ProviderSettingsKeyMap: Record<SettingKeyProviders, keyof CopilotSettings> = {
-  anthropic: "anthropicApiKey",
-  openai: "openAIApiKey",
-  "azure openai": "azureOpenAIApiKey",
-  google: "googleApiKey",
-  groq: "groqApiKey",
-  openrouterai: "openRouterAiApiKey",
-  cohereai: "cohereApiKey",
-  xai: "xaiApiKey",
-  "copilot-plus": "plusLicenseKey",
-  mistralai: "mistralApiKey",
-  deepseek: "deepseekApiKey",
-  "amazon-bedrock": "amazonBedrockApiKey",
-  siliconflow: "siliconflowApiKey",
-  "github-copilot": "githubCopilotToken",
-};
-
 export enum VAULT_VECTOR_STORE_STRATEGY {
   NEVER = "NEVER",
   ON_STARTUP = "ON STARTUP",
@@ -907,38 +889,19 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   userId: uuidv4(),
   isPlusUser: false,
   plusLicenseKey: "",
-  openAIApiKey: "",
-  openAIOrgId: "",
-  huggingfaceApiKey: "",
-  cohereApiKey: "",
-  anthropicApiKey: "",
-  azureOpenAIApiKey: "",
-  azureOpenAIApiInstanceName: "",
-  azureOpenAIApiDeploymentName: "",
-  azureOpenAIApiVersion: "",
-  azureOpenAIApiEmbeddingDeploymentName: "",
-  googleApiKey: "",
-  openRouterAiApiKey: "",
-  xaiApiKey: "",
-  mistralApiKey: "",
-  deepseekApiKey: "",
-  amazonBedrockApiKey: "",
-  amazonBedrockRegion: "",
-  siliconflowApiKey: "",
-  // GitHub Copilot OAuth tokens
+  // GitHub Copilot OAuth tokens (not BYOK — auth flow is OAuth-managed,
+  // not a user-pasted API key, so these stay on dedicated settings fields).
   githubCopilotAccessToken: "",
   githubCopilotToken: "",
   githubCopilotTokenExpiresAt: 0,
   defaultChainType: ChainType.LLM_CHAIN,
-  defaultModelKey: ChatModels.OPENROUTER_GEMINI_2_5_FLASH + "|" + ChatModelProviders.OPENROUTERAI,
+  defaultModelRef: null,
   embeddingModelKey:
     EmbeddingModels.OPENROUTER_OPENAI_EMBEDDING_SMALL + "|" + EmbeddingModelProviders.OPENROUTERAI,
   temperature: DEFAULT_MODEL_SETTING.TEMPERATURE,
   maxTokens: DEFAULT_MODEL_SETTING.MAX_TOKENS,
   contextTurns: 15,
   userSystemPrompt: "",
-  openAIProxyBaseUrl: "",
-  openAIEmbeddingProxyBaseUrl: "",
   stream: true,
   defaultSaveFolder: DEFAULT_CHAT_HISTORY_FOLDER,
   defaultConversationTag: "copilot-conversation",
@@ -957,7 +920,6 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   debug: false,
   maxSourceChunks: DEFAULT_MAX_SOURCE_CHUNKS,
   enableInlineCitations: true,
-  groqApiKey: "",
   activeModels: BUILTIN_CHAT_MODELS,
   activeEmbeddingModels: BUILTIN_EMBEDDING_MODELS,
   embeddingRequestsPerMin: 60,
@@ -1034,6 +996,12 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
       importSkipList: [],
     },
   },
+  // Model-management v2 schema fields. Populated by the v0→v2 migration on
+  // first load of a pre-v2 data.json; fresh installs start with these.
+  // See: designdocs/MODEL_MANAGEMENT_REDESIGN_TECH_SPEC.md §2.1.
+  settingsVersion: 0,
+  providers: {},
+  registry: [],
 };
 
 export const EVENT_NAMES = {

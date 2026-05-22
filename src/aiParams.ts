@@ -3,21 +3,31 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { ChatPromptTemplate } from "@langchain/core/prompts";
 
 import { ModelCapability, ReasoningEffort, Verbosity } from "@/constants";
-import { settingsAtom, settingsStore } from "@/settings/model";
+import { setSettings, settingsAtom, settingsStore } from "@/settings/model";
 import { SelectedTextContext } from "@/types/message";
 import { atom, useAtom } from "jotai";
 import { TFile } from "obsidian";
 
 const userModelKeyAtom = atom<string | null>(null);
+/**
+ * Chat model key atom. The wire format is the legacy `"<modelId>|<providerId>"`
+ * string — many call sites still pass it around. Storage, however, is the
+ * structured `settings.defaultModelRef`. This atom translates between the two.
+ *
+ * Returns `""` (empty string) when no default has been chosen; callers must
+ * handle that case (the legacy chat path throws `MissingModelKeyError`).
+ */
 const modelKeyAtom = atom(
   (get) => {
     const userValue = get(userModelKeyAtom);
     if (userValue !== null) {
       return userValue;
     }
-    return get(settingsAtom).defaultModelKey;
+    const ref = get(settingsAtom).defaultModelRef;
+    if (ref) return `${ref.modelId}|${ref.providerId}`;
+    return "";
   },
-  (get, set, newValue) => {
+  (get, set, newValue: string) => {
     set(userModelKeyAtom, newValue);
   }
 );
@@ -188,6 +198,16 @@ export function setModelKey(modelKey: string) {
 
 export function getModelKey(): string {
   return settingsStore.get(modelKeyAtom);
+}
+
+/**
+ * Persist the user's default chat model into the structured
+ * `settings.defaultModelRef` slot. Mirrors `setModelKey` but takes the
+ * registry-shaped tuple directly — preferred for callers that already have
+ * `(providerId, modelId)` (BYOK panel, default-model picker, migrations).
+ */
+export function setDefaultModelRef(ref: { providerId: string; modelId: string } | null): void {
+  setSettings({ defaultModelRef: ref });
 }
 
 export function subscribeToModelKeyChange(callback: () => void): () => void {

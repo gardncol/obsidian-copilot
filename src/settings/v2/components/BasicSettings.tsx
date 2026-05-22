@@ -84,8 +84,15 @@ export const BasicSettings: React.FC = () => {
     }
   };
 
+  // Derive the legacy `<modelName>|<provider>` wire string from the
+  // structured `defaultModelRef` storage — the picker `Select` is keyed by
+  // string values, so we keep the wire format inside the component and
+  // translate at the read/write boundary.
+  const defaultModelWireKey = settings.defaultModelRef
+    ? `${settings.defaultModelRef.modelId}|${settings.defaultModelRef.providerId}`
+    : "";
   const defaultModelActivated = !!settings.activeModels.find(
-    (m) => m.enabled && getModelKeyFromModel(m) === settings.defaultModelKey
+    (m) => m.enabled && getModelKeyFromModel(m) === defaultModelWireKey
   );
   const enableActivatedModels = settings.activeModels
     .filter((m) => m.enabled)
@@ -161,7 +168,7 @@ export const BasicSettings: React.FC = () => {
                 />
               </div>
             }
-            value={defaultModelActivated ? settings.defaultModelKey : "Select Model"}
+            value={defaultModelActivated ? defaultModelWireKey : "Select Model"}
             onChange={(value) => {
               const selectedModel = settings.activeModels.find(
                 (m) => m.enabled && getModelKeyFromModel(m) === value
@@ -172,7 +179,14 @@ export const BasicSettings: React.FC = () => {
               if (!hasApiKey && errorNotice) {
                 // Keep selection allowed; error will surface in chat on send
               }
-              updateSetting("defaultModelKey", value);
+              // Parse the picker's wire-string back into the structured ref.
+              // `getModelKeyFromModel` returns `<modelId>|<providerId>`; model
+              // ids may contain `|` so split on the LAST separator.
+              const sep = value.lastIndexOf("|");
+              if (sep <= 0 || sep >= value.length - 1) return;
+              const modelId = value.slice(0, sep);
+              const providerId = value.slice(sep + 1);
+              updateSetting("defaultModelRef", { providerId, modelId });
             }}
             options={
               defaultModelActivated

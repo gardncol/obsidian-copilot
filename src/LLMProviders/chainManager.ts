@@ -1,4 +1,10 @@
-import { getChainType, getCurrentProject, getModelKey, SetChainOptions } from "@/aiParams";
+import {
+  CustomModel,
+  getChainType,
+  getCurrentProject,
+  getModelKey,
+  SetChainOptions,
+} from "@/aiParams";
 import { ChainType } from "@/chainType";
 import { BUILTIN_CHAT_MODELS, USER_SENDER } from "@/constants";
 import {
@@ -13,7 +19,9 @@ import { logError, logInfo } from "@/logger";
 import { getSettings, subscribeToSettingsChange } from "@/settings/model";
 import { getSystemPrompt } from "@/system-prompts/systemPromptBuilder";
 import { ChatMessage } from "@/types/message";
-import { findCustomModel, isOSeriesModel } from "@/utils";
+import { findCustomModel } from "@/utils";
+import { ModelRegistry } from "@/modelManagement";
+import { isOpenAIOSeries } from "@/modelManagement/providers/adapters/adapterUtils";
 import { MissingModelKeyError } from "@/error";
 import {
   ChatPromptTemplate,
@@ -22,7 +30,7 @@ import {
 } from "@langchain/core/prompts";
 import { Document } from "@langchain/core/documents";
 import { App, Notice } from "obsidian";
-import ChatModelManager from "./chatModelManager";
+import ChatModelManager from "./ChatModelManager";
 import MemoryManager from "./memoryManager";
 import PromptManager from "./promptManager";
 import { UserMemoryManager } from "@/memory/UserMemoryManager";
@@ -45,7 +53,11 @@ export default class ChainManager {
     // Instantiate singletons
     this.app = app;
     this.memoryManager = MemoryManager.getInstance();
-    this.chatModelManager = ChatModelManager.getInstance();
+    // ChatModelManager is per-instance — every chain owns its own so two
+    // chains can hold different active models without contending on shared
+    // state. The static getInstance() shim returns a fresh instance, so
+    // pre-existing tests that mock it keep working.
+    this.chatModelManager = new ChatModelManager();
     this.promptManager = PromptManager.getInstance();
     this.userMemoryManager = new UserMemoryManager(app);
 
@@ -108,12 +120,54 @@ export default class ChainManager {
       }
 
       if (neededReInitChatMode) {
-        let customModel = findCustomModel(newModelKey, getSettings().activeModels);
+        // Primary resolution: consult the BYOK registry. Registry entries are
+        // the post-M9 source of truth for "which models are available". The
+        // `CustomModel` lookup below is a transitional bridge — adapters
+        // still read per-model runtime data off `CustomModel` (baseUrl,
+        // azureDeployment, …) until Task #2 collapses that slice into
+        // `RegistryEntry.extra`.
+        const sepIndex = newModelKey.lastIndexOf("|");
+        const parsedModelId =
+          sepIndex > 0 && sepIndex < newModelKey.length - 1 ? newModelKey.slice(0, sepIndex) : null;
+        const parsedProviderId =
+          sepIndex > 0 && sepIndex < newModelKey.length - 1
+            ? newModelKey.slice(sepIndex + 1)
+            : null;
+        const registryEntry =
+          parsedProviderId && parsedModelId
+            ? ModelRegistry.getInstance().get(parsedProviderId, parsedModelId)
+            : undefined;
+
+        let customModel: CustomModel | undefined;
+        try {
+          customModel = findCustomModel(newModelKey, getSettings().activeModels);
+        } catch {
+          customModel = undefined;
+        }
+
+        // If neither the registry nor `activeModels` knows about the key,
+        // reset to a built-in default. The registry is consulted first so
+        // a model that lives only in the new shape (no `CustomModel` row,
+        // post-Task #2) won't trigger the fallback.
         if (!customModel) {
-          // Reset default model if no model is found
-          console.error("Resetting default model. No model configuration found for: ", newModelKey);
-          customModel = BUILTIN_CHAT_MODELS[0];
-          newModelKey = customModel.name + "|" + customModel.provider;
+          if (registryEntry) {
+            // Synthesize a minimal `CustomModel` view so downstream code that
+            // still expects this shape continues working. Runtime data
+            // (`apiKey`, `baseUrl`, …) is read from `settings.providers[id]`
+            // by the adapters; this shim only needs `name` + `provider`.
+            customModel = {
+              name: registryEntry.modelId,
+              provider: registryEntry.providerId,
+              enabled: true,
+            };
+          } else {
+            console.error(
+              "Resetting default model. No model configuration found for: ",
+              newModelKey
+            );
+            customModel = BUILTIN_CHAT_MODELS[0];
+            newModelKey = customModel.name + "|" + customModel.provider;
+          }
         }
 
         // Add validation for project mode
@@ -223,9 +277,11 @@ export default class ChainManager {
     this.validateChatModel();
 
     const chatModel = this.chatModelManager.getChatModel();
+    const chatModelName = extractChatModelName(chatModel);
+    const isOSeries = chatModelName ? isOpenAIOSeries(chatModelName) : false;
 
     // Handle ignoreSystemMessage
-    if (ignoreSystemMessage || isOSeriesModel(chatModel)) {
+    if (ignoreSystemMessage || isOSeries) {
       let effectivePrompt = ChatPromptTemplate.fromMessages([
         new MessagesPlaceholder("history"),
         HumanMessagePromptTemplate.fromTemplate("{input}"),
@@ -233,7 +289,7 @@ export default class ChainManager {
 
       // TODO: hack for o-series models, to be removed when langchainjs supports system prompt
       // https://github.com/langchain-ai/langchain/issues/28895
-      if (isOSeriesModel(chatModel)) {
+      if (isOSeries) {
         effectivePrompt = ChatPromptTemplate.fromMessages([
           [USER_SENDER, getSystemPrompt() || ""],
           effectivePrompt,
@@ -257,4 +313,18 @@ export default class ChainManager {
       options
     );
   }
+}
+
+/**
+ * Extracts the model id string from a LangChain `BaseChatModel`-shaped
+ * instance. Different clients store the id under `modelName` or `model`;
+ * neither is part of the published `BaseChatModel` type so we read them
+ * defensively. Returns `undefined` when the model is unavailable or
+ * neither field is populated.
+ */
+function extractChatModelName(model: unknown): string | undefined {
+  if (!model || typeof model !== "object") return undefined;
+  const m = model as Record<string, unknown>;
+  const name = (m.modelName as string) || (m.model as string);
+  return typeof name === "string" && name.length > 0 ? name : undefined;
 }

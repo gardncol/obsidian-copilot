@@ -11,6 +11,12 @@
  *
  * See: designdocs/MODEL_MANAGEMENT_REDESIGN_TECH_SPEC.md §4.2.
  *
+ * **Step 8a — default chat model:**
+ * The legacy `defaultModelKey: string` (format `<modelName>|<provider>`) is
+ * parsed and resolved against the freshly-populated `settings.registry`. On
+ * a match, `settings.defaultModelRef = { providerId, modelId }` is written
+ * and `defaultModelKey` is deleted; on no match, the ref is cleared (null).
+ *
  * **Step 10 — legacy field deletion (M9):**
  * After synthesizing the new `providers` / `registry` shape, the migration
  * physically removes every legacy provider-key / extras field from the saved
@@ -66,10 +72,9 @@ const DROPPED_PER_MODEL_OVERRIDE_FIELDS = [
  * Top-level legacy provider-key fields removed by step 10. After migration
  * every API key + provider extras lives under `settings.providers[id]`.
  *
- * `defaultModelKey` is intentionally NOT in this list — it's still consumed
- * by the legacy LangChain chat path (BasicSettings, plusUtils, …) and is not
- * a parallel-source-of-truth issue. A future task can decommission it once
- * the chat path selects models through the registry directly.
+ * `defaultModelKey` is handled separately by step 8a — it's parsed into the
+ * structured `defaultModelRef` shape that the registry-backed
+ * `modelKeyAtom` reads, then deleted from the saved settings object.
  */
 /**
  * NOTE: a copy of this list lives in `src/services/settingsPersistence.ts`
@@ -673,6 +678,56 @@ export function migrateV0toV2(raw: Record<string, unknown>): {
   // treat-as-true on desktop). Migration sets it to true defensively.
   agentMode.enabled = true;
   settings.agentMode = agentMode;
+
+  // Step 8a: migrate the legacy `defaultModelKey` string into the structured
+  // `defaultModelRef` shape. The legacy format is `<modelName>|<provider>`;
+  // model names may themselves contain pipes (rare but possible — some
+  // upstream catalog ids do), so we split on the LAST `|`. After parsing,
+  // verify the resulting `(providerId, modelId)` resolves to an entry we
+  // just placed in `settings.registry`. On miss, write `null` so the
+  // resolver falls back to the first enabled registry entry on next read.
+  const legacyDefaultModelKey =
+    typeof settings.defaultModelKey === "string" ? settings.defaultModelKey : "";
+  let defaultModelRef: { providerId: ProviderId; modelId: string } | null = null;
+  if (legacyDefaultModelKey.length > 0) {
+    const sepIndex = legacyDefaultModelKey.lastIndexOf("|");
+    if (sepIndex > 0 && sepIndex < legacyDefaultModelKey.length - 1) {
+      const modelName = legacyDefaultModelKey.slice(0, sepIndex);
+      const legacyProvider = legacyDefaultModelKey.slice(sepIndex + 1);
+      // Built-in / known-provider path: look up through `LEGACY_PROVIDER_TO_ID`.
+      const mappedId = LEGACY_PROVIDER_TO_ID[legacyProvider];
+      const candidates: ProviderId[] = [];
+      if (mappedId) candidates.push(mappedId);
+      // System-provider passthroughs (opencode-bundled, copilot-plus) stay
+      // as-is; the legacy provider string already equals the canonical id.
+      if (legacyProvider === OPENCODE_BUNDLED_PROVIDER) candidates.push(OPENCODE_BUNDLED_PROVIDER);
+      if (legacyProvider === COPILOT_PLUS_PROVIDER) candidates.push(COPILOT_PLUS_PROVIDER);
+      for (const candidate of candidates) {
+        const match = registry.find((e) => e.providerId === candidate && e.modelId === modelName);
+        if (match) {
+          defaultModelRef = { providerId: candidate, modelId: modelName };
+          break;
+        }
+      }
+      // Last-chance fallback: custom providers — find any registry entry
+      // whose modelId matches (custom provider ids are uuid-shaped, the
+      // legacy `provider` was a free-form label so we can't map it
+      // deterministically).
+      if (!defaultModelRef) {
+        const match = registry.find((e) => e.modelId === modelName);
+        if (match) {
+          defaultModelRef = { providerId: match.providerId, modelId: modelName };
+        }
+      }
+    }
+  }
+  settings.defaultModelRef = defaultModelRef;
+  if (settings.defaultModelKey !== undefined) {
+    if (legacyDefaultModelKey.length > 0) {
+      droppedFields.push("settings.defaultModelKey.deleted");
+    }
+    delete settings.defaultModelKey;
+  }
 
   // Step 9: keychain promotion — DEFERRED (see file header). All apiKeyRefs
   // are inline at this point.

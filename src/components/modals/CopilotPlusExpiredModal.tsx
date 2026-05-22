@@ -10,8 +10,13 @@ import { createPluginRoot } from "@/utils/react/createPluginRoot";
 
 function CopilotPlusExpiredModalContent({ onCancel }: { onCancel: () => void }) {
   const settings = getSettings();
+  // `isPlusModel` takes the legacy `<modelId>|<providerId>` wire string;
+  // derive it on the fly from the structured `defaultModelRef` storage.
+  const defaultModelWireKey = settings.defaultModelRef
+    ? `${settings.defaultModelRef.modelId}|${settings.defaultModelRef.providerId}`
+    : "";
   const isUsingPlusModels =
-    isPlusModel(settings.defaultModelKey) && isPlusModel(settings.embeddingModelKey);
+    isPlusModel(defaultModelWireKey) && isPlusModel(settings.embeddingModelKey);
 
   return (
     <div className="tw-flex tw-flex-col tw-gap-4">
