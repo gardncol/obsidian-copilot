@@ -42,6 +42,45 @@ import { logError, logWarn } from "@/logger";
 import { Notice } from "obsidian";
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Local copies of the migration version and legacy provider-key field list.
+ *
+ * Reason: importing these through `@/modelManagement` would pull in the
+ * entire model-management barrel (registry, catalog, BYOK UI, …) during
+ * settings load. The eslint boundary forbids reaching past the barrel, so
+ * we inline the constants instead. Keep in sync with:
+ *   - `src/modelManagement/migrations/runMigrations.ts:CURRENT_SETTINGS_VERSION`
+ *   - `src/modelManagement/migrations/v0-to-v2.ts:LEGACY_PROVIDER_KEY_FIELDS`
+ */
+const CURRENT_SETTINGS_VERSION_LOCAL = 2;
+const LEGACY_PROVIDER_KEY_FIELDS_LOCAL = [
+  "openAIApiKey",
+  "openAIOrgId",
+  "openAIProxyBaseUrl",
+  "openAIEmbeddingProxyBaseUrl",
+  "anthropicApiKey",
+  "googleApiKey",
+  "cohereApiKey",
+  "mistralApiKey",
+  "deepseekApiKey",
+  "groqApiKey",
+  "xaiApiKey",
+  "openRouterAiApiKey",
+  "siliconflowApiKey",
+  "amazonBedrockApiKey",
+  "amazonBedrockRegion",
+  "huggingfaceApiKey",
+  "azureOpenAIApiKey",
+  "azureOpenAIApiInstanceName",
+  "azureOpenAIApiDeploymentName",
+  "azureOpenAIApiVersion",
+  "azureOpenAIApiEmbeddingDeploymentName",
+] as const;
+
+// ---------------------------------------------------------------------------
 // Module-global persistence state
 // ---------------------------------------------------------------------------
 
@@ -294,6 +333,95 @@ async function loadSecretsFromKeychain(settings: CopilotSettings): Promise<Copil
 }
 
 // ---------------------------------------------------------------------------
+// Pre-migration keychain backfill (v0 → v2)
+// ---------------------------------------------------------------------------
+
+/**
+ * For users who upgraded to keychain-only BEFORE the model-management redesign,
+ * legacy API key fields (`openAIApiKey`, `anthropicApiKey`, …) were stored in
+ * the OS keychain under their original camelCase ids. On a v0 install:
+ *   - `data.json` was stripped of those secrets (keychain-only contract).
+ *   - The values live only in the keychain.
+ *
+ * The v0→v2 migration runs synchronously inside `sanitizeSettings` and reads
+ * `settings.openAIApiKey` etc. from the in-memory object. Without this
+ * pre-hydration step it would see empty strings and synthesise empty
+ * `providers[*].apiKeyRef.value` entries — silently losing every BYOK key.
+ *
+ * This helper inlines the keychain reads BEFORE `sanitizeSettings` so the
+ * migration sees the actual plaintext values and writes them into the new
+ * shape. After the migration the orphaned legacy keychain entries are
+ * deleted by `cleanupLegacyKeychainEntries`.
+ *
+ * Returns the keys that were successfully copied — used by the post-migration
+ * cleanup step so we only delete entries we know are now safely represented
+ * in the new shape.
+ */
+function hydrateLegacyKeysFromKeychain(
+  rawData: Record<string, unknown>,
+  keychain: KeychainService
+): { hydratedFields: string[]; hadFailures: boolean } {
+  const hydratedFields: string[] = [];
+  let hadFailures = false;
+
+  for (const field of LEGACY_PROVIDER_KEY_FIELDS_LOCAL) {
+    // Reason: only inject from keychain when the in-memory value is missing
+    // or empty. A non-empty in-memory value (e.g. cross-version sync left
+    // plaintext on disk) takes precedence — the migration sees it directly
+    // and we leave the keychain entry alone for cleanup to handle.
+    const existing = rawData[field];
+    if (typeof existing === "string" && existing.length > 0) continue;
+
+    let keychainValue: string | null;
+    try {
+      keychainValue = keychain.getSecret(field);
+    } catch (e) {
+      console.warn(`Pre-migration keychain read failed for legacy field "${field}".`, e);
+      hadFailures = true;
+      continue;
+    }
+
+    // Tombstone ("") or missing (null) → nothing to copy.
+    if (keychainValue === null || keychainValue === "") continue;
+
+    rawData[field] = keychainValue;
+    hydratedFields.push(field);
+  }
+
+  return { hydratedFields, hadFailures };
+}
+
+/**
+ * Delete orphaned legacy keychain entries left over after a successful v0→v2
+ * migration. Only deletes entries that were successfully copied into the new
+ * `providers[*].apiKeyRef` shape (the `hydratedFields` list returned from
+ * `hydrateLegacyKeysFromKeychain`). Tombstones (`setSecretById(id, "")`) so
+ * a downgraded device won't resurrect the legacy value on its next hydrate.
+ *
+ * Conservative by design: any deletion failure is logged but never thrown —
+ * the migration has already succeeded by the time this runs, and the
+ * orphaned entry is benign (it's never read by post-M9 code paths). A future
+ * load attempt will retry the cleanup if the orphan remains AND the migration
+ * needs to re-run (which it never does, given `settingsVersion >= 2` is now
+ * persisted to disk).
+ */
+function cleanupLegacyKeychainEntries(
+  hydratedFields: readonly string[],
+  keychain: KeychainService
+): void {
+  for (const field of hydratedFields) {
+    try {
+      // Reason: use empty-string tombstone (not deleteSecretById) so a
+      // downgrade-then-upgrade cycle won't resurrect stale values via
+      // `hydrateFromKeychain` (which treats `""` as a tombstone).
+      keychain.setSecret(field, "");
+    } catch (e) {
+      console.warn(`Failed to tombstone legacy keychain entry for "${field}".`, e);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public load entry point
 // ---------------------------------------------------------------------------
 
@@ -314,12 +442,63 @@ export async function loadSettingsWithKeychain(
   // Obsidian's loadData() returns null when data.json doesn't exist yet.
   const isFreshInstall = rawData == null;
 
-  // Reason: sanitize FIRST to normalise model providers (e.g. azure_openai → azure-openai).
-  let settings = sanitizeSettings(rawData as CopilotSettings);
+  const keychain = KeychainService.getInstance();
 
   // Snapshot raw disk state so the cached `diskHasSecrets` flag is accurate
   // regardless of any downstream cleanup that happens to `settings`.
   let rawDiskData = structuredClone(rawData ?? {}) as Record<string, unknown>;
+  diskHasSecrets = hasPersistedSecrets(rawDiskData);
+
+  // ---- Pre-migration keychain backfill for legacy provider-key fields. ----
+  //
+  // Reason: when a v0 keychain-only user upgrades to the model-management
+  // redesign, their legacy API keys live ONLY in the OS keychain under the
+  // original camelCase ids (`openAIApiKey`, etc.). The v0→v2 migration runs
+  // synchronously inside `sanitizeSettings` and reads those fields from the
+  // in-memory object. Without this pre-hydration step the migration would
+  // see empty strings and produce empty `providers[*].apiKeyRef.value`
+  // entries — effectively losing every BYOK key on upgrade. After the
+  // migration succeeds we tombstone the orphaned legacy keychain entries
+  // (`cleanupLegacyKeychainEntries` below) so they don't resurrect on a
+  // downgrade-then-upgrade cycle.
+  //
+  // The vault namespace ID must be set BEFORE any keychain read; using the
+  // path-derived fallback would mismatch the persisted vaultId on vaults
+  // that had a stable `_keychainVaultId` written before this upgrade.
+  let preMigrationHydratedFields: string[] = [];
+  const persistedVaultIdRaw = rawDiskData._keychainVaultId;
+  const persistedVaultId = isValidKeychainVaultId(persistedVaultIdRaw)
+    ? persistedVaultIdRaw
+    : undefined;
+  const needsV0toV2Migration =
+    Number((rawDiskData.settingsVersion as number | undefined) ?? 0) <
+    CURRENT_SETTINGS_VERSION_LOCAL;
+
+  if (keychain.isAvailable() && needsV0toV2Migration) {
+    if (persistedVaultId) {
+      keychain.setVaultId(persistedVaultId);
+    }
+    // Reason: only legitimate target is the keychain-only branch. Disk-mode
+    // users still have legacy plaintext in `rawDiskData` and need no
+    // keychain backfill. Fresh installs (`rawData == null`) need it too
+    // because they get auto-promoted to keychain-only below — though they
+    // typically have no legacy keychain entries to hydrate.
+    const wasKeychainOnly =
+      (rawDiskData._keychainOnly === true || rawDiskData._diskSecretsCleared === true) &&
+      persistedVaultId !== undefined;
+    if (isFreshInstall || wasKeychainOnly) {
+      const { hydratedFields } = hydrateLegacyKeysFromKeychain(rawDiskData, keychain);
+      preMigrationHydratedFields = hydratedFields;
+    }
+  }
+
+  // Reason: sanitize FIRST to normalise model providers (e.g. azure_openai → azure-openai).
+  let settings = sanitizeSettings(rawDiskData as unknown as CopilotSettings);
+
+  // Refresh diskHasSecrets after the keychain backfill mutated `rawDiskData`.
+  // Reason: a pre-migration backfill puts secrets back into the raw object;
+  // without this refresh the cached flag would still reflect the stripped
+  // pre-backfill state.
   diskHasSecrets = hasPersistedSecrets(rawDiskData);
 
   // Reason: cleanupLegacyFields also migrates `_diskSecretsCleared` →
@@ -327,7 +506,89 @@ export async function loadSettingsWithKeychain(
   // value carries forward correctly from older installs.
   settings = cleanupLegacyFields(settings);
 
-  const keychain = KeychainService.getInstance();
+  // ---- Post-migration orphan keychain cleanup. ----
+  //
+  // Reason: the migration just synthesised `providers[*].apiKeyRef.value`
+  // from the legacy fields we hydrated. The legacy keychain entries are now
+  // orphaned (`CopilotSettings` no longer carries those fields, so no future
+  // load will read them). Tombstone them so a downgrade can't resurrect
+  // stale values, and so `hydrateFromKeychain` callers iterating
+  // `TOP_LEVEL_SECRET_FIELDS` won't see ghost entries on subsequent runs.
+  if (preMigrationHydratedFields.length > 0) {
+    cleanupLegacyKeychainEntries(preMigrationHydratedFields, keychain);
+  }
+
+  // ---- Post-migration inline-secret → new-namespace keychain promotion. ----
+  //
+  // Reason: v0→v2 (`runModelManagementMigrations` invoked from
+  // `sanitizeSettings`) is synchronous, but `KeychainService` cannot be
+  // routed through from a sync caller — the migration therefore writes
+  // every migrated API key as `apiKeyRef: { kind: "inline", value: key }`.
+  // For a v0 keychain-only user that means their plaintext key would land
+  // in `data.json` on first load after upgrade — silently breaking the
+  // keychain-only contract.
+  //
+  // Fix: immediately after the migration runs, promote each non-system
+  // provider's inline `apiKeyRef` into the new `provider-<id>-apiKey`
+  // keychain namespace and rewrite the ref to `{ kind: "keychain", id }`.
+  // Then persist the promoted shape via the caller-supplied `saveData` so
+  // the in-memory promotion survives a reload. The subsequent keychain-mode
+  // dispatch (`loadSecretsFromKeychain` further down) is unaffected — this
+  // promotion targets `providers[*].apiKeyRef` directly, not the legacy
+  // top-level fields that `hydrateFromKeychain` walks.
+  //
+  // Idempotency: after promotion `apiKeyRef.kind === "keychain"`, so a
+  // second pass skips the entry. Disk-mode users are skipped via the
+  // `isKeychainOnly(settings)` guard.
+  if (needsV0toV2Migration && keychain.isAvailable() && isKeychainOnly(settings)) {
+    const providersRec = (settings as unknown as Record<string, unknown>).providers as
+      | Record<string, Record<string, unknown>>
+      | undefined;
+    if (providersRec) {
+      let promoted = false;
+      for (const [providerId, provider] of Object.entries(providersRec)) {
+        if (!provider || typeof provider !== "object") continue;
+        // Reason: system providers (e.g. opencode, copilot-plus) carry no
+        // user-supplied `apiKeyRef` — credentials come from the agent
+        // backend. Skip them.
+        if (provider.kind === "system") continue;
+        const ref = provider.apiKeyRef as
+          | { kind: "inline"; value: string }
+          | { kind: "keychain"; id: string }
+          | null
+          | undefined;
+        if (!ref || ref.kind !== "inline") continue;
+        const value = ref.value;
+        if (typeof value !== "string" || value.length === 0) continue;
+
+        const keychainId = `provider-${providerId}-apiKey`;
+        try {
+          keychain.setSecretById(keychainId, value);
+          provider.apiKeyRef = { kind: "keychain", id: keychainId };
+          promoted = true;
+        } catch (e) {
+          // Reason: a failed promotion leaves the inline ref intact. Logging
+          // (not throwing) preserves the migration's partial-success contract
+          // — the user can re-enter the affected key via Settings, which
+          // will write through the new BYOK path and land in the keychain
+          // namespace correctly.
+          console.warn(`Post-migration keychain promotion failed for provider "${providerId}".`, e);
+        }
+      }
+
+      if (promoted) {
+        try {
+          await saveData(settings);
+        } catch (e) {
+          // Reason: even if the disk write fails, the in-memory promotion
+          // already protects this session — the keychain holds the secret
+          // and the in-memory `apiKeyRef` points at it. The next successful
+          // save (settings subscriber) will persist the promoted shape.
+          console.warn("Failed to persist post-migration keychain promotion.", e);
+        }
+      }
+    }
+  }
 
   // ---- Disk mode bypass when keychain isn't available at all. ----
   if (!keychain.isAvailable()) {

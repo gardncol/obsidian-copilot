@@ -24,12 +24,20 @@ function isSensitiveKey(key: string): boolean {
   );
 }
 
-/** Build a full settings object while keeping tests compact. */
-function makeSettings(overrides: Partial<CopilotSettings> = {}): CopilotSettings {
-  return {
-    ...DEFAULT_SETTINGS,
-    ...overrides,
-  };
+/**
+ * Build a full settings object while keeping tests compact. Accepts arbitrary
+ * keys so tests can still pass legacy `*ApiKey` fields the persistence code
+ * encounters on disk for un-migrated installs — they were removed from the
+ * `CopilotSettings` interface in M9.
+ */
+function makeSettings(overrides: Record<string, unknown> = {}): CopilotSettings {
+  const merged: Record<string, unknown> = { ...DEFAULT_SETTINGS, ...overrides };
+  return merged as unknown as CopilotSettings;
+}
+
+/** Coerce settings to `Record<string, unknown>` for legacy-field assertions. */
+function asRec(s: CopilotSettings): Record<string, unknown> {
+  return s as unknown as Record<string, unknown>;
 }
 
 /** Build a minimal custom model for persistence tests. */
@@ -46,6 +54,7 @@ function makeModel(overrides: Partial<CustomModel> = {}): CustomModel {
 async function loadModule(overrides?: {
   keychain?: Record<string, unknown>;
   getDecryptedKey?: (value: string) => Promise<string>;
+  sanitizeSettings?: (s: CopilotSettings) => CopilotSettings;
 }) {
   jest.resetModules();
 
@@ -85,7 +94,7 @@ async function loadModule(overrides?: {
 
   const mockSettings = { current: makeSettings() };
   jest.doMock("@/settings/model", () => ({
-    sanitizeSettings: jest.fn((s: CopilotSettings) => s),
+    sanitizeSettings: jest.fn(overrides?.sanitizeSettings ?? ((s: CopilotSettings) => s)),
     getModelKeyFromModel: jest.fn(
       (m: { name: string; provider: string }) => `${m.name}|${m.provider}`
     ),
@@ -213,7 +222,7 @@ describe("loadSettingsWithKeychain", () => {
       jest.fn().mockResolvedValue(undefined)
     );
 
-    expect(loaded.openAIApiKey).toBe("disk_openai");
+    expect(asRec(loaded).openAIApiKey).toBe("disk_openai");
   });
 
   it("keychain-only mode reads from keychain and ignores any stale disk secret", async () => {
@@ -238,7 +247,7 @@ describe("loadSettingsWithKeychain", () => {
     );
 
     expect(keychain.hydrateFromKeychain).toHaveBeenCalled();
-    expect(loaded.openAIApiKey).toBe("kc-value");
+    expect(asRec(loaded).openAIApiKey).toBe("kc-value");
     // Reason: scenario H — log a warning when stale disk secrets are observed
     // alongside keychain-only mode.
     expect(warnSpy).toHaveBeenCalledWith(
@@ -261,7 +270,7 @@ describe("loadSettingsWithKeychain", () => {
       jest.fn().mockResolvedValue(undefined)
     );
 
-    expect(loaded.openAIApiKey).toBe("disk_openai");
+    expect(asRec(loaded).openAIApiKey).toBe("disk_openai");
     expect(loaded.activeModels[0].apiKey).toBe("model_key");
   });
 
@@ -304,7 +313,7 @@ describe("loadSettingsWithKeychain", () => {
 
     const rec = loaded as unknown as Record<string, unknown>;
     expect(rec._keychainOnly).toBe(true);
-    expect(loaded.openAIApiKey).toBe("");
+    expect(asRec(loaded).openAIApiKey).toBe("");
     expect(loaded.activeModels[0].apiKey).toBe("");
   });
 
@@ -315,13 +324,263 @@ describe("loadSettingsWithKeychain", () => {
       makeSettings({
         _keychainVaultId: "vault1234",
         _diskSecretsCleared: true,
-      } as unknown as Partial<CopilotSettings>),
+      }),
       jest.fn().mockResolvedValue(undefined)
     );
 
     const rec = loaded as unknown as Record<string, unknown>;
     expect(rec._keychainOnly).toBe(true);
     expect(rec._diskSecretsCleared).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // v0 → v2 migration on a keychain-only vault: legacy keys live ONLY in the
+  // keychain (stripped from disk by the pre-redesign keychain-only contract).
+  // Without pre-migration hydration, the v0→v2 migration runs inside
+  // sanitizeSettings against empty legacy fields and produces empty
+  // providers[*].apiKeyRef.value — silently losing every BYOK key on upgrade.
+  // The fix backfills legacy fields from the keychain BEFORE sanitizeSettings,
+  // then tombstones the orphaned legacy keychain entries afterwards.
+  // -------------------------------------------------------------------------
+  describe("v0 → v2 migration with keychain-only legacy keys", () => {
+    it("probes the keychain for legacy fields before sanitizeSettings runs", async () => {
+      // Reason: simulate a v0 keychain-only user. data.json has no legacy
+      // provider-key fields (`openAIApiKey` etc. were stripped on disk), but
+      // those values still live in the OS keychain under their original
+      // camelCase ids. The migration would otherwise see empty fields and
+      // synthesise empty `providers[*].apiKeyRef.value`.
+      const legacyKeyMap: Record<string, string> = {
+        openAIApiKey: "sk-openai-from-keychain",
+        anthropicApiKey: "sk-ant-from-keychain",
+        googleApiKey: "google-from-keychain",
+      };
+      const getSecret = jest.fn((key: string) => legacyKeyMap[key] ?? null);
+      const setSecret = jest.fn();
+      const { mod, keychain } = await loadModule({
+        keychain: { getSecret, setSecret },
+      });
+
+      const raw: Record<string, unknown> = {
+        // Reason: keychain vault IDs are 8 lowercase hex chars
+        // (`KEYCHAIN_VAULT_ID_RE`). Use a valid one so the pre-hydration
+        // logic accepts the persisted namespace.
+        _keychainVaultId: "abcdef01",
+        _keychainOnly: true,
+        // Reason: missing settingsVersion → migration needed (v0 install).
+        // Legacy fields intentionally absent — that is the bug scenario.
+      };
+
+      await mod.loadSettingsWithKeychain(
+        raw,
+        jest.fn().mockResolvedValue(undefined)
+      );
+
+      // Reason: the keychain backfill should have set the vault id before
+      // any read so we hit the right namespace.
+      expect(keychain.setVaultId).toHaveBeenCalledWith("abcdef01");
+
+      // The pre-hydration must probe legacy fields. Use mock.calls so we
+      // see exactly what was passed.
+      const probedKeys = getSecret.mock.calls.map(([key]) => key);
+      // All legacy fields probed (regardless of value).
+      expect(probedKeys).toEqual(expect.arrayContaining(Object.keys(legacyKeyMap)));
+    });
+
+    it("tombstones the orphaned legacy keychain entries after successful migration", async () => {
+      // Reason: post-M9 the legacy fields are gone from CopilotSettings, so
+      // nothing will read them again. Tombstone (set to "") so a downgrade
+      // can't resurrect stale values and TOP_LEVEL_SECRET_FIELDS iteration
+      // never picks them up on subsequent runs.
+      const legacyKeyMap: Record<string, string> = {
+        openAIApiKey: "sk-openai-from-keychain",
+        anthropicApiKey: "sk-ant-from-keychain",
+      };
+      const setSecret = jest.fn();
+      const getSecret = jest.fn((key: string) => legacyKeyMap[key] ?? null);
+      const { mod } = await loadModule({
+        keychain: { getSecret, setSecret },
+      });
+
+      await mod.loadSettingsWithKeychain(
+        {
+          _keychainVaultId: "abcdef01",
+          _keychainOnly: true,
+        },
+        jest.fn().mockResolvedValue(undefined)
+      );
+
+      // Reason: exactly the two fields we hydrated should be tombstoned —
+      // never more, never fewer.
+      const calls = setSecret.mock.calls as Array<[string, string]>;
+      const tombstoneCalls = calls.filter(([, value]) => value === "");
+      const tombstonedFields = tombstoneCalls.map(([field]) => field).sort();
+      expect(tombstonedFields).toEqual(["anthropicApiKey", "openAIApiKey"]);
+    });
+
+    it("does NOT pre-hydrate when raw data already migrated (settingsVersion >= 2)", async () => {
+      // Reason: idempotent — a user who already upgraded should not have
+      // keychain reads performed against legacy field ids on every load.
+      const { mod, keychain } = await loadModule();
+
+      await mod.loadSettingsWithKeychain(
+        {
+          _keychainVaultId: "abcdef01",
+          _keychainOnly: true,
+          settingsVersion: 2,
+        },
+        jest.fn().mockResolvedValue(undefined)
+      );
+
+      // The hydrateFromKeychain path still runs (normal keychain-only load),
+      // but the pre-migration getSecret loop should not have probed any of
+      // the legacy field names.
+      const probedKeys = (keychain.getSecret).mock.calls.map((c) => c[0] as string);
+      expect(probedKeys).not.toContain("openAIApiKey");
+      expect(probedKeys).not.toContain("anthropicApiKey");
+    });
+
+    it("does NOT pre-hydrate in disk-mode vaults (only keychain-only vaults are affected)", async () => {
+      // Reason: disk-mode users still have legacy plaintext in data.json,
+      // and pre-hydrating from the keychain would risk overwriting an
+      // explicit in-memory value or running keychain I/O for no benefit.
+      const setSecret = jest.fn();
+      const getSecret = jest.fn(() => "sk-should-not-be-read");
+      const { mod } = await loadModule({
+        keychain: { getSecret, setSecret },
+      });
+
+      await mod.loadSettingsWithKeychain(
+        makeSettings({
+          _keychainVaultId: "abcdef01",
+          // Reason: disk-mode means `_keychainOnly` is unset.
+          openAIApiKey: "sk-from-disk",
+        }),
+        jest.fn().mockResolvedValue(undefined)
+      );
+
+      // Pre-hydration must not have probed any legacy keychain field for
+      // this disk-mode load.
+      const probedFields = (getSecret as jest.Mock).mock.calls.map((c) => c[0] as string);
+      expect(probedFields).not.toContain("openAIApiKey");
+      expect(probedFields).not.toContain("anthropicApiKey");
+
+      // And cleanup must not have tombstoned anything.
+      const tombstones = setSecret.mock.calls.filter(([, v]) => v === "");
+      expect(tombstones).toEqual([]);
+    });
+
+    it("never deletes a keychain entry it did not successfully copy", async () => {
+      // Reason: conservative cleanup. If getSecret returned null/empty for a
+      // field (no value in keychain), we must not tombstone it — there's
+      // nothing to tombstone, and a future re-migration on a different
+      // device could still need a real value if sync brings one in.
+      const setSecret = jest.fn();
+      const getSecret = jest.fn((key: string) =>
+        key === "openAIApiKey" ? "sk-only-this-one" : null
+      );
+      const { mod } = await loadModule({
+        keychain: { getSecret, setSecret },
+      });
+
+      await mod.loadSettingsWithKeychain(
+        {
+          _keychainVaultId: "abcdef01",
+          _keychainOnly: true,
+        },
+        jest.fn().mockResolvedValue(undefined)
+      );
+
+      const calls = setSecret.mock.calls as Array<[string, string]>;
+      const tombstoned = calls.filter(([, v]) => v === "").map(([field]) => field);
+      expect(tombstoned).toEqual(["openAIApiKey"]);
+    });
+
+    it("promotes migrated inline apiKeyRef into the new provider-<id>-apiKey keychain namespace", async () => {
+      // Reason: the v0→v2 migration runs synchronously inside sanitizeSettings
+      // and can only write `apiKeyRef: { kind: "inline", value }`. For a
+      // keychain-only user that means their plaintext key would land in
+      // data.json — silently breaking the keychain-only contract. The
+      // post-migration promotion in `loadSettingsWithKeychain` must
+      // (a) write the inline value into `provider-<id>-apiKey` keychain
+      // namespace, (b) rewrite the ref to `{ kind: "keychain", id }`, and
+      // (c) persist the promoted shape via saveData so it survives reload.
+      const keychainStore: Record<string, string> = {};
+      const setSecretById = jest.fn((id: string, value: string) => {
+        keychainStore[id] = value;
+      });
+      // Reason: legacy keychain backfill must surface the legacy openAIApiKey
+      // to sanitizeSettings so the migration synthesises a provider record.
+      const getSecret = jest.fn((key: string) => (key === "openAIApiKey" ? "sk-test-123" : null));
+      // Simulate v0→v2 sanitizeSettings: it sees the hydrated legacy field,
+      // synthesises `providers["openai"]` with an inline ref, and deletes
+      // the legacy field (step 10).
+      const sanitizeSettings = (s: CopilotSettings): CopilotSettings => {
+        const out = { ...s } as unknown as Record<string, unknown>;
+        const legacy = out.openAIApiKey;
+        if (typeof legacy === "string" && legacy.length > 0) {
+          out.providers = {
+            openai: {
+              id: "openai",
+              kind: "builtin",
+              displayName: "OpenAI",
+              type: "openai-compatible",
+              apiKeyRef: { kind: "inline", value: legacy },
+              addedAt: 1700000000000,
+            },
+          };
+          delete out.openAIApiKey;
+        }
+        out.settingsVersion = 2;
+        return out as unknown as CopilotSettings;
+      };
+
+      const { mod } = await loadModule({
+        keychain: { getSecret, setSecretById },
+        sanitizeSettings,
+      });
+
+      const saveData = jest.fn().mockResolvedValue(undefined);
+      const loaded = await mod.loadSettingsWithKeychain(
+        {
+          _keychainVaultId: "abcdef01",
+          _keychainOnly: true,
+          settingsVersion: 0,
+        },
+        saveData
+      );
+
+      const providers = (loaded as unknown as Record<string, unknown>).providers as Record<
+        string,
+        Record<string, unknown>
+      >;
+      const openai = providers.openai;
+      const ref = openai.apiKeyRef as Record<string, unknown>;
+      expect(ref.kind).toBe("keychain");
+      expect(ref.id).toBe("provider-openai-apiKey");
+
+      // Reason: the keychain mock recorded the secret under the new id with
+      // the original plaintext value.
+      expect(setSecretById).toHaveBeenCalledWith("provider-openai-apiKey", "sk-test-123");
+      expect(keychainStore["provider-openai-apiKey"]).toBe("sk-test-123");
+
+      // Reason: the promoted shape was persisted to disk so a reload picks
+      // up `kind: "keychain"` instead of re-running the promotion against an
+      // already-promoted entry.
+      const persistedCalls = saveData.mock.calls.filter((call) => {
+        const arg = call[0] as Record<string, unknown>;
+        const persistedProviders = arg.providers as
+          | Record<string, Record<string, unknown>>
+          | undefined;
+        const persistedRef = persistedProviders?.openai?.apiKeyRef as
+          | Record<string, unknown>
+          | undefined;
+        return persistedRef?.kind === "keychain";
+      });
+      expect(persistedCalls.length).toBeGreaterThan(0);
+
+      // Reason: legacy field deleted by sanitizeSettings step 10.
+      expect((loaded as unknown as Record<string, unknown>).openAIApiKey).toBeUndefined();
+    });
   });
 });
 
