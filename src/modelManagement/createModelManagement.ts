@@ -63,11 +63,24 @@ export interface ModelManagementApi {
 }
 
 export class ModelManagementCoordinator {
+  readonly #providers: ProviderRegistry;
+  readonly #models: ConfiguredModelRegistry;
+  readonly #backends: BackendConfigRegistry;
+
+  /**
+   * Inject all three registries. Prefer calling `createModelManagement`
+   * rather than constructing this directly — the factory wires all deps
+   * in the correct order.
+   */
   constructor(
     providerRegistry: ProviderRegistry,
     configuredModelRegistry: ConfiguredModelRegistry,
     backendConfigRegistry: BackendConfigRegistry
-  ) {}
+  ) {
+    this.#providers = providerRegistry;
+    this.#models = configuredModelRegistry;
+    this.#backends = backendConfigRegistry;
+  }
 
   /**
    * Cascade:
@@ -81,16 +94,21 @@ export class ModelManagementCoordinator {
    * ConfiguredModels are removed; otherwise `resolveEnabled` would
    * briefly surface them as broken.
    */
-  removeProvider(providerId: string): Promise<void> {
-    throw new Error(
-      "[modelManagement] ModelManagementCoordinator.removeProvider not implemented yet"
-    );
+  async removeProvider(providerId: string): Promise<void> {
+    const configuredModelIds = this.#models
+      .listByProvider(providerId)
+      .map((m) => m.configuredModelId);
+    await this.#backends.removeRefs(configuredModelIds);
+    await this.#models.removeByProvider(providerId);
+    await this.#providers.remove(providerId);
   }
 
   /**
    * Cascade:
    *   1. Drop the id from every BackendConfig.
    *   2. Remove the ConfiguredModel row.
+   *
+   * TODO(byok): implemented when the UI surfaces per-model removal.
    */
   removeConfiguredModel(configuredModelId: string): Promise<void> {
     throw new Error(

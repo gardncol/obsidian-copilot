@@ -84,25 +84,65 @@ export interface ByokSetupResult {
 }
 
 export class ByokSetupApi {
+  readonly #providers: ProviderRegistry;
+  readonly #models: ConfiguredModelRegistry;
+  readonly #backends: BackendConfigRegistry;
+
   constructor(
     providerRegistry: ProviderRegistry,
     configuredModelRegistry: ConfiguredModelRegistry,
     backendConfigRegistry: BackendConfigRegistry
-  ) {}
+  ) {
+    this.#providers = providerRegistry;
+    this.#models = configuredModelRegistry;
+    this.#backends = backendConfigRegistry;
+  }
 
   /**
    * Catalog-driven flow. Creates the Provider (with
    * `origin: { kind: "byok" }`), creates N ConfiguredModels from the
    * catalog snapshots, stores the API key in the keychain, and
    * enrolls the new models into `autoEnrollIn ?? BYOK_DEFAULT_AUTO_ENROLL`.
+   *
+   * Order: provider row → API key → models → backend enrollment. If a
+   * later step fails, earlier writes stay in place. The caller is
+   * responsible for surfacing the error to the user; cleanup of a
+   * partial setup happens through `coordinator.removeProvider`.
    */
-  addCatalogProvider(input: AddCatalogProviderInput): Promise<ByokSetupResult> {
-    throw new Error("[modelManagement] ByokSetupApi.addCatalogProvider not implemented yet");
+  async addCatalogProvider(input: AddCatalogProviderInput): Promise<ByokSetupResult> {
+    const providerId = await this.#providers.add({
+      providerType: input.template.providerType,
+      displayName: input.displayName,
+      baseUrl: input.baseUrl ?? input.template.defaultBaseUrl,
+      origin: { kind: "byok" },
+      extras: input.extras,
+    });
+
+    if (input.apiKey) {
+      await this.#providers.setApiKey(providerId, input.apiKey);
+    }
+
+    const infos = input.selectedWireModelIds
+      .map((wireId) => input.template.models[wireId])
+      .filter((info): info is NonNullable<typeof info> => info !== undefined);
+    const configuredModelIds = await this.#models.bulkSet(providerId, infos);
+
+    const enrollIn = input.autoEnrollIn ?? BYOK_DEFAULT_AUTO_ENROLL;
+    for (const backend of enrollIn) {
+      for (const id of configuredModelIds) {
+        await this.#backends.enableModel(backend, id);
+      }
+    }
+
+    return { providerId, configuredModelIds };
   }
 
   /**
    * Template-driven flow. Same shape as catalog flow, but model
    * metadata is whatever the user typed in (no catalog snapshot).
+   *
+   * TODO(byok): implemented in the template-flow PR. See
+   * `designdocs/BYOK_UI_SPEC.md` for the surrounding UI.
    */
   addTemplateProvider(input: AddTemplateProviderInput): Promise<ByokSetupResult> {
     throw new Error("[modelManagement] ByokSetupApi.addTemplateProvider not implemented yet");
@@ -113,6 +153,9 @@ export class ByokSetupApi {
    * touching the Provider row. Skips models that already exist on
    * the provider (uniqueness invariant). Returns the resulting
    * `configuredModelId`s in input order.
+   *
+   * TODO(byok): implemented in the template-flow PR (custom-model
+   * add for existing providers).
    */
   addModels(input: AddModelsInput): Promise<string[]> {
     throw new Error("[modelManagement] ByokSetupApi.addModels not implemented yet");
