@@ -10,16 +10,16 @@
  * subscribers use `settingsStore.sub(<atom>, listener)`.
  *
  * The three persisted slices (`providers`, `configuredModels`,
- * `backends`) are not yet typed fields on `CopilotSettings` — the
- * settings-wiring follow-up PR adds them. Until then, the local
- * helper below reads them with fallbacks so the atoms compile and
- * downstream UI components can bind to them today.
+ * `backends`) live directly on `CopilotSettings` and are backfilled
+ * with frozen empties by `sanitizeSettings` on load — so derived atoms
+ * never observe a fresh `{}` / `[]` and Jotai's `===` short-circuit
+ * holds across reads. See AGENTS.md → "Referential stability".
  */
 
 import { atom } from "jotai";
 import { atomFamily } from "jotai/utils";
 
-import { settingsAtom, type CopilotSettings } from "@/settings/model";
+import { settingsAtom } from "@/settings/model";
 
 import type {
   BackendConfig,
@@ -30,51 +30,20 @@ import type {
 } from "@/modelManagement/types/persisted";
 import type { EnabledBackendEntry } from "@/modelManagement/types/runtime";
 
-// Stable empty fallbacks. Allocated once so Jotai's `===` short-circuit
-// holds when the underlying slices are absent (pre-settings-wiring) or
-// unchanged between settings writes — otherwise every settings write
-// would invalidate every derived picker atom.
-const EMPTY_PROVIDERS: Readonly<Record<string, Provider>> = Object.freeze({});
-const EMPTY_CONFIGURED_MODELS: readonly ConfiguredModel[] = Object.freeze([]);
-const EMPTY_BACKENDS: Readonly<Partial<Record<BackendType, BackendConfig>>> = Object.freeze({});
-
-/**
- * Reads the three persisted slices with fallbacks. Pre-settings-wiring,
- * `CopilotSettings` doesn't declare these fields, so we widen via the
- * type intersection below — the cast is intentional and isolated to
- * this one helper.
- */
-function readSlices(settings: CopilotSettings): {
-  providers: Readonly<Record<string, Provider>>;
-  configuredModels: readonly ConfiguredModel[];
-  backends: Readonly<Partial<Record<BackendType, BackendConfig>>>;
-} {
-  const widened = settings as CopilotSettings & {
-    providers?: Record<string, Provider>;
-    configuredModels?: ConfiguredModel[];
-    backends?: Partial<Record<BackendType, BackendConfig>>;
-  };
-  return {
-    providers: widened.providers ?? EMPTY_PROVIDERS,
-    configuredModels: widened.configuredModels ?? EMPTY_CONFIGURED_MODELS,
-    backends: widened.backends ?? EMPTY_BACKENDS,
-  };
-}
-
 // -----------------------------------------------------------------------------
 // Raw slice atoms — derived directly from settings.
 // -----------------------------------------------------------------------------
 
 export const providersAtom = atom<Readonly<Record<string, Provider>>>(
-  (get) => readSlices(get(settingsAtom)).providers
+  (get) => get(settingsAtom).providers
 );
 
 export const configuredModelsAtom = atom<readonly ConfiguredModel[]>(
-  (get) => readSlices(get(settingsAtom)).configuredModels
+  (get) => get(settingsAtom).configuredModels
 );
 
 export const backendsAtom = atom<Readonly<Partial<Record<BackendType, BackendConfig>>>>(
-  (get) => readSlices(get(settingsAtom)).backends
+  (get) => get(settingsAtom).backends
 );
 
 // -----------------------------------------------------------------------------

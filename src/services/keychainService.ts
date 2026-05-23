@@ -291,12 +291,27 @@ export class KeychainService {
     }
   }
 
-  /** Write a value directly to the keychain using a pre-computed ID. */
+  /** Write a value directly to the keychain using a pre-computed ID.
+   *
+   *  CALLER CONTRACT: `keychainId` must be vault-namespaced — typically
+   *  `copilot-v{vaultId}-...` — so it is swept by
+   *  `clearAllVaultSecrets()` and isolated from other vaults / plugins.
+   *  This method is a low-level bridge; it does not validate the
+   *  prefix because some legacy callers compute their own ids. New
+   *  code should derive the id via `toKeychainId(getVaultId(), …)` or
+   *  an equivalent vault-namespaced helper. */
   setSecretById(keychainId: string, value: string): void {
     this.storage.setSecret(keychainId, value);
   }
 
-  /** Delete a keychain entry by its pre-computed ID. */
+  /** Read a value directly from the keychain using a pre-computed ID.
+   *  See `setSecretById` for the caller contract on `keychainId`. */
+  getSecretById(keychainId: string): string | null {
+    return this.storage.getSecret(keychainId);
+  }
+
+  /** Delete a keychain entry by its pre-computed ID.
+   *  See `setSecretById` for the caller contract on `keychainId`. */
   deleteSecretById(keychainId: string): void {
     this.removeSecret(keychainId);
   }

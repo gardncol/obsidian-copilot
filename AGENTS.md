@@ -166,6 +166,7 @@ For detailed architecture diagrams and documentation, see [`MESSAGE_ARCHITECTURE
 - **Avoid hardcoding**: No hardcoded folder names, file patterns, or special-case logic
 - **Configuration over convention**: If behavior needs to vary, make it configurable, not hardcoded
 - **Universal patterns**: Solutions should work equally well for any folder structure, naming convention, or content type
+- **Referential stability — reuse constants for empty values; cache and validate derived views.** Never return a freshly-allocated `[]` / `{}` for an "empty" slice — define a frozen module-level constant (`Object.freeze(...)`) and return it. For derived or filtered views over a settings slice, cache the result on the class/module and validate it by comparing the source-slice reference (`===`) against the live settings on every call; recompute only on miss. Reason: Jotai derived atoms and React memoization both short-circuit on referential equality, so fresh allocations invalidate every downstream cache on every read. Canonical examples: `EMPTY_PROVIDERS` / `EMPTY_CONFIGURED_MODELS` / `EMPTY_BACKENDS` in `src/settings/model.ts`
 
 ### TypeScript
 
