@@ -44,6 +44,7 @@ import { ChatManager } from "@/core/ChatManager";
 import { MessageRepository } from "@/core/MessageRepository";
 import { logError, logInfo, logWarn } from "@/logger";
 import { logFileManager } from "@/logFileManager";
+import { createModelManagement, type ModelManagementApi } from "@/modelManagement";
 import { KeychainService } from "@/services/keychainService";
 import {
   persistSettings,
@@ -118,6 +119,7 @@ export default class CopilotPlugin extends Plugin {
   settingsUnsubscriber?: () => void;
   chatUIState: ChatManagerChatUIState;
   agentSessionManager?: AgentSessionManager;
+  modelManagement!: ModelManagementApi;
   private ribbonIconEl?: HTMLElement;
   userMemoryManager: UserMemoryManager;
   quickAskController: QuickAskController;
@@ -141,6 +143,10 @@ export default class CopilotPlugin extends Plugin {
     KeychainService.resetInstance();
     KeychainService.getInstance(this.app);
     await this.loadSettings();
+    this.modelManagement = createModelManagement({
+      app: this.app,
+      pluginDir: this.manifest.dir ?? "",
+    });
     this.settingsUnsubscriber = subscribeToSettingsChange((prev, next) => {
       void (async () => {
         try {
@@ -356,6 +362,8 @@ export default class CopilotPlugin extends Plugin {
     } catch {
       // Ignore errors if service not available
     }
+
+    this.modelManagement?.dispose();
 
     // Best-effort flush of log file
     await logFileManager.flush();
