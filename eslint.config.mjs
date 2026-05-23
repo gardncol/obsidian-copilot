@@ -256,6 +256,7 @@ export default [
         { type: "backend", pattern: "src/agentMode/backends/*", capture: ["name"] },
         { type: "ui", pattern: "src/agentMode/ui" },
         { type: "skills", pattern: "src/agentMode/skills" },
+        { type: "modelmgmt", pattern: "src/modelManagement" },
         { type: "host", pattern: "src/**" },
       ],
     },
@@ -295,7 +296,16 @@ export default [
                 },
               },
             },
-            { from: { type: "host" }, allow: { to: { type: ["host", "barrel"] } } },
+            // modelManagement: self-contained module. Host code may
+            // freely reach into the module at the boundary layer; the
+            // barrel-only entry rule (no deep imports of
+            // `@/modelManagement/types/*`) is enforced by
+            // `no-restricted-imports` patterns further down.
+            { from: { type: "modelmgmt" }, allow: { to: { type: "modelmgmt" } } },
+            {
+              from: { type: "host" },
+              allow: { to: { type: ["host", "barrel", "modelmgmt"] } },
+            },
           ],
         },
       ],
@@ -311,8 +321,19 @@ export default [
     },
   },
 
-  // Only acp/ may import `@agentclientprotocol/sdk`. Tests are exempted via
-  // the test block; acp/ itself is exempted below.
+  // Two path-based import fences, combined in one block (flat config
+  // replaces — does not merge — rule values when the same rule key
+  // appears across matching blocks, so both fences MUST live here):
+  //
+  //   1. `@agentclientprotocol/sdk` — confined to src/agentMode/acp/.
+  //      Other agent-mode layers depend on the session-domain types
+  //      in @/agentMode/session/types instead.
+  //   2. `@/modelManagement/*` deep imports — host code must enter the
+  //      modelManagement module via its barrel (`@/modelManagement`).
+  //      This replaces a `modelmgmt-barrel` boundary element with the
+  //      lighter no-restricted-imports mechanism already used for (1).
+  //
+  // Module-internal files are exempted in the override blocks below.
   {
     files: ["src/**/*.{ts,tsx}"],
     rules: {
@@ -326,12 +347,25 @@ export default [
                 "ACP wire types are confined to src/agentMode/acp/. session/, sdk/, ui/, backends/, and skills/ should depend on the session-domain types in @/agentMode/session/types instead. See src/agentMode/AGENTS.md.",
             },
           ],
+          patterns: [
+            {
+              group: ["@/modelManagement/*"],
+              message:
+                "Import from @/modelManagement (the barrel) only. Deep imports of @/modelManagement/types/* are not allowed from outside the module. See src/modelManagement/AGENTS.md.",
+            },
+          ],
         },
       ],
     },
   },
   {
     files: ["src/agentMode/acp/**/*.{ts,tsx}"],
+    rules: {
+      "no-restricted-imports": "off",
+    },
+  },
+  {
+    files: ["src/modelManagement/**/*.{ts,tsx}"],
     rules: {
       "no-restricted-imports": "off",
     },

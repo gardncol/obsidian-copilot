@@ -1,15 +1,7 @@
 # Model Management — Data-Model Spec
 
-> **Status.** This spec supersedes the data-model sections of
-> `MODEL_MANAGEMENT_REDESIGN_TECH_SPEC.md`. UX flows, migration mechanics, and
-> non-data-model sections of that doc still apply. The implementation
-> currently on `zero/model-settings-redesign` does **not** fully match this
-> spec — see the [Reconciliation appendix](#reconciliation-appendix) at the
-> bottom for a candid diff. Decide what to keep, change, or rename after
-> reading the design.
-
-> **Audience.** A coding agent reconciling `src/modelManagement/` against this
-> design, and reviewers vetting the data model before any code changes.
+> **Audience.** A coding agent implementing or modifying
+> `src/modelManagement/`, and reviewers vetting the data model.
 
 ---
 
@@ -17,495 +9,277 @@
 
 ### In scope
 
-- Chat-model data model: providers, instances, catalog, custom models,
-  enrollments, consumers, per-consumer model selection.
-- Catalog wiring (`models.dev`).
-- Per-pipeline reachability (LangChain vs. OpenCode byokBridge).
-- BYOK ↔ agent-backend reconciliation (how a user-enrolled model surfaces
-  in OpenCode).
+- Chat-model data model: providers, configured models, per-backend
+  enabled-model selection.
+- Catalog wiring (`models.dev`) — strictly setup-time.
+- Provider origin discrimination (BYOK / agent-owned / Copilot Plus).
+- A uniform on-disk shape that the chat-model factory and every
+  backend picker consume.
 
-### Out of scope (deliberately)
+### Out of scope
 
-- **Embeddings parity.** The structurally identical pipeline (provider →
-  enrollment → consumer) is sketched in §3.9 for reference, but actual
-  rollout is deferred. The legacy `activeEmbeddingModels` /
-  `embeddingModelKey` shape continues to work until embeddings are folded in.
-- **Global chat knobs.** No `temperature` / `maxTokens` / `reasoningEffort` /
-  `verbosity` / `topP` / `frequencyPenalty` settings live in the model
-  data model. Adapters use their SDK defaults. If user-tunable knobs are
-  ever needed, they belong elsewhere (per-invocation, per-skill,
-  per-command) — not here.
-- **Per-agent capability filtering at picker render.** Pickers show whatever
-  the consumer has enabled. If a model is incompatible with the agent at
-  runtime, the runtime error path surfaces that. Catalog capability metadata
-  still exists for display badges; it doesn't silently hide models.
-- **UX flows / dialog wireframes.** This spec is data-model only.
-- **Migration mechanics.** Drop / rename moves are downstream — once the
-  target data model is agreed, a separate plan covers the v0→v3 (or
-  in-place v2→v3) migration.
+- **Embeddings.** Embeddings follow the same shape (provider →
+  configured model → consumer) but are not landed in this iteration.
+  The legacy `activeEmbeddingModels` / `embeddingModelKey` shape
+  continues to work in the interim.
+- **Global chat knobs.** No `temperature` / `maxTokens` /
+  `reasoningEffort` / `verbosity` / `topP` / `frequencyPenalty`
+  settings live in this data model. Adapters use their SDK defaults.
+  If user-tunable knobs are ever needed, they belong elsewhere
+  (per-invocation, per-skill, per-command).
+- **Capability-based picker filtering.** Pickers show whatever the
+  backend has enabled. If a model is incompatible with the backend at
+  runtime, the runtime error path surfaces that. Catalog capability
+  metadata still exists for display badges; it doesn't silently hide
+  models.
+- **Catalog at runtime.** Once a model is configured, the catalog is
+  no longer consulted. The plugin must work fully when `models.dev`
+  is unreachable.
+- **Migration mechanics.** Migration from the current on-disk shape
+  to this design is a separate task.
+- **`BackendInventory` and runtime ACP reconciliation.** A future
+  picker-reconciliation PR introduces a runtime types file for
+  greying out temporarily-unreachable models; until then the picker
+  shows every enabled `ConfiguredModel` and unreachable ones surface
+  at request time.
 
 ---
 
 ## 2. Behaviors the data model must support
 
-1. **Provider configuration.** The user configures a provider by picking a
-   type (Anthropic, OpenAI, Google, Mistral, Groq, custom OpenAI-compatible,
-   Ollama, LM Studio, Azure, Bedrock, …), supplying name / URL / key, and any
-   per-adapter extras.
-
-2. **Multiple instances of the same provider type.** The user can have two
-   Anthropic credential sets ("prod" and "staging"), two Ollama endpoints,
-   etc. Each instance is independently configured and enrolled. Per-instance
-   display names disambiguate.
-
-3. **Catalog drives the provider list.** The "Add Provider" UI iterates the
-   `models.dev` catalog to show what's available.
-
-4. **Catalog drives the model list per provider.** Once a provider is
-   configured, the catalog tells us what models it serves.
-
-5. **BYOK enrollment.** The user picks specific models from a provider to
-   bring into the plugin's pool. This is a persistent decision, separate
-   from "do I have a key for this provider."
-
-6. **Custom models on custom providers.** For self-hosted endpoints
-   (Ollama, LM Studio, etc.) the catalog has nothing — the user enters
-   model details by hand.
-
-7. **Per-use-case model selection.** Each consumer (Simple Chat, Vault QA,
-   Project chain, OpenCode agent, Claude Code agent, Codex agent, Quick
-   Chat, …) holds its own selection of which BYOK models it can use, and
-   its own default. The same enrollment can be selected by several
-   consumers.
-
-8. **Backend-supplied additional models.** Agent backends (OpenCode
-   bundled, Claude Code subscription, Codex subscription, Copilot Plus
-   hosted) report models at runtime that aren't in BYOK. The picker for
-   those consumers is the union of BYOK + backend-reported, intersected
-   with the user's per-consumer selection.
-
-9. **Per-pipeline reachability is declared, not assumed.** Each BYOK
-   provider is reachable from one or both of two pipelines:
-   - (a) the LangChain-based direct path (Simple Chat, Vault QA, Quick
-     Chat, Project chain, custom commands)
-   - (b) the OpenCode byokBridge path (the OpenCode agent backend)
-
-   Single-pipeline support is acceptable. The data model captures which
-   pipelines a `ProviderType` supports, and consumer pickers filter
-   accordingly. Subscription-bundled agent backends (Claude Code, Codex)
-   don't accept BYOK at all and sit outside this axis.
-
-10. **Embeddings parity (deferred but architecturally allowed).** Embeddings
-    follow the same five-layer pipeline (provider → enrollment → consumer).
-    Their entities mirror the chat side; rollout is sequenced separately.
+1. **Provider configuration with multi-instance.** A user can have
+   two Anthropic credential sets ("prod" and "staging"), two Ollama
+   endpoints, etc. Each instance is independently configured.
+2. **Catalog drives the setup UI only.** The "Add Provider" / "Add
+   Model" UI iterates `models.dev` (plus a small built-in template
+   list for self-hosted endpoints) to scaffold defaults.
+3. **One persisted model entity regardless of provenance.** Whether
+   a model was seeded from the catalog (BYOK), auto-added at agent
+   setup (Claude Code → Anthropic, Codex → OpenAI, OpenCode → Zen),
+   or auto-added at Plus sign-in, the persisted row has the same
+   shape. Provenance lives on the parent `Provider.origin`.
+4. **Per-backend curated model selection.** Each of the four
+   backends (`chat`, `opencode`, `claude-code`, `codex`) maintains
+   its own `BackendConfig` listing the configured-model UUIDs it
+   exposes in its picker, plus an optional default.
+5. **Custom models on custom providers.** For self-hosted endpoints
+   (Ollama, LMStudio, custom proxies) the catalog has nothing — the
+   user adds a provider via a built-in template and types in models
+   by hand.
+6. **BYOK settings tab visibility.** The BYOK settings UI lists
+   `Provider`s where `origin.kind === "byok"` only. Agent-owned and
+   Plus providers are managed by their respective setup flows.
+7. **Backend-supplied models are uniform with BYOK.** OpenCode Zen,
+   the Anthropic provider that backs Claude Code, the OpenAI provider
+   that backs Codex, and Plus-hosted models all manifest as
+   `ConfiguredModel` rows under appropriate `Provider` rows. Pickers
+   treat them uniformly.
 
 ---
 
 ## 3. Entities
 
-Seven persisted entities + two read-only entities (catalog metadata + runtime
-inventory).
+### 3.1 `ProviderType` (closed dispatch union)
 
-### 3.1 ProviderType (catalog-derived, read-only)
-
-Describes a _kind_ of provider. Sourced from `models.dev` plus our own
-corrections table. **Not persisted in user settings.**
+The chat-model factory's dispatch key. Five values; closed.
 
 ```ts
-interface ProviderType {
-  /** Canonical catalog id: "anthropic", "openai", "google", "mistral",
-   *  "groq", "deepseek", "together", "openrouter", "siliconflow", … */
-  id: string;
-
-  /** Display label. "Anthropic", "Mistral", … */
-  displayName: string;
-
-  /** Protocol/SDK we wire to. See §4 — closed at six values. */
-  adapter: AdapterKind;
-
-  /** Provider's published API URL (catalog-supplied). May be overridden
-   *  per-instance via `ProviderInstance.baseUrl`. */
-  defaultBaseUrl?: string;
-
-  /** Credential scheme the user supplies. */
-  auth: "api-key" | "oauth" | "none";
-
-  /** Informational — env vars upstream tooling looks at. */
-  envVars?: string[];
-
-  /** Which pipelines can serve this provider. See §5.
-   *  At least one must be true to appear in BYOK Add Provider. */
-  pipelines: { langchain: boolean; opencode: boolean };
-
-  /** Models keyed by id. See §3.3. Empty for synthetic types (ollama, lmstudio). */
-  models: Record<string, CatalogModel>;
-}
-
-type AdapterKind =
-  | "anthropic"
-  | "openai-compatible"
-  | "google"
-  | "azure"
-  | "bedrock"
-  | "github-copilot";
+type ProviderType = "anthropic" | "openai-compatible" | "google" | "azure" | "bedrock";
 ```
 
-Synthetic / non-BYOK ProviderTypes (no catalog model list):
+The user never types this. The BYOK setup wizard reads it from the
+catalog (mapping `models.dev`'s `npm` field — see §4). Agent setup
+flows hardcode the value matching the SDK each agent uses. Plus
+sign-in does the same.
 
-| id                 | adapter             | auth   | pipelines                         | notes                                                              |
-| ------------------ | ------------------- | ------ | --------------------------------- | ------------------------------------------------------------------ |
-| `ollama`           | `openai-compatible` | `none` | `{langchain:true, opencode:true}` | Models come from `CustomModel`, not catalog.                       |
-| `lmstudio`         | `openai-compatible` | `none` | `{langchain:true, opencode:true}` | Same as ollama.                                                    |
-| `copilot-plus`     | n/a                 | n/a    | n/a                               | Pseudo-type for Copilot Plus hosted models; no `ProviderInstance`. |
-| `opencode-bundled` | n/a                 | n/a    | n/a                               | Pseudo-type for OpenCode bundled models.                           |
-| `claude-code-cli`  | n/a                 | n/a    | n/a                               | Subscription-bound; not BYOK.                                      |
-| `codex-cli`        | n/a                 | n/a    | n/a                               | Subscription-bound; not BYOK.                                      |
+### 3.2 `ModelInfo` (shared model description)
 
-### 3.2 ProviderInstance (persisted)
-
-A user-configured credential set for a `ProviderType`. **Multiple instances of
-the same `ProviderType` are allowed.**
+One shape used both as the catalog's per-model record and embedded
+into `ConfiguredModel`. Eliminates duplication between catalog and
+persisted views.
 
 ```ts
-interface ProviderInstance {
-  /** UUID. Primary key. Also used as the keychain namespace
-   *  (`provider-<instanceId>-apiKey`). */
-  instanceId: string;
-
-  /** FK to ProviderType.id. NON-UNIQUE — two Anthropic instances both have
-   *  `providerTypeId: "anthropic"` with different `instanceId`. */
-  providerTypeId: string;
-
-  /** User-editable. Defaults to ProviderType.displayName. The UI suggests
-   *  a numbered / qualified default ("Anthropic (prod)") when a second
-   *  instance of the same type is added; uniqueness is recommended but
-   *  not enforced by the data model. */
-  displayName: string;
-
-  /** Overrides ProviderType.defaultBaseUrl. */
-  baseUrl?: string;
-
-  /** Where the credential lives. `null` for auth=none providers. */
-  apiKey?: KeychainRef | null;
-
-  /** Adapter-specific opaque payload validated at instantiation time:
-   *   - azure: { azureInstanceName, azureDeploymentName, azureApiVersion }
-   *   - bedrock: { bedrockRegion }
-   *   - openai (when used as adapter): { openAIOrgId }
-   *  etc. */
-  extras?: Record<string, unknown>;
-
-  /** Bookkeeping. */
-  addedAt: number;
-  lastVerifiedAt?: number;
-  lastVerificationError?: string;
-}
-
-type KeychainRef =
-  | { kind: "keychain"; id: string } // OS keychain entry id, vault-scoped
-  | { kind: "inline"; value: string }; // Plaintext fallback when keychain is unavailable
-```
-
-### 3.3 CatalogModel (catalog-derived, read-only)
-
-```ts
-interface CatalogModel {
-  /** Wire-form id the provider's API accepts. "claude-sonnet-4-5". */
+interface ModelInfo {
+  /** Wire-form id passed to the SDK ("claude-sonnet-4-5", "gpt-5", …). */
   id: string;
   displayName: string;
-  family?: string;
-  modalities: { input: string[]; output: string[] };
-  limits: { context: number; output: number };
-  capabilities: {
-    reasoning?: boolean;
-    toolCall?: boolean;
-    attachment?: boolean;
-    temperature?: boolean;
-  };
+  modalities?: { input: string[]; output: string[] };
+  limits?: { context: number; output: number; input?: number };
+  reasoning?: boolean;
+  toolCall?: boolean;
   cost?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
-  knowledge?: string; // Training cutoff "2024-04"
   releaseDate?: string;
-  lastUpdated?: string;
-  openWeights?: boolean;
 }
 ```
 
-### 3.4 CustomModel (persisted)
+Catalog fetcher populates whatever `models.dev` exposes. Self-hosted
+custom models populate `id` + `displayName` only.
 
-For self-hosted endpoints. **Attached to a `ProviderInstance`, not a
-`ProviderType`** — two Ollama instances on different machines can declare
-different model lineups.
+### 3.3 `CatalogProvider` (transient)
+
+A provider as listed by the catalog. Lives in memory during a setup
+wizard pass; never persisted.
 
 ```ts
-interface CustomModel {
-  /** FK to ProviderInstance.instanceId. Must reference an instance whose
-   *  ProviderType has an empty `models` map (synthetic / custom-typed). */
-  instanceId: string;
+interface CatalogProvider {
+  id: string; // "anthropic", "openai", "opencode-zen", …
+  displayName: string; // from models.dev `name`
+  defaultBaseUrl: string; // from models.dev `api`
+  providerType: ProviderType; // derived from models.dev `npm`
+  models: Record<string, ModelInfo>; // keyed by ModelInfo.id
+}
+```
 
-  /** Wire form. "llama3.3:70b". */
-  modelId: string;
+### 3.4 `ProviderOrigin`
 
+```ts
+type ProviderOrigin =
+  | { kind: "byok" }
+  | { kind: "agent"; agentType: AgentType }
+  | { kind: "copilot-plus" };
+```
+
+- `byok` — user added via the BYOK settings tab.
+- `agent` — auto-created when an agent was set up; the agent owns
+  credentials and routing. Chat doesn't appear here because chat
+  doesn't own `Provider`s.
+- `copilot-plus` — auto-created when the user signed into Plus.
+
+### 3.5 `Provider` (persisted)
+
+A configured connection to a model provider.
+
+```ts
+interface Provider {
+  providerId: string; // UUID, PK
+  providerType: ProviderType; // dispatch
   displayName: string;
-
-  /** Declared by the user since no catalog metadata exists. */
-  declaredCapabilities?: {
-    reasoning?: boolean;
-    toolCall?: boolean;
-    attachment?: boolean;
-  };
-  contextLimit?: number;
-  extras?: Record<string, unknown>; // ollama numCtx, etc.
+  baseUrl?: string; // overrides catalog default
+  apiKeyKeychainId?: string | null; // Obsidian keychain id; null if no key
+  extras?: Record<string, unknown>; // per-providerType payload
+  origin: ProviderOrigin;
   addedAt: number;
 }
 ```
 
-Storage: `settings.customModels: CustomModel[]`.
+Multi-instance is supported within `origin.kind === "byok"`: two BYOK
+`Provider` rows can share the same `providerType` (e.g. two Anthropic
+accounts), distinguished by `providerId` and `displayName`. Agent and
+Plus origins typically have exactly one row each, but the data model
+doesn't enforce singleton.
 
-### 3.5 ByokEnrollment (persisted) — the unit of identity
+`extras` is opaque, validated by the adapter on instantiation:
 
-The central persistent record. One row per `(instanceId, modelId)` pair the
-user has enrolled. Pure pointer + per-user metadata. **The handle the rest of
-the app holds onto.**
+| `providerType`                           | `extras` shape                                                |
+| ---------------------------------------- | ------------------------------------------------------------- |
+| `azure`                                  | `{ azureDeploymentName, azureApiVersion, azureInstanceName }` |
+| `bedrock`                                | `{ bedrockRegion }`                                           |
+| `openai-compatible` (when org is needed) | `{ openAIOrgId }`                                             |
+
+### 3.6 `ConfiguredModel` (persisted)
+
+A model the plugin knows about.
 
 ```ts
-interface ByokEnrollment {
-  /** FK to ProviderInstance.instanceId. */
-  instanceId: string;
-
-  /** Either a CatalogModel.id on the instance's ProviderType, or a
-   *  CustomModel.modelId scoped to (instanceId, modelId). Never both. */
-  modelId: string;
-
-  /** Optional override of the catalog/custom displayName. */
-  displayName: string;
-
-  enrolledAt: number;
-
-  /** Adapter-validated per-model knobs:
-   *   - openrouter: { enablePromptCaching }
-   *   - openai-compatible: { enableCors }
-   *  This is NOT where temperature/maxTokens live — those don't exist
-   *  in this data model at all. */
-  overrides?: Record<string, unknown>;
-
-  lastVerifiedAt?: number;
-  lastVerificationError?: string;
+interface ConfiguredModel {
+  configuredModelId: string; // UUID, PK
+  providerId: string; // FK to Provider
+  info: ModelInfo; // embedded snapshot; uniqueness: (providerId, info.id)
+  configuredAt: number;
 }
 ```
 
-**Stable enrollment key**: `enrollmentRef = ${instanceId}::${modelId}`. Used
-everywhere downstream as a single string handle. The double colon avoids
-collisions with provider / model ids that legitimately contain `/`.
+"Configured" means "set up in the plugin, ready to use." Applies to
+BYOK (user-added), agent-owned (auto-added at agent setup), and Plus
+(auto-added at Plus sign-in) models alike — the difference is which
+`Provider` this row belongs to.
 
-**Multi-instance implication**: the same `modelId` can be enrolled twice if
-the user has two `ProviderInstance` rows of the same `ProviderType`. Both are
-first-class; the consumer chooses which credential to route through.
+"Configured" is distinct from "enrolled": a `ConfiguredModel` row
+asserts the model exists on a provider; a backend separately enrolls
+some subset of configured models for its picker via
+`BackendConfig.enabledModels`. Auto-enrollment is the default UX, but
+the two layers stay separate in the data model so per-backend pruning
+is expressible.
 
-Storage: `settings.enrollments: ByokEnrollment[]`.
-
-### 3.6 ConsumerConfig (persisted)
-
-A consumer is anything that needs a model: Simple Chat, Vault QA, the
-OpenCode agent backend, a custom command, etc. Each is identified by a
-stable `ConsumerId`. Each holds its own selection.
+### 3.7 `AgentType` and `BackendType`
 
 ```ts
-type ConsumerId =
-  | "chat" // Simple Chat
-  | "vault-qa" // Vault QA chain
-  | "project" // Project chain (per-project override layers on top — see Open Q)
-  | "copilot-plus" // Copilot Plus chain
-  | "quick-chat" // Quick-command chat
-  | "agent:opencode" // OpenCode agent backend
-  | "agent:claude-code" // Subscription-bound; ignores BYOK
-  | "agent:codex" // Subscription-bound; ignores BYOK
-  | `command:${string}`; // Custom commands that pin a model
+type AgentType = "opencode" | "claude-code" | "codex";
 
-interface ConsumerConfig {
-  consumerId: ConsumerId;
+type BackendType = AgentType | "chat";
+```
 
-  /** Curated allow-list of model references this consumer may use. */
-  enabledModels: ConsumerModelRef[];
+- `AgentType` — the three agent backends. Each can own `Provider`s.
+- `BackendType` — `AgentType` plus `"chat"` (Simple Chat). The map
+  key for `BackendConfig`. Chat is a model destination but doesn't
+  own providers.
 
-  /** Preferred default for this consumer, when applicable. */
-  defaultModel?: ConsumerModelRef | null;
+### 3.8 `BackendConfig` (persisted)
+
+```ts
+interface BackendConfig {
+  enabledModels: string[]; // each entry is a configuredModelId
+  defaultModel?: string | null;
 }
 ```
 
-Storage: `settings.consumers: Record<ConsumerId, ConsumerConfig>`.
-
-An empty `enabledModels: []` means "use the default-selection heuristic" (the
-picker shows everything the consumer is eligible for; nothing is pinned).
-
-### 3.7 ConsumerModelRef (polymorphic)
-
-A consumer pins three kinds of model references:
-
-```ts
-type ConsumerModelRef =
-  /** A model the user enrolled via BYOK. */
-  | { source: "byok"; enrollmentRef: string }
-
-  /** A model the agent backend bundles itself (not BYOK, not Plus). */
-  | { source: "backend-bundled"; backendId: BackendId; backendModelId: string }
-
-  /** A model hosted by Copilot Plus. */
-  | { source: "copilot-plus"; modelId: string };
-
-type BackendId = "opencode" | "claude-code" | "codex";
-```
-
-### 3.8 BackendInventory (runtime-only, NOT persisted)
-
-At session start, each agent backend reports what models it can serve. Held
-in memory; never written to settings.
-
-```ts
-interface BackendInventory {
-  backendId: BackendId;
-  models: BackendModelEntry[];
-}
-
-interface BackendModelEntry {
-  /** What the backend speaks at runtime. */
-  backendModelId: string;
-
-  origin:
-    | { kind: "bundled" } // Agent's own enumeration
-    | { kind: "byok"; enrollmentRef: string } // Bridged from user's BYOK
-    | { kind: "copilot-plus" }; // Hosted by Plus
-
-  displayName?: string;
-  capabilities?: CatalogModel["capabilities"]; // If known
-}
-```
-
-### 3.9 Embeddings (deferred)
-
-Embedding-side mirrors the chat-side entities. Out of scope for this rollout
-but the spec reserves the shape so a follow-up doesn't have to redesign:
-
-```ts
-type EmbeddingConsumerId =
-  | "vault-index" // The vector store for vault QA
-  | "project-index"; // Project-specific embedding (TBD)
-
-interface EmbeddingConsumerConfig {
-  consumerId: EmbeddingConsumerId;
-  enabledModels: ConsumerModelRef[];
-  defaultModel?: ConsumerModelRef | null;
-}
-```
-
-Embedding-capability detection: `CatalogModel.modalities.output.includes("embedding")`
-(or whatever marker `models.dev` settles on). Until rolled in, the legacy
-`activeEmbeddingModels` + `embeddingModelKey` fields continue to work.
+Per-backend curated selection. Persisted as
+`settings.backends: Record<BackendType, BackendConfig>` — backend
+identity is the map key, not a field on the row.
 
 ---
 
-## 4. AdapterKind rationale
+## 4. `ProviderType` rationale
 
-`AdapterKind` is **not** the same thing as `ProviderType.id`. The id is the
-catalog handle (one per `models.dev` entry — potentially 30+). The adapter is
-the protocol / SDK we wire to internally — closed at six values.
+The catalog lists 30+ providers (Anthropic, OpenAI, Google, Mistral,
+Groq, OpenRouter, Together, DeepSeek, …) but the plugin only wires
+five SDK families. Most providers ride on `openai-compatible` with a
+custom `baseUrl`. The five values:
 
-| AdapterKind         | LangChain path                                        | OpenCode path                         |
-| ------------------- | ----------------------------------------------------- | ------------------------------------- |
-| `anthropic`         | `@langchain/anthropic` (`ChatAnthropic`)              | `provider.set type=anthropic`         |
-| `openai-compatible` | `@langchain/openai` (`ChatOpenAI` + custom `baseUrl`) | `provider.set type=openai-compatible` |
-| `google`            | `@langchain/google-genai`                             | `provider.set type=google`            |
-| `azure`             | `@langchain/openai` (Azure path) + deployment knobs   | `provider.set type=azure`             |
-| `bedrock`           | `@langchain/aws`                                      | `provider.set type=bedrock`           |
-| `github-copilot`    | Custom bridge (OAuth-based)                           | `provider.set type=github-copilot`    |
+| `ProviderType`      | LangChain path                         | OpenCode `provider.set type` |
+| ------------------- | -------------------------------------- | ---------------------------- |
+| `anthropic`         | `@langchain/anthropic`                 | `anthropic`                  |
+| `openai-compatible` | `@langchain/openai` + custom `baseUrl` | `openai-compatible`          |
+| `google`            | `@langchain/google-genai`              | `google`                     |
+| `azure`             | `@langchain/openai` (Azure path)       | `azure`                      |
+| `bedrock`           | `@langchain/aws`                       | `bedrock`                    |
 
-Why exactly these six:
+**Mapping from catalog to `ProviderType`**: the catalog fetcher reads
+`models.dev`'s `npm` field on each provider entry:
 
-- Each one is **wired** in both pipelines (or is openly understood to be
-  one-pipeline-only via `ProviderType.pipelines`). Adding an `AdapterKind`
-  is a real lift — you must ship LangChain code AND ensure OpenCode (or
-  document the one-pipeline limitation).
-- The catalog (30+ providers) maps onto these six. Most providers ride on
-  `openai-compatible` with their own `defaultBaseUrl` from the catalog. A
-  hypothetical seventh adapter is only justified if a real provider's
-  protocol doesn't fit any of these six.
+| `npm` value         | `ProviderType`      |
+| ------------------- | ------------------- |
+| `@ai-sdk/anthropic` | `anthropic`         |
+| `@ai-sdk/google`    | `google`            |
+| `@ai-sdk/azure`     | `azure`             |
+| `@ai-sdk/bedrock`   | `bedrock`           |
+| (anything else)     | `openai-compatible` |
 
-**The catalog list shown in "Add Provider"** mirrors the full `models.dev`
-provider set — dozens of entries. The provider→adapter mapping is part of the
-plugin's catalog corrections layer (seeded from `models.dev`, hand-edited
-where the catalog is silent). Providers whose adapter we don't support yet
-are shown with a "not yet supported in this plugin" affordance — surfaced,
-not silently filtered.
+**Self-hosted providers** (Ollama, LMStudio, custom proxies) are not
+listed by `models.dev`. The setup UI exposes them as built-in
+templates and hardcodes `providerType: "openai-compatible"`.
+
+Adding a sixth `ProviderType` value is a significant lift: it
+requires LangChain code, agent-backend integration, and catalog
+mapping. Most new providers should fit `openai-compatible`.
 
 ---
 
-## 5. Pipeline compatibility
+## 5. `Provider.origin` discrimination
 
-`ProviderType.pipelines: { langchain: boolean; opencode: boolean }` is a
-**load-bearing field**. It decides which `Consumer` pickers a provider's
-enrollments can appear in.
+`origin` is the only field that varies by provenance. Downstream
+consumption (chat-model factory dispatch, picker enumeration,
+backend bridging) is uniform.
 
-### 5.1 Consumer ↔ pipeline mapping
+| Origin         | Created by                                                                                                 | Visible in BYOK tab? |
+| -------------- | ---------------------------------------------------------------------------------------------------------- | -------------------- |
+| `byok`         | User via BYOK "Add Provider" UI                                                                            | Yes                  |
+| `agent`        | Agent setup flow (Claude Code → Anthropic; Codex → OpenAI; OpenCode → its full provider set including Zen) | No                   |
+| `copilot-plus` | Plus sign-in flow                                                                                          | No                   |
 
-| ConsumerId          | Pipeline       |
-| ------------------- | -------------- |
-| `chat`              | `langchain`    |
-| `vault-qa`          | `langchain`    |
-| `project`           | `langchain`    |
-| `copilot-plus`      | `langchain`    |
-| `quick-chat`        | `langchain`    |
-| `command:*`         | `langchain`    |
-| `agent:opencode`    | `opencode`     |
-| `agent:claude-code` | (subscription) |
-| `agent:codex`       | (subscription) |
-
-Subscription consumers (`agent:claude-code`, `agent:codex`) don't accept
-BYOK at all. Their `enabledModels` are all `backend-bundled` refs.
-
-### 5.2 What causes a flag to flip false
-
-**`pipelines.langchain = false`** (OpenCode-only):
-
-- No LangChain SDK package available, and the provider's API isn't close
-  enough to OpenAI's for `@langchain/openai` + a custom `baseUrl` to work.
-- Provider uses an auth scheme the in-process LangChain code can't bind
-  to: a CLI-issued session token, a hardware token, an OAuth flow that
-  requires browser interaction the OpenCode CLI handles but we can't
-  reproduce in-process.
-- OpenCode bundles the integration end-to-end (SDK + OAuth) and exposing
-  the same provider through LangChain would require shipping that SDK in
-  the plugin bundle.
-
-**`pipelines.opencode = false`** (LangChain-only):
-
-- OpenCode's `provider.set` config doesn't recognize the protocol — we
-  have a LangChain integration but OpenCode upstream hasn't wired it up.
-- Provider needs per-request state (custom headers, signed URLs) the
-  byokBridge has no way to inject into OpenCode's HTTP client.
-- A local endpoint OpenCode's subprocess can't reach (rare).
-
-**Both true** — the common case. Anthropic, OpenAI, Google, Mistral, Groq,
-DeepSeek, Together, xAI, OpenRouter, etc.
-
-**Both false** — does not appear in BYOK. If `models.dev` lists such a
-provider, the Add Provider UI shows it with a "not yet supported" tooltip
-so the user knows the gap exists.
-
-### 5.3 Worked examples
-
-| ProviderType.id  | adapter             | langchain | opencode | Notes                                                            |
-| ---------------- | ------------------- | --------- | -------- | ---------------------------------------------------------------- |
-| `anthropic`      | `anthropic`         | ✓         | ✓        |                                                                  |
-| `openai`         | `openai-compatible` | ✓         | ✓        |                                                                  |
-| `google`         | `google`            | ✓         | ✓        |                                                                  |
-| `mistral`        | `openai-compatible` | ✓         | ✓        |                                                                  |
-| `groq`           | `openai-compatible` | ✓         | ✓        |                                                                  |
-| `openrouter`     | `openai-compatible` | ✓         | ✓        |                                                                  |
-| `bedrock`        | `bedrock`           | ✓         | ✓        | Both pipelines wire AWS SDK auth differently.                    |
-| `azure`          | `azure`             | ✓         | ✓        | Per-instance `extras` carries deployment name + API version.     |
-| `github-copilot` | `github-copilot`    | ✓         | ✓        | OAuth token refresh handled in both pipelines.                   |
-| `ollama`         | `openai-compatible` | ✓         | ✓        | Synthetic type; CustomModels per instance.                       |
-| (hypothetical)   | `openai-compatible` | ✓         | ✗        | LangChain works; OpenCode upstream doesn't know the provider id. |
-| (hypothetical)   | (custom OAuth)      | ✗         | ✓        | OpenCode CLI manages OAuth; we can't replicate in-process.       |
+The BYOK settings UI filters `providers` by
+`origin.kind === "byok"`. Other surfaces (agent setup screens, Plus
+account screen) manage their respective origins.
 
 ---
 
@@ -515,309 +289,156 @@ so the user knows the gap exists.
 interface CopilotSettings {
   // … existing non-model fields …
 
-  settingsVersion: number;
-  providers: Record<string /* instanceId */, ProviderInstance>;
-  customModels: CustomModel[]; // keyed by (instanceId, modelId)
-  enrollments: ByokEnrollment[]; // keyed by (instanceId, modelId)
-  consumers: Record<ConsumerId, ConsumerConfig>;
+  providers: Record<string /* providerId */, Provider>;
+  configuredModels: ConfiguredModel[]; // keyed by configuredModelId
+  backends: Record<BackendType, BackendConfig>;
 
-  // Out-of-scope but reserved:
-  // embeddingConsumers: Record<EmbeddingConsumerId, EmbeddingConsumerConfig>;
-  // (or keep legacy activeEmbeddingModels + embeddingModelKey until embeddings parity ships)
+  // Reserved for embeddings parity (deferred). The legacy
+  // activeEmbeddingModels + embeddingModelKey fields continue to work
+  // until embeddings are folded in.
 }
 ```
 
-ProviderType / CatalogModel are catalog data, not settings.
+`ProviderType` / `ModelInfo` / `CatalogProvider` are not persisted —
+catalog data is consumed in memory.
 
 ---
 
 ## 7. Invariants
 
-| #   | Invariant                                                                                                                                                                                                                      | Checked by                  |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------- |
-| 1   | `enrollment.instanceId ∈ keys(providers)`                                                                                                                                                                                      | Write path, migration       |
-| 2   | `(instanceId, modelId)` pair resolves either via the instance's ProviderType catalog OR via a `CustomModel` row — never both                                                                                                   | Write path                  |
-| 3   | At most one `ByokEnrollment` per `(instanceId, modelId)`                                                                                                                                                                       | Write path                  |
-| 4   | At most one `CustomModel` per `(instanceId, modelId)`                                                                                                                                                                          | Write path                  |
-| 5   | If `ProviderType.auth = "api-key"`, `ProviderInstance.apiKey` is non-null; otherwise the provider is "incomplete" and its enrollments are greyed in pickers                                                                    | Runtime                     |
-| 6   | Every `ConsumerModelRef` with `source = "byok"` points at a present enrollment; broken refs surface in the UI, never silently pruned                                                                                           | Runtime                     |
-| 7   | When a consumer's `defaultModel` is removed from `enabledModels`, `defaultModel` is set to `null`                                                                                                                              | Write path                  |
-| 8   | Deleting a `ProviderInstance` cascades to its `ByokEnrollment` rows and its `CustomModel` rows. Consumer refs pointing at those enrollments become broken refs (surfaced; not pruned)                                          | Write path                  |
-| 9   | A consumer whose pipeline is `langchain` only renders enrollments whose `ProviderType.pipelines.langchain = true`; same for `opencode`. Ineligible enrollments are shown as ineligible in BYOK panel (with reason), not hidden | Runtime                     |
-| 10  | NO `providerTypeId` uniqueness constraint across `providers` (multi-instance is the whole point)                                                                                                                               | — (explicit non-constraint) |
+| #   | Invariant                                                                                                                                                                     | Enforced by               |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| 1   | `configuredModel.providerId ∈ keys(providers)`                                                                                                                                | Write path                |
+| 2   | `(providerId, info.id)` is unique across `configuredModels`                                                                                                                   | Write path                |
+| 3   | Every `BackendConfig.enabledModels[i]` is a valid `configuredModelId`; broken refs surface in the UI, never silently pruned                                                   | Runtime                   |
+| 4   | `BackendConfig.defaultModel`, if non-null, is in `enabledModels`                                                                                                              | Write path                |
+| 5   | Deleting a `Provider` cascades to its `ConfiguredModel`s. `BackendConfig.enabledModels` entries pointing at deleted models become broken refs (surfaced; not silently pruned) | Write path                |
+| 6   | `apiKeyKeychainId` is non-null when the provider needs an API key; `null` for Ollama, LMStudio, and agent-owned providers that route through other credentials                | Runtime                   |
+| 7   | BYOK settings UI shows only `providers` with `origin.kind === "byok"`                                                                                                         | UI                        |
+| 8   | No uniqueness constraint on `providerType` across `providers` — multi-instance is supported                                                                                   | (explicit non-constraint) |
 
 ---
 
 ## 8. Resolution traces
 
-End-to-end walks of common flows. The HTML companion renders these as
-sequence-style ASCII; this Markdown keeps the prose form.
+### Trace A — BYOK Simple Chat, single Anthropic
 
-### Trace A — Simple Chat, single OpenAI instance
+1. User opens BYOK settings → "Add Provider" → picks "Anthropic" from
+   the catalog list. Wizard creates
+   `Provider{ providerId: "p1", providerType: "anthropic", origin: { kind: "byok" }, … }`.
+2. User picks "Claude Sonnet 4.5" from the catalog's model list under
+   Anthropic. Wizard creates
+   `ConfiguredModel{ configuredModelId: "m1", providerId: "p1", info: ModelInfo{ id: "claude-sonnet-4-5", … } }`.
+3. Auto-enrollment adds `"m1"` to `backends["chat"].enabledModels`.
+4. User opens the Simple Chat picker → it reads
+   `backends["chat"].enabledModels`, resolves each id to a
+   `ConfiguredModel`, renders the list. User selects "Claude Sonnet
+   4.5"; chat-model factory dispatches by
+   `providers["p1"].providerType === "anthropic"` to the Anthropic
+   LangChain adapter.
 
-1. User opens BYOK panel → catalog shows OpenAI models.
-2. User adds OpenAI provider →
-   `ProviderInstance{ instanceId: "openai-uuid-1", providerTypeId: "openai", apiKey: K }`.
-3. User enrolls `gpt-5` →
-   `ByokEnrollment{ instanceId: "openai-uuid-1", modelId: "gpt-5" }`.
-4. User opens Simple Chat settings → enables it →
-   `ConsumerConfig{ consumerId: "chat", enabledModels: [{source:"byok", enrollmentRef:"openai-uuid-1::gpt-5"}] }`.
-5. User sets it as default → `ConsumerConfig.defaultModel` = same ref.
-6. Chat picker iterates `chat.enabledModels`, resolves each through
-   `enrollments` + catalog, renders "GPT-5".
+### Trace B — Agent-owned model (Claude Code → Anthropic)
 
-### Trace B — OpenCode-bundled model (not BYOK)
-
-1. Plugin starts → OpenCode CLI launched → reports inventory including
-   `bigpickle/big-pickle` (bundled).
-2. User opens Agent settings for OpenCode → enables it →
-   `ConsumerConfig{ consumerId: "agent:opencode", enabledModels: [{source:"backend-bundled", backendId:"opencode", backendModelId:"bigpickle/big-pickle"}] }`.
-3. Picker resolves the ref against the live `BackendInventory["opencode"]`
+1. User installs and configures the Claude Code agent. The agent
+   setup flow creates
+   `Provider{ providerId: "p2", providerType: "anthropic", origin: { kind: "agent", agentType: "claude-code" }, displayName: "Anthropic (Claude Code)" }`
+   and uses Claude Code's CLI-managed credentials.
+2. Setup fetches `models.dev` for the catalog's Anthropic models and
+   creates `ConfiguredModel` rows for each one the agent supports,
+   under `providerId: "p2"`, with full `info` snapshots.
+3. Auto-enrollment populates `backends["claude-code"].enabledModels`
+   with the new model ids.
+4. BYOK settings UI doesn't show provider `"p2"` (filtered by
+   `origin.kind === "byok"`).
+5. Claude Code's picker reads `backends["claude-code"].enabledModels`
    and renders.
 
-### Trace C — BYOK shared with OpenCode (byokBridge)
+### Trace C — Multi-instance BYOK (two Anthropic keys)
 
-1. Existing enrollment: `anthropic-prod-uuid::claude-sonnet-4-5` on the
-   "Anthropic (prod)" instance.
-2. User enables it in the OpenCode consumer →
-   `ConsumerConfig{ enabledModels: [..., {source:"byok", enrollmentRef:"anthropic-prod-uuid::claude-sonnet-4-5"}] }`.
-3. At runtime, byokBridge has registered the prod Anthropic credentials with
-   OpenCode (one bridged provider per `ProviderInstance`, keyed by
-   `instanceId`). OpenCode's inventory now includes a
-   `backendModelId: "<bridged-id>/claude-sonnet-4-5"` entry with
-   `origin: { kind: "byok", enrollmentRef: "anthropic-prod-uuid::claude-sonnet-4-5" }`.
-4. Picker reconciles the consumer's `byok` ref with the inventory entry by
-   `enrollmentRef`. If the user also enabled the staging-instance enrollment
-   under OpenCode, both appear as separate entries — same model name, two
-   credentials — disambiguated by their parent `ProviderInstance.displayName`.
+1. User adds an "Anthropic" provider in BYOK →
+   `Provider{ providerId: "p3", providerType: "anthropic", origin: { kind: "byok" }, displayName: "Anthropic (prod)" }`
+   with prod key.
+2. User clicks "Add Provider → Anthropic" again. BYOK UI does **not**
+   filter Anthropic out (multi-instance allowed). A second provider:
+   `Provider{ providerId: "p4", providerType: "anthropic", origin: { kind: "byok" }, displayName: "Anthropic (staging)" }`
+   with staging key.
+3. User configures Claude Sonnet 4.5 on both → two `ConfiguredModel`
+   rows with different `configuredModelId`s, both pointing at the
+   same wire-form `info.id: "claude-sonnet-4-5"`.
+4. Simple Chat picker lists both; user disambiguates by parent
+   provider's `displayName`.
+5. Deleting `"p4"` cascades: its `ConfiguredModel` is removed; any
+   `BackendConfig.enabledModels` ref to it becomes a broken ref
+   (surfaced in UI). `"p3"`'s configured model is untouched.
 
-### Trace D — Multi-instance catalog-backed (two Anthropic keys)
+### Trace D — Self-hosted (Ollama with hand-typed models)
 
-1. User has `ProviderInstance{ instanceId: "anthropic-prod-uuid", providerTypeId: "anthropic", displayName: "Anthropic (prod)", apiKey: K1 }`.
-2. User clicks "Add Provider → Anthropic" again. **The BYOK UI does not
-   filter Anthropic out** (multi-instance is allowed). A second instance is
-   created: `ProviderInstance{ instanceId: "anthropic-staging-uuid", providerTypeId: "anthropic", displayName: "Anthropic (staging)", apiKey: K2 }`.
-   The UI suggests the "(staging)" suffix on collision; user may rename.
-3. User enrolls Claude Sonnet 4.5 on both → two enrollments,
-   `anthropic-prod-uuid::claude-sonnet-4-5` and
-   `anthropic-staging-uuid::claude-sonnet-4-5`. Catalog metadata identical;
-   credentials different.
-4. Simple Chat can enable either or both. The picker renders them as two
-   rows, labeled by their parent instance's `displayName`.
-5. Deleting the staging instance cascades: its enrollment is removed; any
-   consumer ref pointing at it becomes broken (surfaced in UI). The prod
-   enrollment is untouched.
-
-### Trace E — Custom provider, multi-instance, custom models
-
-1. User adds "Local Ollama" →
-   `ProviderInstance{ instanceId: "ollama-uuid-1", providerTypeId: "ollama", displayName: "Ollama (laptop)", baseUrl: "http://localhost:11434", apiKey: null }`.
-   `ProviderType` `"ollama"` is shared and has no catalog models.
-2. User adds a second Ollama on a different machine →
-   `ProviderInstance{ instanceId: "ollama-uuid-2", providerTypeId: "ollama", displayName: "Ollama (workstation)", baseUrl: "http://192.168.1.50:11434" }`.
-3. User declares model lineups:
-   `CustomModel{ instanceId: "ollama-uuid-1", modelId: "llama3.3:70b" }` and
-   `CustomModel{ instanceId: "ollama-uuid-2", modelId: "mistral:7b" }`. Each
-   instance owns its own list.
-4. User enrolls them → two `ByokEnrollment` rows. From here, same path as
-   Trace A.
+1. User picks "Ollama" from the BYOK setup UI's built-in template
+   list. Wizard creates
+   `Provider{ providerId: "p5", providerType: "openai-compatible", origin: { kind: "byok" }, displayName: "Ollama (laptop)", baseUrl: "http://localhost:11434", apiKeyKeychainId: null }`.
+2. User types "llama3.3:70b" as a model name. Wizard creates
+   `ConfiguredModel{ providerId: "p5", info: ModelInfo{ id: "llama3.3:70b", displayName: "Llama 3.3 70B" } }` —
+   `info` has only `id` + `displayName`; metadata fields stay empty.
+3. From here, same flow as Trace A: enrollment, picker render,
+   dispatch via `providerType: "openai-compatible"`.
 
 ---
 
-## 9. Per-consumer picker formulas
+## 9. Open questions
 
-For each consumer at picker-render time:
-
-```
-visibleEntries(consumerId) =
-    let pipeline = pipelineOf(consumerId)
-    let inventory = (pipeline === "opencode")
-        ? BackendInventory[backendIdOf(consumerId)]
-        : null
-
-    enabled = consumer.enabledModels         // empty ⇒ fall back to default-selection heuristic
-
-    for each ref in enabled:
-        case ref.source:
-          "byok":
-            let e = enrollments[ref.enrollmentRef]
-            let p = providers[e.instanceId]
-            let t = providerTypes[p.providerTypeId]
-            require t.pipelines[pipeline]
-            require p.apiKey != null OR t.auth == "none"
-            if pipeline == "opencode":
-              find matching inventory entry by enrollmentRef
-            emit entry
-
-          "backend-bundled":
-            require inventory != null && inventory.includes(ref.backendModelId)
-            emit entry
-
-          "copilot-plus":
-            require copilotPlusCatalog.includes(ref.modelId)
-            emit entry
-```
-
-No capability filtering. No runtime "this model doesn't do tool calls so
-hide it" check — the runtime error path surfaces incompatibility.
+1. **Embeddings parity timing.** When does the embedding side adopt
+   the same provider / configured-model / backend shape?
+2. **Project-level model defaults.** Currently a project may pin a
+   model. Does this become a project-scoped override of
+   `backends["chat"].defaultModel`, or its own override mechanism?
+3. **Per-invocation knobs.** If a user-facing temperature slider ever
+   ships, where does it live? Spec says "not in the data model" —
+   confirm.
+4. **Migration mechanics.** A separate plan covers the migration
+   from the current v0/v2 on-disk shape to the entities above.
+5. **`BackendInventory`.** A future picker-reconciliation feature
+   may need a runtime types file declaring ACP-reported model
+   inventories so unreachable models can be greyed out. Out of scope
+   here.
+6. **Plus model registry shape.** Plus model metadata lives outside
+   this module (in a Plus-specific registry). What's the contract
+   between the Plus module and `ConfiguredModel` creation? Probably
+   "Plus calls the same setup-flow helper" but worth nailing down.
 
 ---
 
-## 10. Open questions
+## 10. Deferred fields
 
-These remain unresolved by this spec — to be answered before implementation
-starts.
+Fields considered and deferred from this iteration. Each carries a
+re-add trigger.
 
-1. **Embeddings unification timing.** Stay legacy for now? Or fold in as a
-   follow-up after the chat side stabilizes?
-2. **Project-level chain default storage.** Currently `ProjectConfig.projectModelKey`
-   holds a wire-form string. Does it become `ProjectConfig.defaultModelRef:
-ConsumerModelRef | null`? Does each project override `consumers["project"]`
-   wholesale, or just the default?
-3. **Per-invocation knobs.** If we ever surface a user-facing temperature
-   slider, where does it live? Per-message? Per-skill? Per-command? Spec
-   says "not in the data model" — does that hold?
-4. **"Not yet supported in this plugin" affordance.** How does the Add
-   Provider UI render a `models.dev` provider whose adapter isn't in our
-   six? Disabled list item with tooltip? Separate section? Out of scope
-   here but downstream UX work depends on the answer.
-5. **Per-pipeline-only badging.** Do we surface "works with chat only" /
-   "works with OpenCode only" copy on the BYOK enrollment row? Or surface
-   it only at the provider level?
-6. **`backend-bundled` ref staleness.** Backend inventories change between
-   OpenCode releases. If a previously bundled model disappears, the
-   consumer's ref becomes broken. Surface as a broken ref (mirrors BYOK
-   broken-ref behavior) or auto-prune?
-7. **Custom command consumers.** `command:<id>` consumers proliferate. Do
-   we store one `ConsumerConfig` per command, or fold them into a single
-   record keyed by command id internally?
+### `CatalogProvider`
 
----
+| Field           | Re-add trigger                                       |
+| --------------- | ---------------------------------------------------- |
+| `env: string[]` | "API key already in env?" detection feature          |
+| `doc: string`   | Setup UI that shows provider doc links               |
+| `npm` (raw)     | Never persisted; used only to compute `providerType` |
 
-## Reconciliation appendix
+### `ModelInfo`
 
-Descriptive diff between this spec and `src/modelManagement/` on
-`zero/model-settings-redesign` (as of the writing of this doc). No
-prescription — the user decides whether the spec bends to match the code or
-vice versa.
+| Field                                            | Re-add trigger                                                        |
+| ------------------------------------------------ | --------------------------------------------------------------------- |
+| `family`                                         | Picker UI that groups models by family ("show latest in each family") |
+| `temperature: boolean`                           | Setup UI that surfaces "temperature unsupported"                      |
+| `attachment: boolean`                            | Picker badge for attachment-capable models                            |
+| `knowledge: string`                              | Setup UI showing training cutoff                                      |
+| `lastUpdated`, `openWeights`, `structuredOutput` | Speculative; add when a UI consumes them                              |
 
-### A.1 Provider records
+### `Provider`
 
-- **Spec**: `providers: Record<instanceId, ProviderInstance>` where
-  `providerTypeId` is a non-unique FK; multi-instance allowed.
-- **Branch**: `providers: Record<ProviderId, ProviderConfig>` keyed by the
-  _provider type id_ itself ("anthropic", "openai", "custom:<uuid>", …).
-  **Singleton per type** — the BYOK Add Provider dialog filters out already-
-  configured providers, so multiple Anthropic keys are impossible without
-  routing through a `custom:<uuid>` workaround. (See
-  `src/modelManagement/types.ts` `ProviderConfig`, and
-  `src/modelManagement/ui/dialogs/AddProviderDialog.tsx`.)
-- **Branch has** a `kind: "builtin" | "custom" | "system"` discriminator on
-  `ProviderConfig` to support system providers (`opencode`, `copilot-plus`)
-  as first-class entries solely to satisfy the FK invariant of
-  `RegistryEntry.providerId`.
-- **Spec does not** make system providers first-class `ProviderInstance`
-  rows — they sit as pseudo-`ProviderType`s with no instance. The FK
-  invariant on enrollments is unaffected because those models are not
-  `ByokEnrollment` records to begin with; they're `ConsumerModelRef`s of
-  `source: "backend-bundled" | "copilot-plus"`.
+| Field                                     | Re-add trigger         |
+| ----------------------------------------- | ---------------------- |
+| `lastVerifiedAt`, `lastVerificationError` | "Verify connection" UI |
 
-### A.2 ProviderType / catalog
+### `ConfiguredModel`
 
-- **Spec**: explicit `ProviderType` entity with `adapter: AdapterKind`,
-  `pipelines: {langchain, opencode}`, `auth`, `defaultBaseUrl`, `models:
-Record<id, CatalogModel>`.
-- **Branch**: catalog lives in `ModelCatalogService` (`src/modelManagement/catalog/`)
-  with `CatalogProvider` / `CatalogModel` types that mostly match the spec's
-  shape, **minus** the `pipelines` field and minus an explicit `adapter`
-  declaration. Provider→adapter mapping is implicit in the chat-model
-  factory; pipeline reachability isn't modeled at all.
-
-### A.3 Enrollment record
-
-- **Spec**: `ByokEnrollment` with `instanceId` FK, `displayName`,
-  `enrolledAt`, optional `overrides`, verification timestamps. Stable key
-  `${instanceId}::${modelId}`.
-- **Branch**: `RegistryEntry` (`src/modelManagement/types.ts`) with
-  `providerId` (which is the singleton type id, not an `instanceId`),
-  `modelId`, `displayName`, `addedAt`, `lastVerifiedAt`,
-  `lastVerificationError`, optional `extra`. Functionally close, but
-  identity is `(providerId, modelId)` instead of `(instanceId, modelId)`,
-  which forecloses multi-instance.
-
-### A.4 Custom models
-
-- **Spec**: separate `customModels: CustomModel[]` table, FK'd to
-  `instanceId`, intentionally distinct from `ByokEnrollment` — a user
-  declares the model exists, then separately enrolls it.
-- **Branch**: no `customModels` table. A "custom model" is simply a
-  `RegistryEntry` whose `providerId` is a `custom:<uuid>` provider. Catalog
-  has no record of it; the entry IS the declaration. Functionally works,
-  but conflates "this model exists" with "I want to use this model" — the
-  user can't list out their declared-but-not-enrolled models.
-
-### A.5 Per-consumer model selection
-
-- **Spec**: `consumers: Record<ConsumerId, ConsumerConfig>` with explicit
-  per-consumer `enabledModels: ConsumerModelRef[]` and `defaultModel`. A
-  single `ConsumerModelRef` shape (polymorphic) handles BYOK, backend-
-  bundled, and Copilot Plus uniformly.
-- **Branch**: per-backend `modelEnabledOverrides: Record<string, boolean>`
-  with **per-backend-different key formats** (OpenCode uses
-  `<providerId>/<modelId>`, Claude/Codex use bare model ids, Quick Chat
-  uses `<providerId>:<modelId>`). Not a single uniform shape; relies on
-  tribal knowledge about which key format each backend expects. (See
-  `src/agentMode/session/modelEnable.ts` and migration step 6 in
-  `src/modelManagement/migrations/v0-to-v2.ts`.)
-- **Branch missing**: `consumers` for LangChain-side use cases (Simple Chat,
-  Vault QA, Project, Quick Chat). The current model still uses
-  `settings.defaultModelRef: { providerId, modelId } | null` as a single
-  "default chat model" pointer with no per-consumer allow-list.
-
-### A.6 Default model representation
-
-- **Spec**: every `ConsumerConfig` has its own `defaultModel: ConsumerModelRef | null`.
-- **Branch**: `settings.defaultModelRef: { providerId, modelId } | null` is
-  a single global chat default. No per-consumer defaults beyond what
-  `agentMode.backends.<id>.defaultModel` carries for agent consumers.
-
-### A.7 Pipeline compatibility
-
-- **Spec**: `ProviderType.pipelines = {langchain, opencode}` is a first-
-  class field that drives per-consumer picker visibility.
-- **Branch**: not modeled. The byokBridge attempts to register every BYOK
-  provider with OpenCode regardless of whether OpenCode actually supports
-  that provider type. Failures surface at runtime, not at the data model
-  level.
-
-### A.8 Capabilities & global knobs
-
-- **Spec**: no `capabilities` on `ByokEnrollment`; no global chat knobs in
-  the data model; no per-agent capability filtering.
-- **Branch**: matches the spec on `RegistryEntry` (no capabilities stored).
-  **Differs** on global knobs — `temperature`, `maxTokens`, `reasoningEffort`,
-  `verbosity` still live in `CopilotSettings` and feed every chat invocation
-  via `ChatDefaults` (`src/modelManagement/types.ts`). The spec drops these.
-
-### A.9 Embedding side
-
-- **Spec**: parallel structure, deferred. Legacy `activeEmbeddingModels` +
-  `embeddingModelKey` stays in the interim.
-- **Branch**: matches (legacy embedding fields untouched on `CopilotSettings`).
-
-### A.10 Migration status
-
-- **Spec**: assumes the agreed target shape is the destination. Migration
-  from current (v2) → target shape is a separate task, not specified here.
-- **Branch**: `runModelManagementMigrations` runs a v0→v2 migration today.
-  A v2→v3 migration to land this spec needs to:
-  - Synthesize `instanceId`s for existing single-instance providers.
-  - Translate `RegistryEntry` → `ByokEnrollment` (keying change).
-  - Extract custom-provider `RegistryEntry`s into `CustomModel` rows + new
-    `ByokEnrollment`s.
-  - Translate per-backend `modelEnabledOverrides` into `ConsumerConfig`s
-    for the agent consumers; create new `ConsumerConfig`s for LangChain
-    consumers (probably initialized as "everything enabled" to preserve
-    current behavior).
-  - Add `pipelines: {langchain, opencode}` to the catalog corrections
-    layer.
+| Field                                                                            | Re-add trigger                                     |
+| -------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `extras` (Ollama `numCtx`, OpenRouter prompt caching, OpenAI-compatible CORS, …) | An adapter that consumes a specific per-model knob |
+| `lastVerifiedAt`, `lastVerificationError`                                        | Same as `Provider`                                 |
