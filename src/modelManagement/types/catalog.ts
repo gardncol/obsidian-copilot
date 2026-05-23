@@ -62,8 +62,11 @@ export interface CatalogProvider {
   id: string;
   /** From the catalog's `name` field. */
   displayName: string;
-  /** From the catalog's `api` field. Pre-fills `Provider.baseUrl`. */
-  defaultBaseUrl: string;
+  /** From the catalog's `api` field. Pre-fills `Provider.baseUrl`.
+   *  Omitted when the catalog entry has no `api` URL — the BYOK wizard
+   *  treats this as "user must enter a base URL" rather than blindly
+   *  copying an empty string into the persisted row. */
+  defaultBaseUrl?: string;
   /**
    * Derived from the catalog's `npm` field by the catalog fetcher.
    *   "@ai-sdk/anthropic"  → "anthropic"

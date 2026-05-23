@@ -91,13 +91,16 @@ function transformProvider(providerKey: string, wire: unknown): CatalogProvider 
       );
     }
   }
-  return {
+  const result: CatalogProvider = {
     id: wireProv.id,
     displayName: wireProv.name ?? wireProv.id,
-    defaultBaseUrl: wireProv.api ?? "",
     providerType: mapNpmToProviderType(wireProv.npm),
     models,
   };
+  if (typeof wireProv.api === "string" && wireProv.api.length > 0) {
+    result.defaultBaseUrl = wireProv.api;
+  }
+  return result;
 }
 
 /**

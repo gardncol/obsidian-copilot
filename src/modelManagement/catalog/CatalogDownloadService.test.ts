@@ -12,6 +12,8 @@ jest.mock("obsidian", () => ({
 
 import { requestUrl, type RequestUrlParam, type RequestUrlResponse, type App } from "obsidian";
 
+import type { CatalogProvider } from "@/modelManagement/types/catalog";
+
 import { CatalogDownloadService } from "./CatalogDownloadService";
 import type { WireCatalog } from "./modelsDevWire";
 
@@ -339,6 +341,103 @@ describe("CatalogDownloadService", () => {
 
     expect(subscribed).toHaveBeenCalledTimes(1);
     expect(unsubscribedAt).not.toHaveBeenCalled();
+  });
+
+  it("does not poison the auto-retry counter when a fresh disk cache transforms to zero providers", async () => {
+    // Disk cache exists, fetchedAt is fresh (< 24h), but the wire
+    // payload transforms to zero providers (e.g. upstream returned an
+    // empty object that we persisted, or partial-write left `{}`). The
+    // service should take the fresh-disk branch without ever hitting
+    // the network — and crucially the empty result must NOT count
+    // against MAX_AUTO_ATTEMPTS, because no refresh was attempted.
+    nowSpy = freezeNow(FIXED_NOW);
+    const adapter = buildAdapter({
+      fetchedAt: FIXED_NOW - 60 * 1000,
+      data: {},
+    });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+
+    // Five fresh-disk loads — none should touch the network.
+    await svc.ensureLoaded();
+    await svc.ensureLoaded();
+    await svc.ensureLoaded();
+    await svc.ensureLoaded();
+    await svc.ensureLoaded();
+    expect(mockedRequestUrl).not.toHaveBeenCalled();
+    expect(svc.getAllProviders()).toEqual([]);
+
+    // If the counter had been ratcheted by the empty-disk loads above,
+    // a subsequent ensureLoaded() with a STALE disk would short-circuit
+    // and never call requestUrl. Force a stale-disk state and verify
+    // refresh is still attempted.
+    nowSpy.mockReturnValue(FIXED_NOW + 25 * 60 * 60 * 1000);
+    mockedRequestUrl.mockResolvedValue(okResponse(FIXTURE));
+    await svc.ensureLoaded();
+    expect(mockedRequestUrl).toHaveBeenCalledTimes(1);
+    expect(svc.getAllProviders().length).toBe(3);
+  });
+
+  it("does not clobber a just-refreshed live snapshot with a slow disk read", async () => {
+    // Race scenario: a manual refresh() is in flight; concurrently
+    // ensureLoaded() starts and awaits a slow disk read. The HTTP
+    // fetch resolves first → memory swaps to live data. Then the disk
+    // read returns a (fresh-but-older) snapshot — the fresh-disk
+    // branch must NOT clobber live data.
+    nowSpy = freezeNow(FIXED_NOW);
+    const OLDER_DISK: WireCatalog = {
+      stale: {
+        id: "stale",
+        name: "Stale Provider",
+        npm: "@ai-sdk/openai-compatible",
+        api: "https://stale.example/v1",
+        models: {},
+      },
+    };
+    const adapter = buildAdapter({
+      fetchedAt: FIXED_NOW - 60 * 60 * 1000,
+      data: OLDER_DISK,
+    });
+    // Hold the disk read open until we explicitly resolve it.
+    let resolveRead: (() => void) | null = null;
+    const stored = JSON.stringify({ fetchedAt: FIXED_NOW - 60 * 60 * 1000, data: OLDER_DISK });
+    adapter.read.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveRead = () => resolve(stored);
+        })
+    );
+    mockedRequestUrl.mockResolvedValue(okResponse(FIXTURE));
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+
+    // Kick off ensureLoaded — it blocks on the disk read.
+    const ensurePending = svc.ensureLoaded();
+    // Concurrently run a manual refresh — it completes immediately.
+    await svc.refresh();
+    expect(svc.getAllProviders().map((p) => p.id)).toEqual(["anthropic", "helicone", "openai"]);
+
+    // Now let the disk read finish. The fresh-disk branch must see
+    // that memory is already populated and bail out without swapping.
+    resolveRead!();
+    await ensurePending;
+
+    expect(svc.getAllProviders().map((p) => p.id)).toEqual(["anthropic", "helicone", "openai"]);
+  });
+
+  it("getAllProviders() returns a copy so caller-side mutation can't corrupt internal state", async () => {
+    nowSpy = freezeNow(FIXED_NOW);
+    const adapter = buildAdapter({ fetchedAt: FIXED_NOW - 60 * 1000, data: FIXTURE });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+
+    await svc.ensureLoaded();
+
+    const snapshot = svc.getAllProviders() as CatalogProvider[];
+    expect(snapshot.map((p) => p.id)).toEqual(["anthropic", "helicone", "openai"]);
+
+    // Mutating the returned array must not affect the next read.
+    snapshot.reverse();
+    snapshot.pop();
+
+    expect(svc.getAllProviders().map((p) => p.id)).toEqual(["anthropic", "helicone", "openai"]);
   });
 
   it("never invokes the global fetch", async () => {
