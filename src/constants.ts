@@ -1034,6 +1034,9 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
       importSkipList: [],
     },
   },
+  providers: {},
+  configuredModels: [],
+  backends: {},
 };
 
 export const EVENT_NAMES = {

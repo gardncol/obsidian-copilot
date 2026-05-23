@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 
 import type { ModelSelection } from "@/agentMode";
 import { type ChainType } from "@/chainType";
+import type { BackendConfig, BackendType, ConfiguredModel, Provider } from "@/modelManagement";
 import { type SortStrategy, isSortStrategy } from "@/utils/recentUsageManager";
 import {
   AGENT_MAX_ITERATIONS_LIMIT,
@@ -275,6 +276,12 @@ export interface CopilotSettings {
       importSkipList?: string[];
     };
   };
+  /**
+   * Model-management persisted slices.
+   */
+  providers: Record<string, Provider>;
+  configuredModels: ConfiguredModel[];
+  backends: Partial<Record<BackendType, BackendConfig>>;
 }
 
 /**
@@ -350,6 +357,13 @@ export interface OpencodeBackendSettings {
 
 export const settingsStore = createStore();
 export const settingsAtom = atom<CopilotSettings>(DEFAULT_SETTINGS);
+
+/**
+ * Frozen empty fallbacks for the model-management persisted slices.
+ */
+const EMPTY_PROVIDERS = Object.freeze({}) as unknown as Record<string, Provider>;
+const EMPTY_CONFIGURED_MODELS = Object.freeze([]) as unknown as ConfiguredModel[];
+const EMPTY_BACKENDS = Object.freeze({}) as unknown as Partial<Record<BackendType, BackendConfig>>;
 
 /**
  * Resolve a valid embedding model key for the current settings.
@@ -805,6 +819,24 @@ export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
   sanitizedSettings.qaExclusions = sanitizeQaExclusions(settingsToSanitize.qaExclusions);
 
   sanitizedSettings.agentMode = sanitizeAgentMode(sanitizedSettings.agentMode);
+
+  if (
+    !sanitizedSettings.providers ||
+    typeof sanitizedSettings.providers !== "object" ||
+    Array.isArray(sanitizedSettings.providers)
+  ) {
+    sanitizedSettings.providers = EMPTY_PROVIDERS;
+  }
+  if (!Array.isArray(sanitizedSettings.configuredModels)) {
+    sanitizedSettings.configuredModels = EMPTY_CONFIGURED_MODELS;
+  }
+  if (
+    !sanitizedSettings.backends ||
+    typeof sanitizedSettings.backends !== "object" ||
+    Array.isArray(sanitizedSettings.backends)
+  ) {
+    sanitizedSettings.backends = EMPTY_BACKENDS;
+  }
 
   return sanitizedSettings;
 }
