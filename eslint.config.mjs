@@ -301,7 +301,7 @@ export default [
             // barrel-only entry rule (no deep imports of
             // `@/modelManagement/types/*`) is enforced by
             // `no-restricted-imports` patterns further down.
-            { from: { type: "modelmgmt" }, allow: { to: { type: "modelmgmt" } } },
+            { from: { type: "modelmgmt" }, allow: { to: { type: ["modelmgmt", "host"] } } },
             {
               from: { type: "host" },
               allow: { to: { type: ["host", "barrel", "modelmgmt"] } },
