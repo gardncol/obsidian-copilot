@@ -30,11 +30,11 @@ describe("transformWireToCatalog", () => {
     });
   });
 
-  it("falls back to wire.id for displayName when name is missing", () => {
+  it("falls back to wire.id for displayName when name is missing, omits defaultBaseUrl when api absent", () => {
     const wire = makeWire({ ghost: { id: "ghost" } });
     const [provider] = transformWireToCatalog(wire);
     expect(provider.displayName).toBe("ghost");
-    expect(provider.defaultBaseUrl).toBe("");
+    expect(provider.defaultBaseUrl).toBeUndefined();
     expect(provider.models).toEqual({});
   });
 

@@ -70,30 +70,40 @@ export class CatalogDownloadService {
   /**
    * Idempotent: concurrent callers share the first invocation's promise.
    * Reads disk first, auto-refreshes when the cached payload is older
-   * than 24h or absent. If an attempt produces zero providers (no disk
-   * + refresh failed) the cached promise is cleared so the next call
+   * than 24h or absent. If a network refresh is attempted but produces
+   * zero providers the cached promise is cleared so the next call
    * retries — up to `MAX_AUTO_ATTEMPTS` total. After that we stop
    * hammering models.dev; the manual `refresh()` button stays as the
-   * recovery path and resets the counter on success.
+   * recovery path and resets the counter on success. A fresh-but-empty
+   * disk cache (no network attempted) does NOT count against the cap —
+   * otherwise a benignly-empty disk would poison auto-refresh.
    */
   ensureLoaded(): Promise<void> {
     if (this.loadPromise) return this.loadPromise;
     if (this.providers.length === 0 && this.failedAutoAttempts >= MAX_AUTO_ATTEMPTS) {
       return Promise.resolve();
     }
-    this.loadPromise = this.doEnsureLoaded().finally(() => {
-      if (this.providers.length === 0) {
-        this.failedAutoAttempts += 1;
-        this.loadPromise = null;
-        if (this.failedAutoAttempts >= MAX_AUTO_ATTEMPTS) {
-          logWarn(
-            `[modelsCatalog] giving up auto-refresh after ${MAX_AUTO_ATTEMPTS} empty attempts; use the manual Refresh button to retry`
-          );
+    this.loadPromise = this.doEnsureLoaded().then(
+      ({ attemptedRefresh }) => {
+        if (this.providers.length === 0) {
+          this.loadPromise = null;
+          if (attemptedRefresh) {
+            this.failedAutoAttempts += 1;
+            if (this.failedAutoAttempts >= MAX_AUTO_ATTEMPTS) {
+              logWarn(
+                `[modelsCatalog] giving up auto-refresh after ${MAX_AUTO_ATTEMPTS} empty attempts; use the manual Refresh button to retry`
+              );
+            }
+          }
+        } else {
+          this.failedAutoAttempts = 0;
         }
-      } else {
-        this.failedAutoAttempts = 0;
+      },
+      (err) => {
+        this.loadPromise = null;
+        throw err;
       }
-    });
+    );
     return this.loadPromise;
   }
 
@@ -160,8 +170,12 @@ export class CatalogDownloadService {
     return { ok: true, providerCount: this.providers.length };
   }
 
-  getAllProviders(): CatalogProvider[] {
-    return this.providers;
+  /**
+   * Returns a copy so callers can sort/splice their view without
+   * corrupting service state.
+   */
+  getAllProviders(): readonly CatalogProvider[] {
+    return [...this.providers];
   }
 
   getProvider(id: string): CatalogProvider | undefined {
@@ -175,24 +189,33 @@ export class CatalogDownloadService {
     };
   }
 
-  private async doEnsureLoaded(): Promise<void> {
+  private async doEnsureLoaded(): Promise<{ attemptedRefresh: boolean }> {
     const disk = await this.readDisk();
+
+    // Race guard: a concurrent manual refresh may have populated memory
+    // while we were reading disk. Don't clobber live data with an older
+    // disk snapshot.
+    if (this.providers.length > 0) {
+      return { attemptedRefresh: false };
+    }
 
     if (disk && Date.now() - disk.fetchedAt < STALE_AFTER_MS) {
       this.swapMemory(disk.data);
       logInfo(`[modelsCatalog] loaded from disk: ${this.providers.length} providers`);
-      return;
+      return { attemptedRefresh: false };
     }
 
     const result = await this.refresh();
-    if (!result.ok && disk) {
+    if (!result.ok && disk && this.providers.length === 0) {
       // Network failed but we have stale data — surface it so the UI
-      // isn't empty offline. The user can hit "Refresh catalog" later.
+      // isn't empty offline. The `length === 0` guard avoids clobbering
+      // memory another caller populated during the await.
       this.swapMemory(disk.data);
       logInfo(
         `[modelsCatalog] refresh failed; falling back to stale disk cache (${this.providers.length} providers)`
       );
     }
+    return { attemptedRefresh: true };
   }
 
   private async readDisk(): Promise<DiskPayload | null> {
