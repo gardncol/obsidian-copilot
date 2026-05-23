@@ -40,11 +40,16 @@ export interface ModelInfo {
   /** Wire-form id passed to the SDK ("claude-sonnet-4-5", "gpt-5", …). */
   id: string;
   displayName: string;
-  modalities?: { input: string[]; output: string[] };
-  limits?: { context: number; output: number; input?: number };
+  /**
+   * Every sub-field is optional so partial catalog coverage (e.g. a
+   * model that publishes only an `input` limit, or `output`-only cost)
+   * survives the transform without zero-defaults masking "unknown".
+   */
+  modalities?: { input?: string[]; output?: string[] };
+  limits?: { context?: number; output?: number; input?: number };
   reasoning?: boolean;
   toolCall?: boolean;
-  cost?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
   releaseDate?: string;
 }
 

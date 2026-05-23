@@ -330,6 +330,10 @@ Don't use the global `app`. It's a footgun in popout windows and hides dependenc
 
 Never write `declare const app: App;` in new code. A few legacy files do — don't follow them.
 
+#### HTTP requests
+
+Prefer Obsidian's `requestUrl` (from `obsidian`) over the global `fetch` for any plugin network call. `requestUrl` bypasses browser CORS, works on mobile and desktop, and matches the rest of the codebase. The standard wrapper is `safeFetch` in `src/utils.ts` — use it when you want a `Response`-shaped return. Reach for native `fetch` only when you need true streaming responses or AbortSignal cancellation; `requestUrl` supports neither.
+
 ### Picking the right `document` / `window` (popout-window safety)
 
 Obsidian supports pop-out windows. The plugin loads in the main window but views can live in any window. Picking the wrong `Document` / `Window` produces stale references, off-screen popovers, listeners on the wrong window, or DOM nodes that never render. Use this decision order:
