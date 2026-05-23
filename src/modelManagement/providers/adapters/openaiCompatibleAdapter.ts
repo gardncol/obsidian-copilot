@@ -10,6 +10,10 @@
  * The only optional extra is the OpenAI organization id, which a
  * subset of OpenAI accounts require. Everything else (base URL, API
  * key) lives on `Provider` directly.
+ *
+ * Verification hits the standard `GET /models` endpoint — implemented
+ * by every public OpenAI-compatible provider and by both local
+ * runners (Ollama / LMStudio).
  */
 
 import { z } from "zod";
@@ -18,6 +22,7 @@ import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
 
 import type { VerificationResult } from "@/modelManagement/types/runtime";
 import type { AdapterBuildContext, AdapterVerifyContext, ProviderAdapter } from "./ProviderAdapter";
+import { verifyViaListModels } from "./verifyViaListModels";
 
 const extrasSchema = z
   .object({
@@ -40,10 +45,30 @@ export const openaiCompatibleAdapter: ProviderAdapter<Extras> = {
   },
 
   verifyCredentials(ctx: AdapterVerifyContext<Extras>): Promise<VerificationResult> {
-    return Promise.resolve({
-      ok: false,
-      message: "not implemented",
-      checkedAt: Date.now(),
-    });
+    const baseUrl = ctx.provider.baseUrl?.trim();
+    if (!baseUrl) {
+      return Promise.resolve({
+        ok: false,
+        code: "missing_base_url",
+        message: "A base URL is required to verify this OpenAI-compatible provider.",
+        checkedAt: Date.now(),
+      });
+    }
+    const base = baseUrl.replace(/\/$/, "");
+
+    // No `missing_api_key` guard here — the adapter cannot tell whether
+    // an absent key is legitimate (Ollama / LMStudio, which set
+    // `requiresApiKey: false` at the template layer) or a mistake on
+    // OpenAI proper. Let the server's 401 surface as `invalid_api_key`
+    // in the cases that matter.
+    const headers: Record<string, string> = {};
+    if (ctx.apiKey) {
+      headers["Authorization"] = `Bearer ${ctx.apiKey}`;
+    }
+    if (ctx.extras.openAIOrgId) {
+      headers["OpenAI-Organization"] = ctx.extras.openAIOrgId;
+    }
+
+    return verifyViaListModels(`${base}/models`, headers);
   },
 };

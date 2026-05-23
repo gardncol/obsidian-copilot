@@ -35,9 +35,15 @@ export const bedrockAdapter: ProviderAdapter<Extras> = {
   },
 
   verifyCredentials(ctx: AdapterVerifyContext<Extras>): Promise<VerificationResult> {
+    // AWS Bedrock requires SigV4-signed requests; there's no flat
+    // HTTP `GET /models` endpoint. Real verification (signed
+    // ListFoundationModels or STS GetCallerIdentity) lands together
+    // with `buildLangChainClient` in a follow-up.
     return Promise.resolve({
       ok: false,
-      message: "not implemented",
+      code: "not_implemented",
+      message:
+        "AWS Bedrock verification is not yet supported. Save the provider, then test it from the chat picker.",
       checkedAt: Date.now(),
     });
   },

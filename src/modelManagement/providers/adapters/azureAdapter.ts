@@ -13,6 +13,11 @@
  *                              version (e.g. `2024-08-01-preview`).
  *
  * All three are required; the schema rejects missing or empty values.
+ *
+ * Verification hits the data-plane `/openai/deployments` endpoint with
+ * the resource's `api-key` header — returns the deployment list using
+ * the same key the chat completions endpoint takes, so no separate
+ * Management plane permissions are needed.
  */
 
 import { z } from "zod";
@@ -21,10 +26,20 @@ import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
 
 import type { VerificationResult } from "@/modelManagement/types/runtime";
 import type { AdapterBuildContext, AdapterVerifyContext, ProviderAdapter } from "./ProviderAdapter";
+import { verifyViaListModels } from "./verifyViaListModels";
+
+// Azure Cognitive Services resource names are alphanumeric + hyphens.
+// Enforce here so a stray `/`, `.`, or `:` can't redirect the
+// api-key-bearing verification request to an arbitrary host via the
+// `https://<instance>.openai.azure.com` interpolation below.
+const AZURE_INSTANCE_NAME_RE = /^[a-zA-Z0-9-]+$/;
 
 const extrasSchema = z
   .object({
-    azureInstanceName: z.string().min(1),
+    azureInstanceName: z
+      .string()
+      .min(1)
+      .regex(AZURE_INSTANCE_NAME_RE, "must contain only letters, digits, and hyphens"),
     azureDeploymentName: z.string().min(1),
     azureApiVersion: z.string().min(1),
   })
@@ -41,10 +56,18 @@ export const azureAdapter: ProviderAdapter<Extras> = {
   },
 
   verifyCredentials(ctx: AdapterVerifyContext<Extras>): Promise<VerificationResult> {
-    return Promise.resolve({
-      ok: false,
-      message: "not implemented",
-      checkedAt: Date.now(),
-    });
+    if (!ctx.apiKey) {
+      return Promise.resolve({
+        ok: false,
+        code: "missing_api_key",
+        message: "An API key is required to verify this Azure provider.",
+        checkedAt: Date.now(),
+      });
+    }
+    const { azureInstanceName, azureApiVersion } = ctx.extras;
+    const url =
+      `https://${azureInstanceName}.openai.azure.com/openai/deployments` +
+      `?api-version=${encodeURIComponent(azureApiVersion)}`;
+    return verifyViaListModels(url, { "api-key": ctx.apiKey });
   },
 };
