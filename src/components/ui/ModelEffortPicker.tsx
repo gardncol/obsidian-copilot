@@ -75,6 +75,7 @@ export function ModelEffortPicker({ override, className }: ModelEffortPickerProp
   // on open.
   useEffect(() => {
     if (open) {
+      /* eslint-disable @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- seed the editable draft from props when the popover opens; drafts are committed on close, so this can't be pure derived state */
       const initial = value && enabledKeys.includes(value) ? value : (enabledKeys[0] ?? null);
       setHighlightKey(initial);
       setDraftModelKey(initial);
@@ -87,6 +88,7 @@ export function ModelEffortPicker({ override, className }: ModelEffortPickerProp
             : null;
       setDraftEffort(initialEffort);
       initialRef.current = { model: value, effort: activeEffortValue };
+      /* eslint-enable @eslint-react/hooks-extra/no-direct-set-state-in-use-effect */
     }
   }, [open, value, enabledKeys, activeEffortValue, effortOptionsByModelKey]);
 

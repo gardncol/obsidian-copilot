@@ -16,6 +16,7 @@ const mockRemoveRefs = jest.fn().mockResolvedValue(undefined);
 const mockGetProvider = jest.fn();
 
 jest.mock("@/modelManagement/ui/ModelManagementContext", () => ({
+  // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks the real `useModelManagement` hook; the name must match the export
   useModelManagement: () => ({
     adapters: { verifyCredentials: mockVerifyCredentials },
     setup: { byok: { addCatalogProvider: mockAddCatalogProvider } },
@@ -31,6 +32,7 @@ jest.mock("@/modelManagement/ui/ModelManagementContext", () => ({
     catalogService: { getProvider: mockGetProvider },
   }),
 }));
+// eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks the real `useApp` hook; the name must match the export
 jest.mock("@/context", () => ({ useApp: () => ({}) }));
 jest.mock("@/modelManagement/state/atoms", () => {
   const jotai = jest.requireActual<typeof import("jotai")>("jotai");

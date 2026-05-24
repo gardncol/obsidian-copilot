@@ -34,11 +34,13 @@ const ChatModeInput: React.FC<ChatModeInputProps> = (props) => {
 
   // Force off in Projects mode; otherwise mirror settings.
   useEffect(() => {
+    /* eslint-disable @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- mirror the persisted setting / chain into the local toggle; the toggle is also user-editable so it can't be pure derived state */
     if (currentChain === ChainType.PROJECT_CHAIN) {
       setAutonomousAgentToggle(false);
     } else {
       setAutonomousAgentToggle(settings.enableAutonomousAgent);
     }
+    /* eslint-enable @eslint-react/hooks-extra/no-direct-set-state-in-use-effect */
   }, [settings.enableAutonomousAgent, currentChain]);
 
   const chatInputRef = useRef<ChatInputHandle>(null);

@@ -9,6 +9,7 @@ const mockAddProviderOpen = jest.fn();
 const mockConfigureOpen = jest.fn();
 
 jest.mock("@/modelManagement/ui/ModelManagementContext", () => ({
+  // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks the real `useModelManagement` hook; the name must match the export
   useModelManagement: () => ({
     catalogService: {
       ensureLoaded: mockEnsureLoaded,
@@ -19,6 +20,7 @@ jest.mock("@/modelManagement/ui/ModelManagementContext", () => ({
     coordinator: { removeProvider: mockRemoveProvider },
   }),
 }));
+// eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks the real `useApp` hook; the name must match the export
 jest.mock("@/context", () => ({ useApp: () => ({}) }));
 jest.mock("@/modelManagement/state/atoms", () => {
   const jotai = jest.requireActual<typeof import("jotai")>("jotai");

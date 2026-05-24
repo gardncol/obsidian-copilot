@@ -104,8 +104,10 @@ export const SkillsSettings: React.FC = () => {
   // (e.g. via Reset Settings). We don't want to clobber the user's in-flight
   // typing, so only sync when the persisted value changes.
   useEffect(() => {
+    /* eslint-disable @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- resync the local draft when persisted settings change underneath us (e.g. Reset Settings); see comment above */
     setDraft(persistedFolder);
     setValidationError(null);
+    /* eslint-enable @eslint-react/hooks-extra/no-direct-set-state-in-use-effect */
   }, [persistedFolder]);
 
   // Trigger a discovery pass on mount and on persisted-folder change so
