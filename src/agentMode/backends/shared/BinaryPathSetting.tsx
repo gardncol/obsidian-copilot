@@ -45,6 +45,7 @@ export const BinaryPathSetting: React.FC<Props> = ({
   const [busy, setBusy] = React.useState(false);
 
   React.useEffect(() => {
+    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- sync the editable draft when the persisted path changes underneath us (e.g. auto-detect from another panel); a key-prop remount would drop in-flight edits
     setPathInput(initialPath);
   }, [initialPath]);
 

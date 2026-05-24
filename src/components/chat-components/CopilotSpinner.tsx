@@ -24,12 +24,12 @@ export const CopilotSpinner: React.FC = () => {
       viewBox={`0 0 ${GRID_SIZE} ${GRID_SIZE}`}
       className="copilot-spinner"
     >
-      {SIGMA_DOTS.map((dot, index) => {
+      {SIGMA_DOTS.map((dot) => {
         const cx = dot.col * (DOT_SIZE + DOT_GAP) + DOT_SIZE / 2;
         const cy = dot.row * (DOT_SIZE + DOT_GAP) + DOT_SIZE / 2;
         return (
           <circle
-            key={index}
+            key={dot.animIndex}
             cx={cx}
             cy={cy}
             r={DOT_SIZE / 2}

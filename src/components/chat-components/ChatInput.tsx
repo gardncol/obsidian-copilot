@@ -491,7 +491,11 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
         }
         break;
       case "images": {
-        const input = document.createElement("input");
+        // Use the input's own document so the file picker opens in the window
+        // hosting this chat view (popout-safe), not whichever window is focused.
+        const doc = containerRef.current?.doc;
+        if (!doc) break;
+        const input = doc.createElement("input");
         input.type = "file";
         input.accept = "image/*";
         input.multiple = true;

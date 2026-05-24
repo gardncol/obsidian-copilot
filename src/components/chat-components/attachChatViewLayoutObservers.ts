@@ -37,13 +37,13 @@ export function attachChatViewLayoutObservers(containerEl: HTMLElement): {
 
     const isCopilotActive = !!containerEl.closest(".workspace-drawer-active-tab-content");
     const kbHeight = parseFloat(
-      document.documentElement.style.getPropertyValue("--keyboard-height") || "0"
+      containerEl.doc.documentElement.style.getPropertyValue("--keyboard-height") || "0"
     );
     drawer.classList.toggle("copilot-keyboard-open", isCopilotActive && kbHeight > 0);
   };
 
   const keyboardObserver = new MutationObserver(syncKeyboardClass);
-  keyboardObserver.observe(document.documentElement, {
+  keyboardObserver.observe(containerEl.doc.documentElement, {
     attributes: true,
     attributeFilter: ["style"],
   });
