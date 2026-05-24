@@ -42,7 +42,19 @@ export type BackendType = AgentType | "chat";
  *   "copilot-plus"  → auto-created when the user signed into Plus
  */
 export type ProviderOrigin =
-  | { kind: "byok" }
+  | {
+      kind: "byok";
+      /**
+       * Catalog provider id (`models.dev` id, e.g. `"anthropic"`,
+       * `"openai"`, `"amazon-bedrock"`) this row was created from. Stable
+       * back-reference to the catalog — unlike `displayName` (user-editable)
+       * or `providerType` (ambiguous: `openai`, Groq, OpenRouter all map to
+       * `openai-compatible`). Lets the Configure dialog re-surface the full
+       * catalog model list when editing. Absent for custom-endpoint BYOK
+       * providers (no catalog) and for rows that predate this field.
+       */
+      catalogProviderId?: string;
+    }
   | { kind: "agent"; agentType: AgentType }
   | { kind: "copilot-plus" };
 

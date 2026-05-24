@@ -134,12 +134,22 @@ interface CatalogProvider {
 
 ```ts
 type ProviderOrigin =
-  | { kind: "byok" }
+  | { kind: "byok"; catalogProviderId?: string }
   | { kind: "agent"; agentType: AgentType }
   | { kind: "copilot-plus" };
 ```
 
 - `byok` — user added via the BYOK settings tab.
+  - `catalogProviderId` — the `models.dev` catalog id this row was created
+    from (e.g. `"anthropic"`, `"openai"`, `"amazon-bedrock"`). A stable
+    back-reference to the catalog: unlike `displayName` (user-editable) or
+    `providerType` (ambiguous — `openai`, Groq, OpenRouter all map to
+    `openai-compatible`), it pins the exact catalog entry so the Configure
+    dialog can re-surface the full model list when editing. Set by
+    `ByokSetupApi.addCatalogProvider`. Absent for future custom-endpoint
+    BYOK providers (no catalog) and for rows persisted before this field
+    existed — consumers fall back to the embedded `ConfiguredModel.info`
+    snapshots when it's missing.
 - `agent` — auto-created when an agent was set up; the agent owns
   credentials and routing. Chat doesn't appear here because chat
   doesn't own `Provider`s.

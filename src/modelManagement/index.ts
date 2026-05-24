@@ -103,3 +103,9 @@ export {
 // ---------------------------------------------------------------------------
 
 export { ModelManagementProvider, useModelManagement } from "./ui/ModelManagementContext";
+
+// ---------------------------------------------------------------------------
+// Settings UI (BYOK tab)
+// ---------------------------------------------------------------------------
+
+export { ByokPanel } from "./ui/tabs/ByokPanel";

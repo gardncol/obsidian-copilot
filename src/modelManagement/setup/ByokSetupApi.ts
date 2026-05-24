@@ -114,7 +114,7 @@ export class ByokSetupApi {
       providerType: input.template.providerType,
       displayName: input.displayName,
       baseUrl: input.baseUrl ?? input.template.defaultBaseUrl,
-      origin: { kind: "byok" },
+      origin: { kind: "byok", catalogProviderId: input.template.id },
       extras: input.extras,
     });
 
@@ -127,10 +127,17 @@ export class ByokSetupApi {
       .filter((info): info is NonNullable<typeof info> => info !== undefined);
     const configuredModelIds = await this.#models.bulkSet(providerId, infos);
 
+    // `infos` carries no duplicate `info.id` (catalog keys are ids and
+    // `selectedWireModelIds` is a set), so `bulkSet` returns ids 1:1 in
+    // input order — `configuredModelIds[i]` pairs with `infos[i]`.
     const enrollIn = input.autoEnrollIn ?? BYOK_DEFAULT_AUTO_ENROLL;
     for (const backend of enrollIn) {
-      for (const id of configuredModelIds) {
-        await this.#backends.enableModel(backend, id);
+      for (let i = 0; i < configuredModelIds.length; i++) {
+        // Embedding models aren't chat models — auto-enrolling them into
+        // chat/agent backends would surface them in completion pickers
+        // where they fail at inference time.
+        if (infos[i]?.isEmbedding) continue;
+        await this.#backends.enableModel(backend, configuredModelIds[i]);
       }
     }
 

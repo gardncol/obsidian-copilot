@@ -1136,7 +1136,7 @@ export function checkModelApiKey(
       return {
         hasApiKey: false,
         errorNotice:
-          "Amazon Bedrock API key is missing. Please add a key in Settings > API Keys or update the model configuration.",
+          "Amazon Bedrock API key is missing. Please add a key in Settings > Copilot > BYOK or update the model configuration.",
       };
     }
 
@@ -1153,7 +1153,7 @@ export function checkModelApiKey(
       return {
         hasApiKey: false,
         errorNotice:
-          "GitHub Copilot is not authenticated. Please connect it in Settings > Copilot > Basic Tab > Set Keys.",
+          "GitHub Copilot is not authenticated. Please connect it in Settings > Copilot > BYOK.",
       };
     }
     return { hasApiKey: true };
@@ -1166,7 +1166,7 @@ export function checkModelApiKey(
   if (needSetKeyPath && hasNoApiKey) {
     const notice =
       `Please configure API Key for ${model.name} in settings first.` +
-      "\nPath: Settings > copilot plugin > Basic Tab > Set Keys";
+      "\nPath: Settings > Copilot > BYOK";
     return {
       hasApiKey: false,
       errorNotice: notice,

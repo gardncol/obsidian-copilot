@@ -53,6 +53,13 @@ function transformModel(wire: WireModel): ModelInfo | null {
 
   if (typeof wire.reasoning === "boolean") info.reasoning = wire.reasoning;
   if (typeof wire.tool_call === "boolean") info.toolCall = wire.tool_call;
+  // Embedding models are named consistently in the id (`*-embedding-*`,
+  // `*-embed-*`) but the `family` field is unreliable — it's often the
+  // base family (`gemini`, `qwen`) or absent. Match either source.
+  const embedHaystack = `${wire.id} ${typeof wire.family === "string" ? wire.family : ""}`;
+  if (embedHaystack.toLowerCase().includes("embed")) {
+    info.isEmbedding = true;
+  }
   if (typeof wire.release_date === "string") info.releaseDate = wire.release_date;
 
   if (wire.cost) {

@@ -542,7 +542,7 @@ export default class ChatModelManager {
     const apiKeySource = customModel.apiKey || settings.amazonBedrockApiKey;
     if (!apiKeySource) {
       throw new Error(
-        "Amazon Bedrock API key is not configured. Provide a key in Settings > API Keys or the model definition."
+        "Amazon Bedrock API key is not configured. Provide a key in Settings > Copilot > BYOK or the model definition."
       );
     }
 

@@ -49,6 +49,8 @@ export interface ModelInfo {
   limits?: { context?: number; output?: number; input?: number };
   reasoning?: boolean;
   toolCall?: boolean;
+  /** True when the catalog `family` marks this as an embedding model. */
+  isEmbedding?: boolean;
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
   releaseDate?: string;
 }
