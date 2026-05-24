@@ -5,18 +5,15 @@ import { Input } from "@/components/ui/input";
 import { getModelDisplayWithIcons } from "@/components/ui/model-display";
 import { SettingItem } from "@/components/ui/setting-item";
 import { DEFAULT_OPEN_AREA, PLUS_UTM_MEDIUMS, SEND_SHORTCUT } from "@/constants";
-import { useApp } from "@/context";
-import { useTab } from "@/contexts/TabContext";
 import { cn } from "@/lib/utils";
 import { createPlusPageUrl } from "@/plusUtils";
 import { getModelKeyFromModel, updateSetting, useSettingsValue } from "@/settings/model";
 import { PlusSettings } from "@/settings/v2/components/PlusSettings";
 import { checkModelApiKey, formatDateTime } from "@/utils";
 import { isSortStrategy } from "@/utils/recentUsageManager";
-import { Key, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { Notice } from "obsidian";
 import React, { useState } from "react";
-import { ApiKeyDialog } from "./ApiKeyDialog";
 
 const ChainType2Label: Record<ChainType, string> = {
   [ChainType.LLM_CHAIN]: "Chat",
@@ -26,9 +23,7 @@ const ChainType2Label: Record<ChainType, string> = {
 };
 
 export const BasicSettings: React.FC = () => {
-  const app = useApp();
   const settings = useSettingsValue();
-  const { setSelectedTab } = useTab();
   const [isChecking, setIsChecking] = useState(false);
   const [conversationNoteName, setConversationNoteName] = useState(
     settings.defaultConversationNoteName || "{$date}_{$time}__{$topic}"
@@ -102,44 +97,6 @@ export const BasicSettings: React.FC = () => {
       <section>
         <div className="tw-mb-3 tw-text-xl tw-font-bold">General</div>
         <div className="tw-space-y-4">
-          <div className="tw-space-y-4">
-            {/* API Key Section */}
-            <SettingItem
-              type="custom"
-              title="API Keys"
-              description={
-                <div className="tw-flex tw-items-center tw-gap-1.5">
-                  <span className="tw-leading-none">
-                    Configure API keys for different AI providers
-                  </span>
-                  <HelpTooltip
-                    content={
-                      <div className="tw-flex tw-max-w-96 tw-flex-col tw-gap-2 tw-py-4">
-                        <div className="tw-text-sm tw-font-medium tw-text-accent">
-                          API key required for chat and QA features
-                        </div>
-                        <div className="tw-text-xs tw-text-muted">
-                          To enable chat and QA functionality, please provide an API key from your
-                          selected provider.
-                        </div>
-                      </div>
-                    }
-                  />
-                </div>
-              }
-            >
-              <Button
-                onClick={() => {
-                  new ApiKeyDialog(app, () => setSelectedTab("model")).open();
-                }}
-                variant="secondary"
-                className="tw-flex tw-w-full tw-items-center tw-justify-center tw-gap-2 sm:tw-w-auto sm:tw-justify-start"
-              >
-                Set Keys
-                <Key className="tw-size-4" />
-              </Button>
-            </SettingItem>
-          </div>
           <SettingItem
             type="select"
             title="Default Chat Model"

@@ -5,7 +5,7 @@ import { PluginProvider } from "@/contexts/PluginContext";
 import { TabProvider, useTab } from "@/contexts/TabContext";
 import { useLatestVersion } from "@/hooks/useLatestVersion";
 import CopilotPlugin from "@/main";
-import { ModelManagementProvider } from "@/modelManagement";
+import { ByokPanel, ModelManagementProvider } from "@/modelManagement";
 import { resetSettings } from "@/settings/model";
 import { CommandSettings } from "@/settings/v2/components/CommandSettings";
 import { SkillsSettings } from "@/agentMode";
@@ -15,16 +15,15 @@ import { AdvancedSettings } from "./components/AdvancedSettings";
 import { AgentSettings } from "./components/AgentSettings";
 import { BasicSettings } from "./components/BasicSettings";
 import { CopilotPlusSettings } from "./components/CopilotPlusSettings";
-import { ModelSettings } from "./components/ModelSettings";
 import { QASettings } from "./components/QASettings";
 
-const TAB_IDS = ["basic", "model", "agent", "QA", "command", "skills", "plus", "advanced"] as const;
+const TAB_IDS = ["basic", "byok", "agent", "QA", "command", "skills", "plus", "advanced"] as const;
 type TabId = (typeof TAB_IDS)[number];
 
 // tab icons
 const icons: Record<TabId, JSX.Element> = {
   basic: <Cog className="tw-size-5" />,
-  model: <Cpu className="tw-size-5" />,
+  byok: <Cpu className="tw-size-5" />,
   agent: <Bot className="tw-size-5" />,
   QA: <Database className="tw-size-5" />,
   command: <Command className="tw-size-5" />,
@@ -36,7 +35,7 @@ const icons: Record<TabId, JSX.Element> = {
 // tab components
 const components: Record<TabId, React.FC> = {
   basic: () => <BasicSettings />,
-  model: () => <ModelSettings />,
+  byok: () => <ByokPanel />,
   agent: () => <AgentSettings />,
   QA: () => <QASettings />,
   command: () => <CommandSettings />,
@@ -49,7 +48,7 @@ const components: Record<TabId, React.FC> = {
 // human-friendly label.
 const TAB_LABELS: Record<TabId, string> = {
   basic: "Basic",
-  model: "Model",
+  byok: "BYOK",
   agent: "Agents",
   QA: "QA",
   command: "Command",

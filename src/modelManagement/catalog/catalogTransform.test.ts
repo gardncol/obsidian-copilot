@@ -109,6 +109,55 @@ describe("transformWireToCatalog", () => {
     expect(model.reasoning).toBeUndefined();
     expect(model.toolCall).toBeUndefined();
     expect(model.releaseDate).toBeUndefined();
+    expect(model.isEmbedding).toBeUndefined();
+  });
+
+  it("flags embedding models from the `family` field", () => {
+    const wire = makeWire({
+      openai: {
+        id: "openai",
+        name: "OpenAI",
+        npm: "@ai-sdk/openai",
+        models: {
+          "text-embedding-3-small": {
+            id: "text-embedding-3-small",
+            name: "text-embedding-3-small",
+            family: "text-embedding",
+          },
+          "gpt-4o": { id: "gpt-4o", name: "GPT-4o", family: "gpt", tool_call: true },
+          "no-family": { id: "no-family", name: "No Family" },
+        },
+      },
+    });
+    const [provider] = transformWireToCatalog(wire);
+    expect(provider.models["text-embedding-3-small"].isEmbedding).toBe(true);
+    expect(provider.models["gpt-4o"].isEmbedding).toBeUndefined();
+    expect(provider.models["no-family"].isEmbedding).toBeUndefined();
+  });
+
+  it("flags embedding models from the id when `family` is the base family or absent", () => {
+    const wire = makeWire({
+      google: {
+        id: "google",
+        name: "Google",
+        npm: "@ai-sdk/google",
+        models: {
+          // family is the base model family, not "embedding"
+          "gemini-embedding-001": {
+            id: "gemini-embedding-001",
+            name: "Gemini Embedding",
+            family: "gemini",
+          },
+          // no family at all
+          "nv-embed-v2": { id: "nv-embed-v2", name: "NV Embed v2" },
+          "gemini-2.5-pro": { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", family: "gemini" },
+        },
+      },
+    });
+    const [provider] = transformWireToCatalog(wire);
+    expect(provider.models["gemini-embedding-001"].isEmbedding).toBe(true);
+    expect(provider.models["nv-embed-v2"].isEmbedding).toBe(true);
+    expect(provider.models["gemini-2.5-pro"].isEmbedding).toBeUndefined();
   });
 
   it("emits partial cost when only one side is present", () => {

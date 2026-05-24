@@ -84,7 +84,7 @@ describe("ByokSetupApi.addCatalogProvider", () => {
     expect(provider.providerType).toBe("anthropic");
     expect(provider.displayName).toBe("My Anthropic");
     expect(provider.baseUrl).toBe("https://api.anthropic.com/v1");
-    expect(provider.origin).toEqual({ kind: "byok" });
+    expect(provider.origin).toEqual({ kind: "byok", catalogProviderId: "anthropic" });
     expect(provider.apiKeyKeychainId).toBeTruthy();
     expect(await providers.getApiKey(result.providerId)).toBe("sk-ant-test");
 
@@ -133,6 +133,44 @@ describe("ByokSetupApi.addCatalogProvider", () => {
     });
     expect(result.configuredModelIds).toHaveLength(1);
     expect(models.listByProvider(result.providerId)[0].info.id).toBe("claude-sonnet-4-5");
+  });
+
+  it("configures embedding models but does not auto-enroll them into chat backends", async () => {
+    const mixedCatalog: CatalogProvider = {
+      id: "openai",
+      displayName: "OpenAI",
+      defaultBaseUrl: "https://api.openai.com/v1",
+      providerType: "openai-compatible",
+      models: {
+        "gpt-4o": { id: "gpt-4o", displayName: "GPT-4o" },
+        "text-embedding-3-small": {
+          id: "text-embedding-3-small",
+          displayName: "text-embedding-3-small",
+          isEmbedding: true,
+        },
+      },
+    };
+
+    const result = await api.addCatalogProvider({
+      template: mixedCatalog,
+      displayName: "OpenAI",
+      apiKey: "sk-test",
+      selectedWireModelIds: ["gpt-4o", "text-embedding-3-small"],
+    });
+
+    // Both models are configured (snapshotted under the provider)...
+    expect(result.configuredModelIds).toHaveLength(2);
+    const embeddingModel = models
+      .listByProvider(result.providerId)
+      .find((m) => m.info.id === "text-embedding-3-small")!;
+    const chatModel = models.listByProvider(result.providerId).find((m) => m.info.id === "gpt-4o")!;
+
+    // ...but only the chat model is enrolled in the chat/agent pickers.
+    for (const backend of BYOK_DEFAULT_AUTO_ENROLL) {
+      const enabled = backends.get(backend).enabledModels;
+      expect(enabled).toContain(chatModel.configuredModelId);
+      expect(enabled).not.toContain(embeddingModel.configuredModelId);
+    }
   });
 
   it("does not call setApiKey when apiKey is omitted (no-key providers)", async () => {
