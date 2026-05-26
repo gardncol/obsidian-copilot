@@ -1,25 +1,21 @@
 /**
- * Agent setup workflow. Called by an agent's own setup flow (Claude
- * Code installer, Codex CLI installer, OpenCode installer) when the
- * agent reports its supported model list.
+ * Enrolls an agent's reported model list into the data model. Creates one
+ * `Provider` per `(agentType, providerType)` with `origin: "agent"`, snapshots
+ * a `ConfiguredModel` per `wireModelId`, and auto-enrolls each into
+ * `backends[agentType]` only, so agent-owned models stay exclusive to their
+ * agent's picker.
  *
- * Creates one `Provider` row per `(agentType, providerType)` pair
- * with `origin: { kind: "agent", agentType }`, snapshots
- * `ConfiguredModel` rows for each `wireModelId`, and auto-enrolls
- * them into `backends[agentType]` only — agent-owned models stay
- * exclusive to their agent's picker.
- *
- * `registerAgentProvider` is idempotent on
- * `(agentType, providerType)` — re-running upgrades the model list
- * (adds new wire ids, drops vanished ones). `syncAgentModels` is the
- * narrower variant for callers that only need the model-list refresh
- * without provider metadata changes.
+ * `registerAgentProvider` is idempotent on `(agentType, providerType)`:
+ * re-running reconciles the model list. `syncAgentModels` is the narrower
+ * variant that refreshes models without touching provider metadata.
  */
+
+import { logWarn } from "@/logger";
 
 import type { CatalogDownloadService } from "@/modelManagement/catalog/CatalogDownloadService";
 import type { ModelManagementCoordinator } from "@/modelManagement/createModelManagement";
-import type { ProviderType } from "@/modelManagement/types/catalog";
-import type { AgentType } from "@/modelManagement/types/persisted";
+import type { ModelInfo, ProviderType } from "@/modelManagement/types/catalog";
+import type { AgentType, Provider } from "@/modelManagement/types/persisted";
 import type { BackendConfigRegistry } from "@/modelManagement/backends/BackendConfigRegistry";
 import type { ConfiguredModelRegistry } from "@/modelManagement/models/ConfiguredModelRegistry";
 import type { ProviderRegistry } from "@/modelManagement/providers/ProviderRegistry";
@@ -29,19 +25,15 @@ export interface RegisterAgentProviderInput {
   providerType: ProviderType;
   displayName: string;
   baseUrl?: string;
-  /** Agents that use CLI-managed credentials (Claude Code, Codex)
-   *  pass `null`. The Provider row's `apiKeyKeychainId` stays
-   *  `null`; the chat-model factory's `getApiKey()` returns `null`
-   *  and the adapter must tolerate that. */
+  /** `null` for CLI-managed agents (Claude Code, Codex): no key is stored, so
+   *  the chat-model factory's `getApiKey()` returns `null` and the adapter
+   *  must tolerate that. */
   apiKey?: string | null;
-  /** Per-providerType payload — see `Provider.extras`. */
   extras?: Record<string, unknown>;
-  /** Full set of wire ids the agent reports as supported. The
-   *  existing ConfiguredModel set is diffed against this list. */
+  /** Full set of wire ids the agent reports; the existing model set is diffed
+   *  against this list. */
   wireModelIds: readonly string[];
-  /** Fallback for wire ids the catalog doesn't know — used when the
-   *  agent supports a model that hasn't been added to `models.dev`
-   *  yet. Keyed by wire id. */
+  /** Display names for wire ids the catalog doesn't know yet. Keyed by wire id. */
   fallbackDisplayNames?: Record<string, string>;
 }
 
@@ -61,39 +53,299 @@ export interface AgentSyncResult {
 }
 
 export class AgentSetupApi {
+  readonly #providers: ProviderRegistry;
+  readonly #models: ConfiguredModelRegistry;
+  readonly #backends: BackendConfigRegistry;
+  readonly #catalog: CatalogDownloadService;
+  readonly #coordinator: ModelManagementCoordinator;
+
   constructor(
     providerRegistry: ProviderRegistry,
     configuredModelRegistry: ConfiguredModelRegistry,
     backendConfigRegistry: BackendConfigRegistry,
     catalogService: CatalogDownloadService,
-    /** Required for the diff-reconcile cascade: when a wire id vanishes
-     *  on agent upgrade, the orphan ConfiguredModel and its backend
-     *  refs are removed via `coordinator.removeConfiguredModel`. */
+    /** Used to cascade-remove an orphaned ConfiguredModel (and its backend
+     *  refs) when a wire id vanishes from the agent's reported list. */
     coordinator: ModelManagementCoordinator
-  ) {}
-
-  /**
-   * Idempotent on `(agentType, providerType)`. First call creates;
-   * subsequent calls update the Provider row in place and reconcile
-   * the configured-model list (add new wire ids, drop vanished
-   * ones). Each new ConfiguredModel is auto-enrolled into
-   * `backends[agentType]`.
-   *
-   * Catalog lookups (via `catalogService`) enrich each
-   * `ConfiguredModel.info` snapshot where the wire id matches a
-   * catalog entry; unmatched wire ids fall back to
-   * `fallbackDisplayNames[wireId] ?? wireId`.
-   */
-  registerAgentProvider(input: RegisterAgentProviderInput): Promise<AgentSetupResult> {
-    throw new Error("[modelManagement] AgentSetupApi.registerAgentProvider not implemented yet");
+  ) {
+    this.#providers = providerRegistry;
+    this.#models = configuredModelRegistry;
+    this.#backends = backendConfigRegistry;
+    this.#catalog = catalogService;
+    this.#coordinator = coordinator;
   }
 
   /**
-   * Reconcile the configured-model list for an existing agent-owned
-   * provider. Same diff logic as `registerAgentProvider` but doesn't
-   * touch the Provider row.
+   * Idempotent on `(agentType, providerType)`: the first call creates the
+   * provider, later calls update it in place and reconcile its model list.
+   * Catalog metadata enriches each model snapshot where the wire id matches;
+   * unmatched ids fall back to `fallbackDisplayNames[wireId] ?? wireId`.
+   *
+   * Writes happen in order — provider row, then key (only if non-null), then
+   * models — and a failed later step leaves earlier writes in place for
+   * `coordinator.removeProvider` to clean up.
    */
-  syncAgentModels(input: SyncAgentModelsInput): Promise<AgentSyncResult> {
-    throw new Error("[modelManagement] AgentSetupApi.syncAgentModels not implemented yet");
+  async registerAgentProvider(input: RegisterAgentProviderInput): Promise<AgentSetupResult> {
+    const existing = this.#findAgentProvider(input.agentType, input.providerType);
+
+    let providerId: string;
+    if (existing) {
+      providerId = existing.providerId;
+      // Reuse the existing row so re-running never spawns a second provider for
+      // the same `(agentType, providerType)`. providerType/origin/keychain id
+      // are immutable through `update`.
+      await this.#providers.update(providerId, {
+        displayName: input.displayName,
+        baseUrl: input.baseUrl,
+        extras: input.extras,
+      });
+    } else {
+      providerId = await this.#providers.add({
+        providerType: input.providerType,
+        displayName: input.displayName,
+        baseUrl: input.baseUrl,
+        origin: { kind: "agent", agentType: input.agentType },
+        extras: input.extras,
+      });
+    }
+
+    if (input.apiKey != null) {
+      await this.#providers.setApiKey(providerId, input.apiKey);
+    }
+
+    const infos = await this.#resolveModelInfos(
+      input.providerType,
+      input.wireModelIds,
+      input.fallbackDisplayNames
+    );
+    const { added, removed } = await this.#reconcileModels(input.agentType, providerId, infos);
+
+    // Return the configured-model ids in wire-id order, joining freshly-added
+    // ids with the surviving ones.
+    const addedByWireId = new Map(added.map((a) => [a.wireId, a.configuredModelId]));
+    const configuredModelIds: string[] = [];
+    for (const info of infos) {
+      const fromAdd = addedByWireId.get(info.id);
+      if (fromAdd) {
+        configuredModelIds.push(fromAdd);
+        continue;
+      }
+      const surviving = this.#models.getByWireId(providerId, info.id);
+      if (surviving) configuredModelIds.push(surviving.configuredModelId);
+    }
+
+    // `#reconcileModels` already applied the removals; the delta isn't surfaced
+    // here (callers that need it use `syncAgentModels`).
+    void removed;
+    return { providerId, configuredModelIds };
+  }
+
+  /**
+   * Reconcile an existing agent provider's model list without touching the
+   * Provider row. No-op when no agent provider exists yet (the caller must run
+   * `registerAgentProvider` first).
+   *
+   * The single-provider case (claude / codex, and opencode as enrolled
+   * today) reconciles directly. When several agent providers share one
+   * `agentType`, wire ids are partitioned by their owning provider so each only
+   * reconciles its own — never corrupting another provider's list.
+   */
+  async syncAgentModels(input: SyncAgentModelsInput): Promise<AgentSyncResult> {
+    const providers = this.#listAgentProviders(input.agentType);
+    if (providers.length === 0) {
+      return { added: [], removed: [] };
+    }
+
+    if (providers.length === 1) {
+      const provider = providers[0];
+      // Every reported wire id belongs to this one provider.
+      const infos = await this.#resolveModelInfosForProvider(provider, input.wireModelIds);
+      const { added, removed } = await this.#reconcileModels(
+        input.agentType,
+        provider.providerId,
+        infos
+      );
+      return {
+        added: added.map((a) => a.configuredModelId),
+        removed: removed.map((r) => r.configuredModelId),
+      };
+    }
+
+    // Partition reported wire ids by their owning provider. Ids owned by no
+    // provider yet can't be placed without a providerType, so they're left for
+    // `registerAgentProvider` (which carries one) rather than guessing.
+    const addedAll: string[] = [];
+    const removedAll: string[] = [];
+    const wireIdSet = new Set(input.wireModelIds);
+    for (const provider of providers) {
+      const ownedWireIds: string[] = [];
+      for (const wireId of wireIdSet) {
+        if (this.#models.getByWireId(provider.providerId, wireId)) {
+          ownedWireIds.push(wireId);
+        }
+      }
+      // Reconcile only owned ids: a dropped id is one this provider owned and
+      // the agent no longer reports. Unowned ids aren't added here (no
+      // providerType to resolve their catalog metadata).
+      const infos = await this.#resolveModelInfosForProvider(provider, ownedWireIds);
+      const { added, removed } = await this.#reconcileModels(
+        input.agentType,
+        provider.providerId,
+        infos
+      );
+      for (const a of added) addedAll.push(a.configuredModelId);
+      for (const r of removed) removedAll.push(r.configuredModelId);
+    }
+    return { added: addedAll, removed: removedAll };
+  }
+
+  // -------------------------------------------------------------------------
+  // Internals
+  // -------------------------------------------------------------------------
+
+  /**
+   * Find the single agent-owned provider for `(agentType, providerType)`.
+   * Throws if more than one matches — the `(agentType, providerType)`
+   * idempotency invariant is violated and a silent pick would corrupt
+   * state.
+   */
+  #findAgentProvider(agentType: AgentType, providerType: ProviderType): Provider | undefined {
+    const matches = this.#providers
+      .listByOrigin("agent")
+      .filter(
+        (p) =>
+          p.origin.kind === "agent" &&
+          p.origin.agentType === agentType &&
+          p.providerType === providerType
+      );
+    if (matches.length > 1) {
+      throw new Error(
+        `[modelManagement] AgentSetupApi: ${matches.length} providers found for ` +
+          `(${agentType}, ${providerType}); the (agentType, providerType) ` +
+          `idempotency invariant is violated`
+      );
+    }
+    return matches[0];
+  }
+
+  /** All agent-owned providers for an `agentType` (origin filter). */
+  #listAgentProviders(agentType: AgentType): readonly Provider[] {
+    return this.#providers
+      .listByOrigin("agent")
+      .filter((p) => p.origin.kind === "agent" && p.origin.agentType === agentType);
+  }
+
+  /**
+   * Catalog-enrich each wire id under one `providerType`, falling back to
+   * `fallbackDisplayNames[id] ?? id` on a miss (so correctness never depends on
+   * the catalog being reachable).
+   *
+   * The input carries only `providerType`, which maps to many catalog
+   * providers, so the lookup scans them and takes the first match. A wire id
+   * colliding across two same-type providers resolves to whichever comes first
+   * — fine, since this only affects display metadata.
+   */
+  async #resolveModelInfos(
+    providerType: ProviderType,
+    wireModelIds: readonly string[],
+    fallbackDisplayNames?: Record<string, string>
+  ): Promise<ModelInfo[]> {
+    const wireToInfo = await this.#buildCatalogLookup(providerType);
+    return this.#snapshotInfos(wireModelIds, wireToInfo, fallbackDisplayNames);
+  }
+
+  /**
+   * Like `#resolveModelInfos` but scoped to one provider: on a catalog miss it
+   * reuses the existing `ConfiguredModel.info`, so a re-sync never downgrades an
+   * already-enriched row to a bare fallback.
+   */
+  async #resolveModelInfosForProvider(
+    provider: Provider,
+    wireModelIds: readonly string[]
+  ): Promise<ModelInfo[]> {
+    const wireToInfo = await this.#buildCatalogLookup(provider.providerType);
+    return wireModelIds.map((wireId) => {
+      const fromCatalog = wireToInfo.get(wireId);
+      if (fromCatalog) return fromCatalog;
+      const existing = this.#models.getByWireId(provider.providerId, wireId);
+      if (existing) return existing.info;
+      return { id: wireId, displayName: wireId };
+    });
+  }
+
+  /** Pure wire-id → `ModelInfo` mapping, split from the catalog IO so it stays testable. */
+  #snapshotInfos(
+    wireModelIds: readonly string[],
+    wireToInfo: ReadonlyMap<string, ModelInfo>,
+    fallbackDisplayNames?: Record<string, string>
+  ): ModelInfo[] {
+    return wireModelIds.map((wireId) => {
+      const fromCatalog = wireToInfo.get(wireId);
+      if (fromCatalog) return fromCatalog;
+      return { id: wireId, displayName: fallbackDisplayNames?.[wireId] ?? wireId };
+    });
+  }
+
+  /**
+   * Build a `wireId → ModelInfo` map across every catalog provider whose
+   * `providerType` matches. Best-effort: `ensureLoaded` failure is
+   * logged and an empty map is returned so the fallback path takes over.
+   */
+  async #buildCatalogLookup(providerType: ProviderType): Promise<ReadonlyMap<string, ModelInfo>> {
+    try {
+      await this.#catalog.ensureLoaded();
+    } catch (err) {
+      logWarn(
+        "[modelManagement] AgentSetupApi: catalog ensureLoaded failed; falling back to wire-id metadata",
+        err
+      );
+    }
+    const lookup = new Map<string, ModelInfo>();
+    for (const catalogProvider of this.#catalog.getAllProviders()) {
+      if (catalogProvider.providerType !== providerType) continue;
+      for (const [wireId, info] of Object.entries(catalogProvider.models)) {
+        if (!lookup.has(wireId)) lookup.set(wireId, info);
+      }
+    }
+    return lookup;
+  }
+
+  /**
+   * Diff-reconcile one provider's ConfiguredModel set against `infos`: add new
+   * wire ids (auto-enrolling each into `backends[agentType]` only),
+   * cascade-remove vanished ones, leave unchanged ids untouched. Only real
+   * deltas write, so re-syncing an unchanged list is a no-op that never resets
+   * user curation.
+   */
+  async #reconcileModels(
+    agentType: AgentType,
+    providerId: string,
+    infos: readonly ModelInfo[]
+  ): Promise<{
+    added: Array<{ wireId: string; configuredModelId: string }>;
+    removed: Array<{ wireId: string; configuredModelId: string }>;
+  }> {
+    const existing = this.#models.listByProvider(providerId);
+    const existingByWireId = new Map(existing.map((m) => [m.info.id, m]));
+    const desiredWireIds = new Set(infos.map((info) => info.id));
+
+    const added: Array<{ wireId: string; configuredModelId: string }> = [];
+    for (const info of infos) {
+      if (existingByWireId.has(info.id)) continue;
+      const configuredModelId = await this.#models.add({ providerId, info });
+      // Enroll into this agent's backend only — agent models never leak into
+      // chat or another agent's picker.
+      await this.#backends.enableModel(agentType, configuredModelId);
+      added.push({ wireId: info.id, configuredModelId });
+    }
+
+    const removed: Array<{ wireId: string; configuredModelId: string }> = [];
+    for (const model of existing) {
+      if (desiredWireIds.has(model.info.id)) continue;
+      await this.#coordinator.removeConfiguredModel(model.configuredModelId);
+      removed.push({ wireId: model.info.id, configuredModelId: model.configuredModelId });
+    }
+
+    return { added, removed };
   }
 }

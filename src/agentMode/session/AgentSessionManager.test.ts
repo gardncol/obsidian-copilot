@@ -758,7 +758,7 @@ describe("AgentSessionManager.applySelection", () => {
     // Active session is on `opencode`; asking for a different backend
     // must refuse so a stray cross-backend apply can't slip through.
     await expect(
-      mgr.applySelection({ effort: "high" }, { expectBackendId: "claude-code" })
+      mgr.applySelection({ effort: "high" }, { expectBackendId: "claude" })
     ).resolves.toBeUndefined();
   });
 

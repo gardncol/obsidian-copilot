@@ -22,6 +22,9 @@ const mockedRequestUrl = requestUrl as unknown as jest.Mock<
   [RequestUrlParam]
 >;
 
+const CACHE_DIR = ".copilot";
+const CACHE_PATH = `${CACHE_DIR}/model-catalog-cache.json`;
+
 const FIXTURE: WireCatalog = {
   anthropic: {
     id: "anthropic",
@@ -58,6 +61,7 @@ type AdapterMock = {
   read: jest.Mock<Promise<string>, [string]>;
   write: jest.Mock<Promise<void>, [string, string]>;
   exists: jest.Mock<Promise<boolean>, [string]>;
+  mkdir: jest.Mock<Promise<void>, [string]>;
 };
 
 function buildFakeApp(adapter: AdapterMock): App {
@@ -66,8 +70,11 @@ function buildFakeApp(adapter: AdapterMock): App {
 
 function buildAdapter(initial?: { fetchedAt: number; data: WireCatalog }): AdapterMock {
   let stored = initial ? JSON.stringify(initial) : null;
-  const exists: AdapterMock["exists"] = jest.fn((_path: string) =>
-    Promise.resolve(stored !== null)
+  let dirExists = false;
+  // Path-aware: the `.copilot` dir existence is tracked separately from
+  // the cache file, which keys off whether anything has been written.
+  const exists: AdapterMock["exists"] = jest.fn((path: string) =>
+    Promise.resolve(path === CACHE_DIR ? dirExists : stored !== null)
   );
   const read: AdapterMock["read"] = jest.fn((_path: string) => {
     if (stored === null) throw new Error("not found");
@@ -77,7 +84,11 @@ function buildAdapter(initial?: { fetchedAt: number; data: WireCatalog }): Adapt
     stored = contents;
     return Promise.resolve();
   });
-  return { exists, read, write };
+  const mkdir: AdapterMock["mkdir"] = jest.fn((_path: string) => {
+    dirExists = true;
+    return Promise.resolve();
+  });
+  return { exists, read, write, mkdir };
 }
 
 function okResponse(json: unknown): RequestUrlResponse {
@@ -96,10 +107,6 @@ function freezeNow(timestamp: number): jest.SpyInstance<number, []> {
 }
 
 describe("CatalogDownloadService", () => {
-  // Stand-in for `this.manifest.dir`; the real value is derived at
-  // runtime from `Vault#configDir`.
-  const PLUGIN_DIR = "plugin-root/copilot";
-  const CACHE_PATH = `${PLUGIN_DIR}/.modelsCatalogCache.json`;
   const FIXED_NOW = 1_700_000_000_000;
 
   let nowSpy: jest.SpyInstance<number, []> | null = null;
@@ -117,7 +124,7 @@ describe("CatalogDownloadService", () => {
   it("loads from disk without fetching when cache is fresh (<24h)", async () => {
     nowSpy = freezeNow(FIXED_NOW);
     const adapter = buildAdapter({ fetchedAt: FIXED_NOW - 60 * 60 * 1000, data: FIXTURE });
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     await svc.ensureLoaded();
 
@@ -132,7 +139,7 @@ describe("CatalogDownloadService", () => {
     const STALE_BY = 25 * 60 * 60 * 1000;
     const adapter = buildAdapter({ fetchedAt: FIXED_NOW - STALE_BY, data: { foo: { id: "foo" } } });
     mockedRequestUrl.mockResolvedValue(okResponse(FIXTURE));
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     await svc.ensureLoaded();
 
@@ -155,7 +162,7 @@ describe("CatalogDownloadService", () => {
     const STALE_BY = 48 * 60 * 60 * 1000;
     const adapter = buildAdapter({ fetchedAt: FIXED_NOW - STALE_BY, data: FIXTURE });
     mockedRequestUrl.mockResolvedValue({ ...okResponse(null), status: 500, json: undefined });
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     await svc.ensureLoaded();
 
@@ -168,7 +175,7 @@ describe("CatalogDownloadService", () => {
     nowSpy = freezeNow(FIXED_NOW);
     const adapter = buildAdapter();
     mockedRequestUrl.mockResolvedValue(okResponse(FIXTURE));
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     await svc.ensureLoaded();
 
@@ -181,7 +188,7 @@ describe("CatalogDownloadService", () => {
     nowSpy = freezeNow(FIXED_NOW);
     const adapter = buildAdapter();
     mockedRequestUrl.mockResolvedValue({ ...okResponse(null), status: 500, json: undefined });
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     await svc.ensureLoaded();
 
@@ -193,7 +200,7 @@ describe("CatalogDownloadService", () => {
     nowSpy = freezeNow(FIXED_NOW);
     const adapter = buildAdapter();
     mockedRequestUrl.mockResolvedValue({ ...okResponse(null), status: 500, json: undefined });
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     await svc.ensureLoaded();
     await svc.ensureLoaded();
@@ -223,7 +230,7 @@ describe("CatalogDownloadService", () => {
     mockedRequestUrl.mockResolvedValueOnce({ ...okResponse(null), status: 500, json: undefined });
     // Second attempt: success.
     mockedRequestUrl.mockResolvedValueOnce(okResponse(FIXTURE));
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     await svc.ensureLoaded();
     expect(svc.getAllProviders()).toEqual([]);
@@ -236,7 +243,7 @@ describe("CatalogDownloadService", () => {
   it("deduplicates concurrent ensureLoaded() calls", async () => {
     nowSpy = freezeNow(FIXED_NOW);
     const adapter = buildAdapter({ fetchedAt: FIXED_NOW - 60 * 1000, data: FIXTURE });
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     await Promise.all([svc.ensureLoaded(), svc.ensureLoaded(), svc.ensureLoaded()]);
 
@@ -254,7 +261,7 @@ describe("CatalogDownloadService", () => {
           resolveFetch = resolve;
         })
     );
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     const pending = Promise.all([svc.refresh(), svc.refresh(), svc.refresh()]);
     // All three share the same in-flight fetch.
@@ -271,7 +278,7 @@ describe("CatalogDownloadService", () => {
     nowSpy = freezeNow(FIXED_NOW);
     const adapter = buildAdapter();
     mockedRequestUrl.mockResolvedValue({ ...okResponse(null), status: 500 });
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     const result = await svc.refresh();
 
@@ -284,7 +291,7 @@ describe("CatalogDownloadService", () => {
     nowSpy = freezeNow(FIXED_NOW);
     const adapter = buildAdapter();
     mockedRequestUrl.mockResolvedValue(okResponse([1, 2, 3]));
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     const result = await svc.refresh();
 
@@ -302,7 +309,7 @@ describe("CatalogDownloadService", () => {
       arrayBuffer: new ArrayBuffer(0),
       headers: {},
     });
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     const result = await svc.refresh();
 
@@ -314,7 +321,7 @@ describe("CatalogDownloadService", () => {
     nowSpy = freezeNow(FIXED_NOW);
     const adapter = buildAdapter();
     mockedRequestUrl.mockReturnValue(new Promise(() => {}));
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     const pending = svc.refresh();
     jest.advanceTimersByTime(5000);
@@ -329,7 +336,7 @@ describe("CatalogDownloadService", () => {
     nowSpy = freezeNow(FIXED_NOW);
     const adapter = buildAdapter();
     mockedRequestUrl.mockResolvedValue(okResponse(FIXTURE));
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     const subscribed = jest.fn();
     const unsubscribedAt = jest.fn();
@@ -355,7 +362,7 @@ describe("CatalogDownloadService", () => {
       fetchedAt: FIXED_NOW - 60 * 1000,
       data: {},
     });
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     // Five fresh-disk loads — none should touch the network.
     await svc.ensureLoaded();
@@ -407,7 +414,7 @@ describe("CatalogDownloadService", () => {
         })
     );
     mockedRequestUrl.mockResolvedValue(okResponse(FIXTURE));
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     // Kick off ensureLoaded — it blocks on the disk read.
     const ensurePending = svc.ensureLoaded();
@@ -426,7 +433,7 @@ describe("CatalogDownloadService", () => {
   it("getAllProviders() returns a copy so caller-side mutation can't corrupt internal state", async () => {
     nowSpy = freezeNow(FIXED_NOW);
     const adapter = buildAdapter({ fetchedAt: FIXED_NOW - 60 * 1000, data: FIXTURE });
-    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+    const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
     await svc.ensureLoaded();
 
@@ -451,7 +458,7 @@ describe("CatalogDownloadService", () => {
     try {
       const adapter = buildAdapter();
       mockedRequestUrl.mockResolvedValue(okResponse(FIXTURE));
-      const svc = new CatalogDownloadService({ app: buildFakeApp(adapter), pluginDir: PLUGIN_DIR });
+      const svc = new CatalogDownloadService({ app: buildFakeApp(adapter) });
 
       await svc.ensureLoaded();
 

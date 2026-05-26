@@ -10,6 +10,7 @@ import { CodexInstallModal } from "./CodexInstallModal";
 import CodexLogo from "./logo.svg";
 import { CodexSettingsPanel } from "./CodexSettingsPanel";
 import type { AgentSession } from "@/agentMode/session/AgentSession";
+import { agentOriginEnabledWireIds } from "@/agentMode/backends/shared/agentEnabledModels";
 import {
   binaryPathInstallState,
   simpleBinaryBackendProcess,
@@ -57,9 +58,10 @@ const codexWire: ModelWireCodec = {
 
 /**
  * Codex backend — wraps `@zed-industries/codex-acp`, which inherits auth
- * from the local `codex` CLI login. Independent of Copilot's
- * `activeModels` / BYOK keys, so the picker is fed entirely by live
- * `availableModels` (active session or preloader cache).
+ * from the local `codex` CLI login. Auth is CLI-owned (no Copilot-side keys),
+ * so the candidate models come entirely from the CLI's live `availableModels`
+ * (active session or preloader cache); curation is the model-management
+ * `backends.codex.enabledModels` set surfaced via `getEnabledBaseModelIds`.
  *
  * Effort is surfaced via opencode-style model-id parsing — codex-acp
  * advertises one model per (base × effort) combination, and we collapse
@@ -73,6 +75,11 @@ export const CodexBackendDescriptor: BackendDescriptor = {
   crossDiscoveredAgents: [],
   restartOnManagedSkillsChange: false,
   wire: codexWire,
+
+  getEnabledBaseModelIds(settings: CopilotSettings): ReadonlySet<string> {
+    // All Codex models are agent-origin.
+    return agentOriginEnabledWireIds(settings, "codex", (wireId) => codexWire.decode(wireId));
+  },
 
   getInstallState(settings: CopilotSettings): InstallState {
     return binaryPathInstallState(settings.agentMode?.backends?.codex?.binaryPath);
@@ -105,13 +112,6 @@ export const CodexBackendDescriptor: BackendDescriptor = {
   },
 
   SettingsPanel: CodexSettingsPanel,
-
-  isModelEnabledByDefault(model) {
-    // Default-enable only gpt-5.5; digit-boundary on each side avoids
-    // matching `15.5` or `5.50`. Users widen via the Agents tab toggles.
-    const re = /(^|[^0-9])5\.5([^0-9]|$)/;
-    return re.test(model.name) || re.test(model.modelId);
-  },
 
   /**
    * Codex exposes sandbox/approval presets via ACP setMode: `read-only`,

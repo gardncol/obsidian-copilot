@@ -3,7 +3,8 @@
  *
  * Two-tier read path:
  *   1. Memory cache (populated by `ensureLoaded` or `refresh`).
- *   2. Disk cache at `<pluginDir>/.modelsCatalogCache.json`.
+ *   2. Disk cache at `<vault>/.copilot/model-catalog-cache.json`,
+ *      alongside the plugin's other disposable runtime caches.
  *
  * `ensureLoaded` reads disk first. If the cached payload is younger
  * than 24h it's used as-is — no network call. Otherwise (stale or
@@ -26,7 +27,10 @@ import type { CatalogProvider } from "@/modelManagement/types/catalog";
 import { transformWireToCatalog } from "./catalogTransform";
 import { isPlainObject } from "./modelsDevWire";
 
-const CACHE_FILENAME = ".modelsCatalogCache.json";
+// Sits with the other disposable caches under `.copilot/`
+// (see fileCache / pdfCache / projectContextCache).
+const CACHE_DIR = ".copilot";
+const CACHE_FILENAME = "model-catalog-cache.json";
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const FETCH_TIMEOUT_MS = 5000;
 const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
@@ -45,8 +49,6 @@ interface DiskPayload {
 
 export interface CatalogDownloadDeps {
   app: App;
-  /** Plugin directory, e.g. `this.manifest.dir`. */
-  pluginDir: string;
 }
 
 type Listener = () => void;
@@ -64,7 +66,7 @@ export class CatalogDownloadService {
 
   constructor(deps: CatalogDownloadDeps) {
     this.app = deps.app;
-    this.cachePath = normalizePath(`${deps.pluginDir}/${CACHE_FILENAME}`);
+    this.cachePath = normalizePath(`${CACHE_DIR}/${CACHE_FILENAME}`);
   }
 
   /**
@@ -156,6 +158,9 @@ export class CatalogDownloadService {
 
     const fetchedAt = Date.now();
     try {
+      if (!(await this.app.vault.adapter.exists(CACHE_DIR))) {
+        await this.app.vault.adapter.mkdir(CACHE_DIR);
+      }
       const payload: DiskPayload = { fetchedAt, data: parsed };
       await this.app.vault.adapter.write(this.cachePath, JSON.stringify(payload));
     } catch (err) {

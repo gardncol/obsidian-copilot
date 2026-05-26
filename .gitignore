@@ -36,3 +36,6 @@ TODO.md
 # ACP full-frame debug log (vault sidecar, may contain prompt/tool data)
 copilot/acp-frames.ndjson
 copilot/acp-frames.old.ndjson
+
+# Models.dev catalog cache (disposable runtime cache under .copilot/)
+.copilot/model-catalog-cache.json

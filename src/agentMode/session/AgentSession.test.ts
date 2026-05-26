@@ -855,7 +855,7 @@ describe("AgentSession.setConfigOption", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     await session.setConfigOption("effort", "high");
     expect(mock.setSessionConfigOption).toHaveBeenCalledWith({
@@ -871,7 +871,7 @@ describe("AgentSession.setConfigOption", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     const onModelChanged = jest.fn();
     session.subscribe({
@@ -892,7 +892,7 @@ describe("AgentSession.setConfigOption", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     const onModelChanged = jest.fn();
     session.subscribe({
@@ -915,7 +915,7 @@ describe("AgentSession.setMode", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     await session.setMode("plan");
     expect(mock.setSessionMode).toHaveBeenCalledWith({ sessionId: "acp-1", modeId: "plan" });
@@ -928,7 +928,7 @@ describe("AgentSession.setMode", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     await expect(session.setMode("plan")).rejects.toBeInstanceOf(MethodUnsupportedError);
   });
@@ -939,7 +939,7 @@ describe("AgentSession.setMode", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     const onModelChanged = jest.fn();
     session.subscribe({
@@ -959,7 +959,7 @@ describe("AgentSession state_changed event", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     const onModelChanged = jest.fn();
     session.subscribe({
@@ -1443,7 +1443,7 @@ describe("AgentSession plan proposal lifecycle", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     const { turn } = session.sendPrompt("plan something");
 
@@ -1498,7 +1498,7 @@ describe("AgentSession plan proposal lifecycle", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     const { turn } = session.sendPrompt("plan something");
 
@@ -1556,7 +1556,7 @@ describe("AgentSession plan proposal lifecycle", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
       initialState: {
         model: null,
         mode: {
@@ -1600,7 +1600,7 @@ describe("AgentSession plan proposal lifecycle", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
 
     const decisionPromise = session.handlePlanProposalPermission({
@@ -1643,7 +1643,7 @@ describe("AgentSession plan proposal lifecycle", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     const statusChanges: string[] = [];
     session.subscribe({
@@ -1695,7 +1695,7 @@ describe("AgentSession plan proposal lifecycle", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     const { turn } = session.sendPrompt("edit a file");
 
@@ -1735,7 +1735,7 @@ describe("AgentSession plan proposal lifecycle", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     const { turn } = session.sendPrompt("plan something");
 
@@ -1776,7 +1776,7 @@ describe("AgentSession plan proposal lifecycle", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     const { turn } = session.sendPrompt("plan something");
 
@@ -1839,7 +1839,7 @@ describe("AgentSession status derivation", () => {
       backend: mock.asBackend,
       backendSessionId: "acp-1",
       internalId: "internal-1",
-      backendId: "claude-code",
+      backendId: "claude",
     });
     const statusChanges: string[] = [];
     session.subscribe({

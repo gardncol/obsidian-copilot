@@ -227,6 +227,89 @@ describe("buildPickerEntries", () => {
     expect(entries).toHaveLength(1);
     expect(entries[0].name).toBe("gpt-5");
   });
+
+  it("filters by getEnabledBaseModelIds when the descriptor implements it (new path)", () => {
+    const enabled = makeModelEntry("anthropic/claude-sonnet-4-6");
+    const disabled = makeModelEntry("anthropic/claude-haiku");
+    // Opencode-style descriptor exposing the new enabled-set hook. Only the
+    // first model is enabled; the second must be dropped from the picker.
+    const opencode = {
+      ...makeDescriptor("opencode"),
+      getEnabledBaseModelIds: () => new Set(["anthropic/claude-sonnet-4-6"]),
+    } as unknown as BackendDescriptor;
+    const manager = makeManager({
+      cachedStateById: {
+        opencode: {
+          model: makeModelState("anthropic/claude-sonnet-4-6", [enabled, disabled]),
+          mode: null,
+        },
+      },
+    });
+    const ctx: ModelActiveContext = {
+      activeSession: null,
+      activeChatUIState: null,
+      activeBackendId: null,
+      activeDescriptor: undefined,
+      activeSessionHasHistory: false,
+      activeModelState: null,
+      activeCurrentEntry: undefined,
+    };
+    const { entries } = buildPickerEntries(manager, [opencode], ctx, emptySettings);
+    expect(entries.map((e) => e.name)).toEqual(["anthropic/claude-sonnet-4-6"]);
+  });
+
+  it("drops every model when the descriptor has no getEnabledBaseModelIds (no legacy branch) except the kept one", () => {
+    // With the legacy override branch removed, a descriptor that doesn't
+    // implement getEnabledBaseModelIds yields an empty enabled set, so only
+    // keepBaseModelId survives. `dropped` is neither enabled nor kept.
+    const kept = makeModelEntry("kept-model");
+    const dropped = makeModelEntry("dropped-model");
+    const opencode = makeDescriptor("opencode");
+    const manager = makeManager({
+      cachedStateById: {
+        opencode: { model: makeModelState("kept-model", [kept, dropped]), mode: null },
+      },
+    });
+    const ctx: ModelActiveContext = {
+      activeSession: { backendId: "opencode" } as unknown as AgentSession,
+      activeChatUIState: null,
+      activeBackendId: "opencode",
+      activeDescriptor: opencode,
+      activeSessionHasHistory: false,
+      activeModelState: makeModelState("kept-model", [kept, dropped]),
+      activeCurrentEntry: kept,
+    };
+    const { entries } = buildPickerEntries(manager, [opencode], ctx, emptySettings);
+    expect(entries.map((e) => e.name)).toEqual(["kept-model"]);
+  });
+
+  it("keeps the sticky active model even when getEnabledBaseModelIds excludes it", () => {
+    // The active (sticky) model is no longer in the enabled set, but
+    // keepBaseModelId must preserve it so curation never strands the
+    // running selection.
+    const sticky = makeModelEntry("anthropic/claude-haiku");
+    const opencode = {
+      ...makeDescriptor("opencode"),
+      // Empty enabled set — nothing curated in.
+      getEnabledBaseModelIds: () => new Set<string>(),
+    } as unknown as BackendDescriptor;
+    const manager = makeManager({
+      cachedStateById: {
+        opencode: { model: makeModelState("anthropic/claude-haiku", [sticky]), mode: null },
+      },
+    });
+    const ctx: ModelActiveContext = {
+      activeSession: { backendId: "opencode" } as unknown as AgentSession,
+      activeChatUIState: null,
+      activeBackendId: "opencode",
+      activeDescriptor: opencode,
+      activeSessionHasHistory: false,
+      activeModelState: makeModelState("anthropic/claude-haiku", [sticky]),
+      activeCurrentEntry: sticky,
+    };
+    const { entries } = buildPickerEntries(manager, [opencode], ctx, emptySettings);
+    expect(entries.map((e) => e.name)).toEqual(["anthropic/claude-haiku"]);
+  });
 });
 
 // ---- buildEffortSibling ----

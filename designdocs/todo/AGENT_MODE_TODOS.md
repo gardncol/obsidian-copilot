@@ -5,7 +5,7 @@
   - [x] Save chat history to notes
 - [x] P0: Thoroughly assess whether migrating to Anthropic agent SDK is worth it.
 - [ ] P0: Test Windows devices
-- [ ] P0: Make sure bash command shows what command it runs (visibility)
+- [x] P0: Make sure bash command shows what command it runs (visibility)
 - [ ] P0: Provide copilot specific system prompt
   - [ ] Allow users to share system prompt
   - [ ] Do a quick spike on the concrete behavior
@@ -19,20 +19,22 @@
   - [x] support self host model
   - [x] remove built-in models
 - [ ] P0: Test opencode works well with local models
-- [ ] P0: Fix broken legacy agent mode
-  - [ ] Can we only support basic chat - not now but eventually yes
 - [ ] P0: 非migrate的skill最好能直接引用,同名的skill如果内容一样migrate可以做得更好
 - [x] P0: Auto-save chat history controls
 - [x] P0: Support image context
-- [x] P1: [BUG] Check active note path. Sometimes the agent will start from a path that does not exist
-- [x] P1: [Performance] Updating skills settings is laggy
-- [ ] P1: Make askuserquestion tool show questions inline in the chat.
-- [ ] P1: Improve binary detection
 - [ ] P1: MCP
   - Basic functionality is ready
   - [ ] P1: Surface externally-managed MCP servers (claude.ai remote, plugin-provided) — see [MCP_EXTERNALLY_MANAGED_SERVERS.md](./MCP_EXTERNALLY_MANAGED_SERVERS.md)
   - [ ] P1: Support oauth for MCP servers (the one example that I tested didn't work)
   - [ ] P1: Support setting MCP by copy pasting JSON blobs
+- [ ] P1: Fix broken legacy agent mode
+  - [ ] Can we only support basic chat - not now but eventually yes
+- [x] P1: [BUG] Check active note path. Sometimes the agent will start from a path that does not exist
+- [x] P1: [Performance] Updating skills settings is laggy
+- [ ] P1: Make askuserquestion tool show questions inline in the chat.
+- [ ] P1: Improve binary detection
+- [ ] P1: Citation
+  - [ ] a tool to let agent call citation
 - [ ] P1: Content type support (image, audio) - https://agentclientprotocol.com/protocol/content
 - [ ] P1: Edit diff UI - https://agentclientprotocol.com/protocol/tool-calls#diffs
   - The edit diff should be based on well rendered markdown, not raw markdown file. For example, table is impossible to understand the diff with the raw format
@@ -87,6 +89,7 @@
 - [ ] P2: Claude code / Codex authentication
 - [ ] P2: Steering conversation (instead of queue)
 - [ ] P2: Rollback everything to the state of previous message
+- [ ] P2: In-product QA agent to debug for users
 - [ ] P3: Rerun agent response
 - [ ] P3: Agent todo list
   - [ ] make sure in case it renders, it won't be buggy

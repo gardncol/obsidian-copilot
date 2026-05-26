@@ -28,6 +28,13 @@ for now — the picker will be migrated to the new registry in a later PR.
 Until then, providers/models added via the BYOK tab won't appear in the
 default-chat-model dropdown.
 
+> **Status (still open):** This item is about the **chat-mode** picker only.
+> The **agent-backend** curation (opencode / claude-code / codex) has been
+> fully migrated off the legacy `activeModels` + `modelEnabledOverrides` path
+> to the new `backends.<agentType>.enabledModels` registry. The chat-mode `BasicSettings`
+> / `chatModelManager` migration remains future work and is unchanged by that
+> effort.
+
 ## Legacy → new migration (incl. `catalogProviderId` backfill)
 
 The new registry (`Provider` / `ConfiguredModel`) is populated only when a

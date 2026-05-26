@@ -106,7 +106,7 @@ describe("ProviderRegistry", () => {
     await registry.add({
       providerType: "anthropic",
       displayName: "B",
-      origin: { kind: "agent", agentType: "claude-code" },
+      origin: { kind: "agent", agentType: "claude" },
     });
     const list1 = registry.list();
     const list2 = registry.list();
@@ -150,7 +150,7 @@ describe("ProviderRegistry", () => {
         providerId: "hacked",
         addedAt: 1,
         providerType: "openai",
-        origin: { kind: "agent", agentType: "claude-code" },
+        origin: { kind: "agent", agentType: "claude" },
       } as Record<string, unknown>),
     });
     const row = registry.get(id)!;

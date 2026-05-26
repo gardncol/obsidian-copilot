@@ -1,13 +1,11 @@
 import { Notice } from "obsidian";
 import { logError } from "@/logger";
 import type { ModelSelectorEntry } from "@/components/ui/ModelSelector";
-import { isAgentModelEnabledOrKept } from "@/agentMode/session/modelEnable";
 import type { AgentSession } from "@/agentMode/session/AgentSession";
 import type { AgentChatUIState } from "@/agentMode/session/AgentChatUIState";
 import type { AgentSessionManager } from "@/agentMode/session/AgentSessionManager";
 import { MethodUnsupportedError } from "@/agentMode/session/errors";
 import { backendRegistry } from "@/agentMode/backends/registry";
-import { getBackendModelOverrides } from "@/agentMode/session/backendSettingsAccess";
 import { getModelKeyFromModel } from "@/settings/model";
 import type { CopilotSettings } from "@/settings/model";
 import type {
@@ -55,10 +53,10 @@ export function handlePickerSwitchError(err: unknown, action: "model" | "effort"
 export const AGENT_PROVIDER = "agent";
 
 /**
- * Append one backend's section to the picker. Entries are synthesized from
- * the backend's catalog (`backendModels`) gated by the user's per-model
- * overrides; the active session's selection is preserved via
- * `keepBaseModelId` so curation never strands it.
+ * Append one backend's section to the picker: its reported catalog filtered to
+ * the backend's enabled set (`getEnabledBaseModelIds`). The active session's
+ * selection is always kept via `keepBaseModelId` so curation never strands it.
+ * A descriptor returning `null` is treated as an empty enabled set.
  */
 export function appendBackendSection(
   entries: ModelSelectorEntry[],
@@ -66,19 +64,17 @@ export function appendBackendSection(
   ctx: {
     /** Translator-produced entries from `state.model.availableModels`. */
     backendModels: ReadonlyArray<ModelEntry> | null;
-    overrides: Record<string, boolean> | undefined;
     /** baseModelId of the active session — never filtered out. */
     keepBaseModelId: string | null;
+    /** Current settings — read by `getEnabledBaseModelIds`. */
+    settings: CopilotSettings;
   }
 ): void {
   if (!ctx.backendModels) return;
-  const filtered = ctx.backendModels.filter((entry) =>
-    isAgentModelEnabledOrKept(
-      descriptor,
-      { modelId: entry.baseModelId, name: entry.name },
-      ctx.overrides,
-      ctx.keepBaseModelId
-    )
+  const enabledSet = descriptor.getEnabledBaseModelIds?.(ctx.settings) ?? null;
+  const filtered = ctx.backendModels.filter(
+    (entry) =>
+      enabledSet?.has(entry.baseModelId) === true || entry.baseModelId === ctx.keepBaseModelId
   );
   for (const m of filtered) {
     entries.push(synthesizeAgentEntry(m.baseModelId, m.name, descriptor));
@@ -191,8 +187,8 @@ export function buildPickerEntries(
     const backendModels = cached?.model?.availableModels ?? null;
     appendBackendSection(entries, descriptor, {
       backendModels,
-      overrides: getBackendModelOverrides(settings, descriptor.id),
       keepBaseModelId,
+      settings,
     });
     // No catalog cached yet (and not because the agent intentionally
     // omitted a model state). Show a per-backend loading / failure row so

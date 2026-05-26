@@ -207,7 +207,7 @@ export interface BackendState {
 /**
  * One model entry as reported by a backend. Mirrors ACP `ModelInfo` shape
  * but is owned by `session/` so backends and descriptors share a single
- * vocabulary. Used by `isModelEnabledByDefault`.
+ * vocabulary.
  */
 export interface BackendModelInfo {
   modelId: string;
@@ -244,7 +244,7 @@ export interface RawModeState {
 }
 
 /**
- * One configuration option a backend exposes (e.g. claude-code's "effort"
+ * One configuration option a backend exposes (e.g. claude's "effort"
  * select). Structurally mirrors ACP `SessionConfigOption`. Used as input
  * to `descriptor.getModeMapping` (configOption-mode style) and produced
  * by `ModelWireCodec.effortConfigFor` for descriptor-style effort.

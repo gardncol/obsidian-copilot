@@ -261,7 +261,7 @@ export class AgentSessionManager {
     this.notify();
 
     // Once the ACP session is ready, apply backend-specific persisted state
-    // (claude-code's effort, future config-option preferences) and clear the
+    // (claude's effort, future config-option preferences) and clear the
     // "starting" pill. On failure, capture into `lastError` so the status
     // surface and retry handler can react. The session itself transitions to
     // status "error" inside its own `initialize`. For warm-adopted sessions

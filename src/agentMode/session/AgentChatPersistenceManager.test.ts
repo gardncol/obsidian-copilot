@@ -112,12 +112,12 @@ describe("AgentChatPersistenceManager", () => {
 
   it("round-trips messages, backendId, and label", async () => {
     const messages = [makeMessage(USER_SENDER, "hello world"), makeMessage(AI_SENDER, "hi back")];
-    const saved = await manager.saveSession(messages, "claude-code", { label: "My chat" });
+    const saved = await manager.saveSession(messages, "claude", { label: "My chat" });
     expect(saved).not.toBeNull();
 
     const file = app.files.get(saved!.path)!;
     const loaded = await manager.loadFile(file as unknown as TFile);
-    expect(loaded.backendId).toBe("claude-code");
+    expect(loaded.backendId).toBe("claude");
     expect(loaded.label).toBe("My chat");
     expect(loaded.messages).toHaveLength(2);
     expect(loaded.messages[0].sender).toBe(USER_SENDER);
@@ -164,7 +164,7 @@ describe("AgentChatPersistenceManager", () => {
       makeMessage(USER_SENDER, "first", 1700000000000),
       makeMessage(AI_SENDER, "second", 1700000000001),
     ];
-    const saved = await manager.saveSession(messages, "claude-code");
+    const saved = await manager.saveSession(messages, "claude");
     const file = app.files.get(saved!.path)!;
 
     const loadedA = await manager.loadFile(file as unknown as TFile);

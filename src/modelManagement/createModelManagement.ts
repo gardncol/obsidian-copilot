@@ -1,7 +1,7 @@
 /**
  * Top-level factory + cross-slice coordinator.
  *
- * Host code calls `createModelManagement({ app, pluginDir })` exactly
+ * Host code calls `createModelManagement({ app })` exactly
  * once (in `Plugin.onload`), stores the returned `ModelManagementApi`
  * on the plugin instance, threads it into React via
  * `<ModelManagementProvider>`, and passes it to non-React modules
@@ -37,9 +37,6 @@ import { CopilotPlusSetupApi } from "@/modelManagement/setup/CopilotPlusSetupApi
 
 export interface CreateModelManagementInput {
   app: App;
-  /** From `Plugin.manifest.dir`. Used by `CatalogDownloadService` to
-   *  locate its on-disk JSON cache. */
-  pluginDir: string;
 }
 
 export interface ModelManagementApi {
@@ -104,16 +101,13 @@ export class ModelManagementCoordinator {
   }
 
   /**
-   * Cascade:
-   *   1. Drop the id from every BackendConfig.
-   *   2. Remove the ConfiguredModel row.
-   *
-   * TODO(byok): implemented when the UI surfaces per-model removal.
+   * Drop a configured model and its backend refs. Refs are cleared first so
+   * `resolveEnabled` never briefly surfaces the model as broken. Idempotent —
+   * removing an unknown id is a no-op.
    */
-  removeConfiguredModel(configuredModelId: string): Promise<void> {
-    throw new Error(
-      "[modelManagement] ModelManagementCoordinator.removeConfiguredModel not implemented yet"
-    );
+  async removeConfiguredModel(configuredModelId: string): Promise<void> {
+    await this.#backends.removeRefs([configuredModelId]);
+    await this.#models.remove(configuredModelId);
   }
 }
 
@@ -127,11 +121,11 @@ export class ModelManagementCoordinator {
  * singleton, no reset helpers needed.
  */
 export function createModelManagement(input: CreateModelManagementInput): ModelManagementApi {
-  const { app, pluginDir } = input;
+  const { app } = input;
 
   const adapters = createDefaultAdapterRegistry();
 
-  const catalogService = new CatalogDownloadService({ app, pluginDir });
+  const catalogService = new CatalogDownloadService({ app });
   const providerRegistry = new ProviderRegistry(app, adapters);
   const configuredModelRegistry = new ConfiguredModelRegistry();
   const backendConfigRegistry = new BackendConfigRegistry(

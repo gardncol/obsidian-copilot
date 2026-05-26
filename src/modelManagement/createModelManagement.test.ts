@@ -125,3 +125,71 @@ describe("ModelManagementCoordinator.removeProvider", () => {
     expect(getSettings().backends).toEqual({});
   });
 });
+
+describe("ModelManagementCoordinator.removeConfiguredModel", () => {
+  let coordinator: ModelManagementCoordinator;
+  let providers: ProviderRegistry;
+  let models: ConfiguredModelRegistry;
+  let backends: BackendConfigRegistry;
+
+  beforeEach(() => {
+    resetSettings();
+    KeychainService.resetInstance();
+    const app = makeFakeApp();
+    KeychainService.getInstance(app);
+    providers = new ProviderRegistry(app, new ProviderAdapterRegistry());
+    models = new ConfiguredModelRegistry();
+    backends = new BackendConfigRegistry(providers, models);
+    coordinator = new ModelManagementCoordinator(providers, models, backends);
+  });
+
+  it("removes the model row and drops its refs from every backend", async () => {
+    const providerId = await providers.add({
+      providerType: "anthropic",
+      displayName: "Anthropic",
+      origin: { kind: "byok" },
+    });
+    const id1 = await models.add({
+      providerId,
+      info: { id: "claude-sonnet-4-5", displayName: "Sonnet" },
+    });
+    const id2 = await models.add({
+      providerId,
+      info: { id: "claude-opus-4-5", displayName: "Opus" },
+    });
+    await backends.setEnabledModels("chat", [id1, id2]);
+    await backends.setDefaultModel("chat", id1);
+    await backends.setEnabledModels("opencode", [id1]);
+
+    await coordinator.removeConfiguredModel(id1);
+
+    // The target row is gone; the sibling row survives.
+    expect(models.get(id1)).toBeUndefined();
+    expect(models.get(id2)).toBeDefined();
+    // Refs dropped from every backend; the default that pointed at it
+    // becomes null.
+    expect(backends.get("chat").enabledModels).toEqual([id2]);
+    expect(backends.get("chat").defaultModel).toBeNull();
+    expect(backends.get("opencode").enabledModels).toEqual([]);
+    // The provider row is untouched (per-model removal, not per-provider).
+    expect(providers.get(providerId)).toBeDefined();
+  });
+
+  it("is a no-op for an id that doesn't exist", async () => {
+    const providerId = await providers.add({
+      providerType: "google",
+      displayName: "G",
+      origin: { kind: "byok" },
+    });
+    const id = await models.add({
+      providerId,
+      info: { id: "gemini", displayName: "Gemini" },
+    });
+    await backends.setEnabledModels("chat", [id]);
+
+    await coordinator.removeConfiguredModel("does-not-exist");
+
+    expect(models.get(id)).toBeDefined();
+    expect(backends.get("chat").enabledModels).toEqual([id]);
+  });
+});
