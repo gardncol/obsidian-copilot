@@ -13,6 +13,7 @@ import {
   SkillManager,
   type AgentSessionManager,
 } from "@/agentMode";
+import { wireAgentModelDiscovery } from "@/agentMode/agentModelDiscovery";
 import { BrevilabsClient } from "@/LLMProviders/brevilabsClient";
 import ProjectManager from "@/LLMProviders/projectManager";
 import {
@@ -119,6 +120,7 @@ export default class CopilotPlugin extends Plugin {
   settingsUnsubscriber?: () => void;
   chatUIState: ChatManagerChatUIState;
   agentSessionManager?: AgentSessionManager;
+  private agentModelDiscoveryUnsubscriber?: () => void;
   modelManagement!: ModelManagementApi;
   private ribbonIconEl?: HTMLElement;
   userMemoryManager: UserMemoryManager;
@@ -145,7 +147,6 @@ export default class CopilotPlugin extends Plugin {
     await this.loadSettings();
     this.modelManagement = createModelManagement({
       app: this.app,
-      pluginDir: this.manifest.dir ?? "",
     });
     this.settingsUnsubscriber = subscribeToSettingsChange((prev, next) => {
       void (async () => {
@@ -186,6 +187,12 @@ export default class CopilotPlugin extends Plugin {
     // Initialize Agent Mode coordinator (desktop only — ACP needs subprocess support).
     if (!Platform.isMobile) {
       this.agentSessionManager = createAgentSessionManager(this.app, this);
+      // Enroll agent-reported models on probe settle, even when the settings
+      // tab is closed. See `agentModelDiscovery.ts`.
+      this.agentModelDiscoveryUnsubscriber = wireAgentModelDiscovery(
+        this,
+        this.agentSessionManager
+      );
     }
 
     // Always construct VectorStoreManager; it internally no-ops when semantic search is disabled
@@ -334,6 +341,7 @@ export default class CopilotPlugin extends Plugin {
       this.projectManager.onunload();
     }
 
+    this.agentModelDiscoveryUnsubscriber?.();
     await this.agentSessionManager?.shutdown();
 
     // Cleanup VaultDataManager event listeners

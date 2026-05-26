@@ -1,7 +1,8 @@
 import { BREVILABS_MODELS_BASE_URL, ChatModelProviders } from "@/constants";
-import { getDecryptedKey } from "@/encryptionService";
-import { logInfo, logWarn } from "@/logger";
+import { logInfo } from "@/logger";
 import { getSettings } from "@/settings/model";
+import type { CopilotSettings } from "@/settings/model";
+import type { BackendConfigRegistry, ProviderRegistry } from "@/modelManagement";
 import { AcpBackend, AcpSpawnDescriptor } from "@/agentMode/acp/types";
 import type { CopilotMode } from "@/agentMode/session/types";
 import {
@@ -13,18 +14,13 @@ import {
   SkillManager,
 } from "@/agentMode/skills";
 import { OpencodeBackendDescriptor } from "./descriptor";
+import { COPILOT_PLUS_OPENCODE_PROVIDER_ID, mapProviderToOpencodeId } from "./opencodeModelResolve";
 import { selectCopilotPrompt } from "./prompts";
 
 /**
- * Map from Copilot's `ChatModelProviders` enum value (as stored in
- * `CustomModel.provider`) to OpenCode's provider id (as it appears in
- * OpenCode's `availableModels` and config). Only providers in this map are
- * routable through OpenCode; everything else (Azure, Bedrock, Ollama,
- * LM Studio, GitHub Copilot, etc.) is filtered out of the picker.
- *
- * Copilot Plus is handled separately because it isn't a built-in OpenCode
- * provider — we register it as a custom `@ai-sdk/openai-compatible` entry
- * pointing at brevilabs and authed via the user's `plusLicenseKey`.
+ * Maps Copilot's `ChatModelProviders` to OpenCode's provider id. Used for the
+ * picker's wire-codec provider-grouping; config injection derives provider ids
+ * from the data model via `mapProviderToOpencodeId` instead.
  */
 export const OPENCODE_PROVIDER_MAP: Partial<Record<ChatModelProviders, string>> = {
   [ChatModelProviders.ANTHROPIC]: "anthropic",
@@ -37,9 +33,6 @@ export const OPENCODE_PROVIDER_MAP: Partial<Record<ChatModelProviders, string>> 
   [ChatModelProviders.XAI]: "xai",
   [ChatModelProviders.COPILOT_PLUS]: "copilot-plus",
 };
-
-/** OpenCode provider id reserved for Copilot Plus's brevilabs proxy. */
-const COPILOT_PLUS_PROVIDER_ID = "copilot-plus";
 
 /**
  * Custom OpenCode agent id provisioned via `OPENCODE_CONFIG_CONTENT`. Maps
@@ -64,16 +57,26 @@ export const OPENCODE_CANONICAL_MODE_AGENT_IDS: Partial<Record<CopilotMode, stri
   auto: OPENCODE_BUILTIN_BUILD_AGENT_ID,
 };
 
+/** Registries `buildOpencodeConfig` needs; injected so it stays unit-testable with plain mocks. */
+export interface OpencodeModelDeps {
+  providerRegistry: ProviderRegistry;
+  backendConfigRegistry: BackendConfigRegistry;
+}
+
 /**
- * Spawns `opencode acp --cwd <vault>` with `OPENCODE_CONFIG_CONTENT`
- * containing decrypted BYOK keys pulled from the existing Copilot settings.
- *
- * Reuses Copilot's top-level `*ApiKey` fields so users don't have to re-enter
- * them in an Agent Mode-specific settings panel.
+ * Spawns `opencode acp --cwd <vault>` with an `OPENCODE_CONFIG_CONTENT` payload
+ * built from the user's enabled BYOK models. The registries are injected by the
+ * descriptor from `plugin.modelManagement`.
  */
 export class OpencodeBackend implements AcpBackend {
   readonly id = "opencode" as const;
   readonly displayName = "opencode";
+
+  readonly #deps: OpencodeModelDeps;
+
+  constructor(deps: OpencodeModelDeps) {
+    this.#deps = deps;
+  }
 
   async buildSpawnDescriptor(ctx: { vaultBasePath: string }): Promise<AcpSpawnDescriptor> {
     const binaryPath = getSettings().agentMode?.backends?.opencode?.binaryPath;
@@ -83,7 +86,7 @@ export class OpencodeBackend implements AcpBackend {
       );
     }
 
-    const config = await buildOpencodeConfig();
+    const config = await buildOpencodeConfig(getSettings(), this.#deps);
     const envOverrides = getSettings().agentMode?.backends?.opencode?.envOverrides ?? {};
 
     return {
@@ -100,102 +103,66 @@ export class OpencodeBackend implements AcpBackend {
   }
 }
 
+/** Mutable opencode provider config entry built into `OPENCODE_CONFIG_CONTENT`. */
+type ProviderConfig = {
+  npm?: string;
+  name?: string;
+  options?: { apiKey?: string; baseURL?: string; headers?: Record<string, string> };
+  models?: Record<string, Record<string, unknown>>;
+};
+
 /**
- * Build the `OPENCODE_CONFIG_CONTENT` payload from current Copilot settings.
+ * Build the `OPENCODE_CONFIG_CONTENT` payload from the enabled opencode models.
+ * Each non-native (BYOK / Plus) provider is registered with its keychain key
+ * and its models; native (agent-origin) providers are skipped since opencode
+ * already hosts them. The top-level `model` field carries the user's sticky
+ * preference so a fresh session boots with the right default.
  *
- *   - Per-provider `options.apiKey` is set for any BYOK key configured in
- *     Copilot, decrypted in-process.
- *   - Each enabled `activeModel` whose provider is in `OPENCODE_PROVIDER_MAP`
- *     is registered under `provider.<id>.models.<modelName>` so OpenCode
- *     reports it in `NewSessionResponse.models.availableModels`. Built-in
- *     providers (anthropic, openai, …) carry their own models.dev snapshot
- *     so this is largely additive there; for the custom Copilot Plus
- *     provider — and for OpenRouter models the snapshot doesn't cover —
- *     the registration is what makes the model visible at all. The
- *     Agents-tab catalog modal then curates from opencode's reported
- *     `availableModels`.
- *   - The top-level `model` field carries the user's sticky preference so
- *     a fresh session boots with the right default, even before
- *     `unstable_setSessionModel` is called.
- *
- * Exported for unit tests.
+ * Takes settings + registries as parameters (no singletons) so it stays
+ * unit-testable.
  */
-export async function buildOpencodeConfig(): Promise<Record<string, unknown>> {
-  const s = getSettings();
+export async function buildOpencodeConfig(
+  s: CopilotSettings,
+  deps: OpencodeModelDeps
+): Promise<Record<string, unknown>> {
+  const { providerRegistry, backendConfigRegistry } = deps;
 
-  type Mapping = { providerId: string; settingsKey: keyof typeof s };
-  const mappings: Mapping[] = [
-    { providerId: "anthropic", settingsKey: "anthropicApiKey" },
-    { providerId: "openai", settingsKey: "openAIApiKey" },
-    { providerId: "google", settingsKey: "googleApiKey" },
-    { providerId: "groq", settingsKey: "groqApiKey" },
-    { providerId: "mistral", settingsKey: "mistralApiKey" },
-    { providerId: "deepseek", settingsKey: "deepseekApiKey" },
-    { providerId: "openrouter", settingsKey: "openRouterAiApiKey" },
-    { providerId: "xai", settingsKey: "xaiApiKey" },
-  ];
-
-  const decrypted = await Promise.all(
-    mappings.map(async (m) => {
-      const raw = s[m.settingsKey];
-      if (typeof raw !== "string" || !raw) return null;
-      const apiKey = await getDecryptedKey(raw);
-      if (!apiKey) return null;
-      return { providerId: m.providerId, apiKey };
-    })
-  );
-
-  type ProviderConfig = {
-    npm?: string;
-    name?: string;
-    options?: { apiKey?: string; baseURL?: string; headers?: Record<string, string> };
-    models?: Record<string, Record<string, unknown>>;
-  };
   const provider: Record<string, ProviderConfig> = {};
-  for (const entry of decrypted) {
-    if (entry) provider[entry.providerId] = { options: { apiKey: entry.apiKey } };
-  }
-
-  // Copilot Plus speaks OpenAI's wire format but isn't a built-in OpenCode
-  // provider. Register it as a custom `@ai-sdk/openai-compatible` entry
-  // pointing at brevilabs and authed via the user's `plusLicenseKey`.
-  if (typeof s.plusLicenseKey === "string" && s.plusLicenseKey) {
-    const licenseKey = await getDecryptedKey(s.plusLicenseKey);
-    if (licenseKey) {
-      provider[COPILOT_PLUS_PROVIDER_ID] = {
-        npm: "@ai-sdk/openai-compatible",
-        name: "Copilot Plus",
-        options: { baseURL: BREVILABS_MODELS_BASE_URL, apiKey: licenseKey },
-      };
-    }
-  }
-
-  // Register Copilot-configured models under their respective providers so
-  // OpenCode treats them as known when reporting `availableModels`. When the
-  // top-level provider key is absent, fall back to the per-model `apiKey` so
-  // models the user configured with a model-specific key still reach the
-  // agent. Without this fallback any such model would be silently dropped.
   const injected: string[] = [];
-  for (const model of s.activeModels ?? []) {
-    if (!model.enabled) continue;
-    if (model.isEmbeddingModel) continue;
-    const providerId = OPENCODE_PROVIDER_MAP[model.provider as ChatModelProviders];
-    if (!providerId) continue;
 
-    if (!provider[providerId]) {
-      const perModel = model.apiKey ? await getDecryptedKey(model.apiKey) : null;
-      if (!perModel) {
-        logWarn(
-          `[AgentMode] skipping ${model.provider}/${model.name}: no API key (set the provider key in Copilot settings or on the model itself)`
+  for (const entry of backendConfigRegistry.resolveEnabled("opencode")) {
+    if (entry.state !== "ok") continue;
+    const mapping = mapProviderToOpencodeId(entry.provider);
+    if (!mapping) continue;
+    // opencode hosts native (agent-origin) providers itself, so never register them.
+    if (mapping.native) continue;
+
+    let providerConfig = provider[mapping.id];
+    if (!providerConfig) {
+      const apiKey = await providerRegistry.getApiKey(entry.provider.providerId);
+      if (!apiKey) {
+        logInfo(
+          `[AgentMode] skipping ${mapping.id}/${entry.configuredModel.info.id}: no API key in keychain`
         );
         continue;
       }
-      provider[providerId] = { options: { apiKey: perModel } };
+      if (mapping.id === COPILOT_PLUS_OPENCODE_PROVIDER_ID) {
+        // Copilot Plus speaks OpenAI's wire format but isn't a built-in opencode
+        // provider, so register it as a custom `@ai-sdk/openai-compatible` entry.
+        providerConfig = {
+          npm: "@ai-sdk/openai-compatible",
+          name: "Copilot Plus",
+          options: { baseURL: BREVILABS_MODELS_BASE_URL, apiKey },
+        };
+      } else {
+        providerConfig = { options: { apiKey } };
+      }
+      provider[mapping.id] = providerConfig;
     }
 
-    if (!provider[providerId].models) provider[providerId].models = {};
-    provider[providerId].models[model.name] = {};
-    injected.push(`${providerId}/${model.name}`);
+    if (!providerConfig.models) providerConfig.models = {};
+    providerConfig.models[entry.configuredModel.info.id] = {};
+    injected.push(`${mapping.id}/${entry.configuredModel.info.id}`);
   }
 
   if (injected.length > 0) {
@@ -204,7 +171,7 @@ export async function buildOpencodeConfig(): Promise<Record<string, unknown>> {
     );
   } else if (Object.keys(provider).length === 0) {
     logInfo(
-      "[AgentMode] no BYOK keys found; opencode will rely on its own auth. Set provider keys in Copilot settings to use Agent Mode end-to-end."
+      "[AgentMode] no enabled BYOK models found; opencode will rely on its own auth. Add and enable models for opencode in Copilot settings to use Agent Mode end-to-end."
     );
   }
 

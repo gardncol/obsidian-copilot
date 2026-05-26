@@ -12,6 +12,7 @@ import {
   OPENCODE_PROVIDER_MAP,
 } from "./OpencodeBackend";
 import { computeInstallState, OpencodeBinaryManager } from "./OpencodeBinaryManager";
+import { opencodeEnabledWireIds } from "./opencodeModelResolve";
 import { OpencodeSettingsPanel } from "./OpencodeSettingsPanel";
 import { mapNodeArch, mapNodePlatform } from "./platformResolver";
 import type { AgentSession } from "@/agentMode/session/AgentSession";
@@ -95,6 +96,10 @@ export const OpencodeBackendDescriptor: BackendDescriptor = {
   restartOnManagedSkillsChange: true,
   wire: opencodeWire,
 
+  getEnabledBaseModelIds(settings: CopilotSettings): ReadonlySet<string> {
+    return opencodeEnabledWireIds(settings);
+  },
+
   getInstallState(settings: CopilotSettings): InstallState {
     const raw = computeInstallState(settings.agentMode?.backends?.opencode);
     if (raw.kind === "absent") return { kind: "absent" };
@@ -121,20 +126,17 @@ export const OpencodeBackendDescriptor: BackendDescriptor = {
   },
 
   createBackendProcess(args): BackendProcess {
-    return simpleBinaryBackendProcess(args, new OpencodeBackend());
+    const { providerRegistry, backendConfigRegistry } = args.plugin.modelManagement;
+    return simpleBinaryBackendProcess(
+      args,
+      new OpencodeBackend({ providerRegistry, backendConfigRegistry })
+    );
   },
 
   SettingsPanel: OpencodeSettingsPanel,
 
   async onPluginLoad(plugin: CopilotPlugin): Promise<void> {
     await getOpencodeBinaryManager(plugin).refreshInstallState();
-  },
-
-  isModelEnabledByDefault(model) {
-    // Default-enable only "Big Pickle"; users widen the catalog via the
-    // per-model toggles in the Agents tab.
-    const re = /big[\s_-]*pickle/i;
-    return re.test(model.name) || re.test(model.modelId);
   },
 
   getProbeSessionId(settings: CopilotSettings): string | undefined {

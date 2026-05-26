@@ -6,7 +6,6 @@ import type { AgentSession } from "@/agentMode/session/AgentSession";
 import type {
   BackendConfigOption,
   BackendId,
-  BackendModelInfo,
   BackendProcess,
   ModelSelection,
   ModelWireCodec,
@@ -28,6 +27,11 @@ export type InstallState =
  * edits to session or UI.
  */
 export interface BackendDescriptor {
+  /**
+   * Stable backend identifier. Doubles as the model-management `AgentType`
+   * for agent backends — every agent-discovered model enrolls under this id,
+   * and `agentModelDiscovery` narrows it to `AgentType` at that seam.
+   */
   readonly id: BackendId;
   readonly displayName: string;
 
@@ -156,24 +160,21 @@ export interface BackendDescriptor {
   isPlanModePlanFilePath?(absolutePath: string, cwd: string | null | undefined): boolean;
 
   /**
-   * Optional: default enable/disable policy for an agent-reported model when
-   * the user has no explicit `modelEnabledOverrides` entry. Returning `true`
-   * surfaces the model in the chat picker and the settings tab; `false`
-   * hides it. Omit to default-enable every agent-reported model.
-   *
-   * Used as a no-config curation knob — Codex and Opencode advertise large
-   * catalogs and we ship with one-model defaults; Claude Code defaults to
-   * showing all reported models.
-   */
-  isModelEnabledByDefault?(model: BackendModelInfo): boolean;
-
-  /**
    * Optional: previously-stored sessionId of the backend's dedicated
    * "probe session", used by `AgentModelPreloader` to enumerate live models
    * across plugin reloads without accumulating one fresh agent-side session
    * record per startup. Returns `undefined` when no probe has run yet.
    */
   getProbeSessionId?(settings: CopilotSettings): string | undefined;
+
+  /**
+   * Optional: the backend's enabled set as wire baseModelIds, which the chat
+   * picker matches against the reported catalog. The signature is limited to
+   * `CopilotSettings` so `session/` stays free of `@/modelManagement` — the
+   * backend implements the join. `null` opts out: the picker then keeps only
+   * the active session's selection.
+   */
+  getEnabledBaseModelIds?(settings: CopilotSettings): ReadonlySet<string> | null;
 
   /**
    * Optional: persist the probe sessionId returned by a successful

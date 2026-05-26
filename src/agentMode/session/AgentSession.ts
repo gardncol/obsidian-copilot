@@ -439,7 +439,7 @@ export class AgentSession {
   }
 
   /**
-   * Switch the active session mode (claude-code permission mode, codex
+   * Switch the active session mode (claude permission mode, codex
    * sandbox preset, etc.). On success, replaces the cached state and
    * notifies `onModelChanged` listeners.
    *

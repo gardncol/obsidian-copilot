@@ -4,67 +4,95 @@
   - [x] Load chat history from agents
   - [x] Save chat history to notes
 - [x] P0: Thoroughly assess whether migrating to Anthropic agent SDK is worth it.
-- [ ] P0: [Validate Agent Mode end-to-end on Windows](https://github.com/logancyang/obsidian-copilot-preview/issues/58)
+- [ ] P0: Test Windows devices
 - [x] P0: Make sure bash command shows what command it runs (visibility)
-- [ ] P0: [Upgrade pinned opencode to latest version](https://github.com/logancyang/obsidian-copilot-preview/issues/59)
-- [ ] P0: [Pass copilot built-in system prompt / user provided system prompt to agents](https://github.com/logancyang/obsidian-copilot-preview/issues/61)
-- [ ] P0: [Test sandbox mode](https://github.com/logancyang/obsidian-copilot-preview/issues/60)
+- [ ] P0: Provide copilot specific system prompt
+  - [ ] Allow users to share system prompt
+  - [ ] Do a quick spike on the concrete behavior
+  - [ ] Investigate opencode provider specific prompt
 - [x] P0: Skills
   - [x] Check out cc-switch to understand how to make skills compatible cross other agents https://github.com/farion1231/cc-switch
 - [x] P0: Permission management
   - [x] Permission UI improvement
-- [x] P0: How to design the settings to configure the provider?
+- [ ] P0: How to design the settings to configure the provider?
   - [x] Redesign the model settings - discussed on May 7 group meeting
   - [x] support self host model
   - [x] remove built-in models
-  - [x] migrate existing models to the new format
-- [ ] P0: [Test opencode works well with local models](https://github.com/logancyang/obsidian-copilot-preview/issues/63)
-- [ ] P0: [Test migration (skill, model) to make sure no unrecoverable migration is introduced in pre-release](https://github.com/logancyang/obsidian-copilot-preview/issues/64)
-- [ ] P0: [非migrate的skill最好能直接引用,同名的skill如果内容一样migrate可以做得更好](https://github.com/logancyang/obsidian-copilot-preview/issues/62)
+- [ ] P0: Test opencode works well with local models
+- [ ] P0: 非migrate的skill最好能直接引用,同名的skill如果内容一样migrate可以做得更好
 - [x] P0: Auto-save chat history controls
 - [x] P0: Support image context
-- [ ] P1: [Support claude code authentication](https://github.com/logancyang/obsidian-copilot-preview/issues/65)
-- [ ] P1: [Better binary detection](https://github.com/logancyang/obsidian-copilot-preview/issues/66)
-- [ ] P1: [MCP management](https://github.com/logancyang/obsidian-copilot-preview/issues/67)
-- [ ] P1: [Support oauth for MCP servers](https://github.com/logancyang/obsidian-copilot-preview/issues/68)
-- [ ] P1: [Support setting MCP by copy pasting JSON blobs](https://github.com/logancyang/obsidian-copilot-preview/issues/70)
-- [ ] P1: [Fix broken legacy agent mode](https://github.com/logancyang/obsidian-copilot-preview/issues/69)
+- [ ] P1: MCP
+  - Basic functionality is ready
+  - [ ] P1: Surface externally-managed MCP servers (claude.ai remote, plugin-provided) — see [MCP_EXTERNALLY_MANAGED_SERVERS.md](./MCP_EXTERNALLY_MANAGED_SERVERS.md)
+  - [ ] P1: Support oauth for MCP servers (the one example that I tested didn't work)
+  - [ ] P1: Support setting MCP by copy pasting JSON blobs
+- [ ] P1: Fix broken legacy agent mode
+  - [ ] Can we only support basic chat - not now but eventually yes
 - [x] P1: [BUG] Check active note path. Sometimes the agent will start from a path that does not exist
 - [x] P1: [Performance] Updating skills settings is laggy
-- [ ] P1: [Make AskUserQuestion tool show questions inline in the chat like permission instead of in a dialog](https://github.com/logancyang/obsidian-copilot-preview/issues/71)
-- [ ] P1: [Citation](https://github.com/logancyang/obsidian-copilot-preview/issues/72)
-- [ ] P1: [Edit diff UI](https://github.com/logancyang/obsidian-copilot-preview/issues/73)
-- [ ] P1: [Fix session title for claude code agent](https://github.com/logancyang/obsidian-copilot-preview/issues/75)
-- [ ] P1: [Agent upgrade detection and helper UI in settings](https://github.com/logancyang/obsidian-copilot-preview/issues/76)
-- [ ] P1: [Forward web-source context to the agent](https://github.com/logancyang/obsidian-copilot-preview/issues/77)
-- [ ] P1: [Move PDF parsing into an agent tool](https://github.com/logancyang/obsidian-copilot-preview/issues/79)
-- [ ] P1: [Token counter](https://github.com/logancyang/obsidian-copilot-preview/issues/78)
-- P1: Integrate copilot plus tool calls (convert them to skills)
-  - [ ] [vault search (make it work with Miyo)](https://github.com/logancyang/obsidian-copilot-preview/issues/82)
-  - [ ] [web search (paid feature only)](https://github.com/logancyang/obsidian-copilot-preview/issues/80)
-  - [ ] [deprecate "edit" and "composer"](https://github.com/logancyang/obsidian-copilot-preview/issues/81)
-  - [ ] [youtube transcription (paid feature only)](https://github.com/logancyang/obsidian-copilot-preview/issues/83)
-  - [ ] [obsidian CLI](https://github.com/logancyang/obsidian-copilot-preview/issues/84)
-- [ ] P1: [support compaction](https://github.com/logancyang/obsidian-copilot-preview/issues/87)
-- [ ] P1: [Allow comment in plan mode](https://github.com/logancyang/obsidian-copilot-preview/issues/86)
-- [ ] P1: [Project mode](https://github.com/logancyang/obsidian-copilot-preview/issues/85)
-- [ ] P1: [Move relevant notes to its own view](https://github.com/logancyang/obsidian-copilot-preview/issues/88)
-- [ ] P1: [Settings page revamp](https://github.com/logancyang/obsidian-copilot-preview/issues/89)
-- [ ] P2: [Support subscriptions that work with opencode (kimi code)](https://github.com/logancyang/obsidian-copilot-preview/issues/91)
-- [ ] P2: [Claude vscode plugin add comment to plan capability](https://github.com/logancyang/obsidian-copilot-preview/issues/90)
+- [ ] P1: Make askuserquestion tool show questions inline in the chat.
+- [ ] P1: Improve binary detection
+- [ ] P1: Citation
+  - [ ] a tool to let agent call citation
+- [ ] P1: Content type support (image, audio) - https://agentclientprotocol.com/protocol/content
+- [ ] P1: Edit diff UI - https://agentclientprotocol.com/protocol/tool-calls#diffs
+  - The edit diff should be based on well rendered markdown, not raw markdown file. For example, table is impossible to understand the diff with the raw format
+- [ ] P1: Thoroughly test opencode, codex, and claude code with different test cases
+  - [ ] Create sample vaults for test cases.
+- [ ] P1: Fix session title for claude code agent
+- [ ] P1: Agent upgrade detection and helper UI in settings
+- [ ] P1: Forward web-source context to the agent
+  - The agent should be able to access the content of the rendered tab
+  - Right-click "Add to Copilot context" excerpts from web tabs and the
+    "include active web tab" toggle currently surface a Notice and are
+    dropped before the prompt is built. Wire them into the
+    `<copilot-context>` envelope (e.g. a `Web excerpts:` section with
+    `title (url): content`) so the agent can actually read them.
+- [ ] P1: Move PDF parsing into an agent tool
+  - Inline PDF parsing during send can take too long and blocks the user
+    before the agent starts. Keep PDF attachments as vault paths for the
+    built-in Read tool for now, then expose Copilot PDF parsing as an
+    explicit tool the agent can call when it needs extracted PDF text.
+- [ ] P1: Token counter
+  - To know how many context is left in the current session
+  - Nice-to-have: Cost estimate
+- [ ] P1: Integrate copilot plus tool calls (convert them to skills)
+  - [ ] vault search (make it work with Miyo)
+    - may want to rename
+    - challenge - how to enable it in an agent
+    - challenge - agentic search often is better than RAG, how does the agent know when to trigger it
+    - we don't need index-free search
+  - [ ] web search (paid feature only)
+  - [ ] ~~edit~~
+  - [ ] youtube transcription (paid feature only)
+  - [ ] obsidian CLI
+- [ ] P1: Opencode plan mode fine-tuning
+- [ ] P1: compaction
+  - [ ] manual trigger
+  - [ ] configure when to auto compact
+- [ ] P1: Project mode
+- [ ] P2: Inherit model effort from previous model when selecting a new model in the picker
+  - It's quite tedious today that sometimes the effort will drop to low.
+- [ ] P2: Support subscriptions that work with opencode (kimi code)
+- [ ] P2: Claude vscode plugin add comment to plan capability
+  - It makes iterating on plan a lot easier
 - [x] P2: [UX] Make mode more obvious
   - idea: consider change the chat border color for different modes
 - [x] P2: [UX] fix the brief moment of "Read Read" tool call message
   - Also made every tool-card verb status-aware ("Reading…" / "Read foo.md",
     "Editing draft.md" / "Edited draft.md", "Fetching url" / "Fetched url",
     etc.) so in-flight calls no longer render with past-tense verbs.
-- [ ] P2: [Edit previous user message](https://github.com/logancyang/obsidian-copilot-preview/issues/92)
-- [ ] P2: [Agent command (/new)](https://github.com/logancyang/obsidian-copilot-preview/issues/93)
-- [ ] P2: [Steering conversation (instead of queue)](https://github.com/logancyang/obsidian-copilot-preview/issues/94)
-- [ ] P2: [Rollback everything to the state of previous message](https://github.com/logancyang/obsidian-copilot-preview/issues/95)
-- [ ] P2: [In-product QA agent to debug for users](https://github.com/logancyang/obsidian-copilot-preview/issues/96)
-- [ ] P3: [Rerun agent response](https://github.com/logancyang/obsidian-copilot-preview/issues/97)
-- [ ] P3: [Copy agent message](https://github.com/logancyang/obsidian-copilot-preview/issues/98)
+- [ ] P2: Edit previous user message
+- [ ] P2: Support batch editing skills
+- [ ] P2: New agent command (/new, /usage)
+- [ ] P2: Claude code / Codex authentication
+- [ ] P2: Steering conversation (instead of queue)
+- [ ] P2: Rollback everything to the state of previous message
+- [ ] P2: In-product QA agent to debug for users
+- [ ] P3: Rerun agent response
+- [ ] P3: Agent todo list
+  - [ ] make sure in case it renders, it won't be buggy
 - [x] P1: Queue messages
 - [x] P1: Only include the provided models
   - hide openrouter models behind a modal selector

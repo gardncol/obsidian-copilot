@@ -23,9 +23,12 @@ export { useAgentModePicker } from "./ui/useAgentModePicker";
 export type { AgentModePickerOverride } from "./ui/useAgentModePicker";
 export type { AgentSessionManager } from "./session/AgentSessionManager";
 export type { AgentBrand, BackendDescriptor, BackendId, InstallState } from "./session/types";
-export { installBadge, InstallBadge, InstallStatusLine } from "./backends/shared/installStatus";
-export { isAgentModelEnabled, writeAgentModelOverride } from "./session/modelEnable";
-export { getBackendModelOverrides } from "./session/backendSettingsAccess";
+// First-enrollment default-enable rule (enable the agent's current model).
+export { computeDefaultEnabledIds } from "./session/agentDefaultEnable";
+export type { EnrolledModelRef } from "./session/agentDefaultEnable";
+export { partitionOpencodeOnlyWireIds } from "./backends/opencode/opencodeProbePartition";
+export { mapProviderToOpencodeId } from "./backends/opencode/opencodeModelResolve";
+export type { OpencodeProviderMapping } from "./backends/opencode/opencodeModelResolve";
 export type {
   BackendState,
   CopilotMode,
@@ -37,7 +40,8 @@ export type {
 export type { StoredMcpServer, McpTransport } from "./session/mcpResolver";
 export { sanitizeStoredMcpServers } from "./session/mcpResolver";
 export { McpServersPanel } from "./ui/McpServersPanel";
-export { SelectedModelsList } from "./ui/SelectedModelsList";
+export { ModelEnableList } from "./ui/ModelEnableList";
+export type { ModelEnableGroup, ModelEnableRow } from "./ui/ModelEnableList";
 export { PlanPreviewView, PLAN_PREVIEW_VIEW_TYPE } from "./ui/PlanPreviewView";
 export type { PlanPreviewViewState } from "./ui/PlanPreviewView";
 export { getActiveBackendDescriptor, listBackendDescriptors } from "./backends/registry";

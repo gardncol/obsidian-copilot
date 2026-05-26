@@ -1,0 +1,82 @@
+import { agentOriginEnabledWireIds } from "./agentEnabledModels";
+import type { CopilotSettings } from "@/settings/model";
+import type { ConfiguredModel } from "@/modelManagement";
+
+/** Bare descriptor-style decode (claude): the wire id IS the baseModelId. */
+const bareDecode = (wireId: string): { selection: { baseModelId: string } } => ({
+  selection: { baseModelId: wireId },
+});
+
+/** Suffix-style decode (codex): `<base>/<effort>` strips a known effort. */
+const KNOWN_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+const suffixDecode = (wireId: string): { selection: { baseModelId: string } } => {
+  const segments = wireId.split("/");
+  if (segments.length === 2 && KNOWN_EFFORTS.has(segments[1])) {
+    return { selection: { baseModelId: segments[0] } };
+  }
+  return { selection: { baseModelId: wireId } };
+};
+
+function model(configuredModelId: string, infoId: string): ConfiguredModel {
+  return {
+    configuredModelId,
+    providerId: "p1",
+    info: { id: infoId, displayName: infoId },
+    configuredAt: 0,
+  };
+}
+
+function settingsWith(
+  agentType: "claude" | "codex",
+  enabledModels: string[],
+  configuredModels: ConfiguredModel[]
+): CopilotSettings {
+  return {
+    backends: { [agentType]: { enabledModels, defaultModel: null } },
+    configuredModels,
+  } as unknown as CopilotSettings;
+}
+
+describe("agentOriginEnabledWireIds", () => {
+  it("returns the shared frozen empty set when nothing is enabled", () => {
+    const a = agentOriginEnabledWireIds(settingsWith("claude", [], []), "claude", bareDecode);
+    const b = agentOriginEnabledWireIds(settingsWith("codex", [], []), "codex", suffixDecode);
+    expect(a.size).toBe(0);
+    // Frozen empty constant — same reference across calls (referential stability).
+    expect(a).toBe(b);
+  });
+
+  it("claude: maps enabled configured-model ids to their bare info.id baseModelId", () => {
+    const settings = settingsWith(
+      "claude",
+      ["cm1", "cm2"],
+      [model("cm1", "claude-sonnet-4-5"), model("cm2", "claude-opus-4-1")]
+    );
+    const set = agentOriginEnabledWireIds(settings, "claude", bareDecode);
+    expect([...set].sort()).toEqual(["claude-opus-4-1", "claude-sonnet-4-5"]);
+  });
+
+  it("codex: strips the effort suffix to the base model id", () => {
+    const settings = settingsWith("codex", ["cm1"], [model("cm1", "gpt-5/high")]);
+    const set = agentOriginEnabledWireIds(settings, "codex", suffixDecode);
+    expect([...set]).toEqual(["gpt-5"]);
+  });
+
+  it("skips enabled ids with no matching configured-model row", () => {
+    const settings = settingsWith("claude", ["cm1", "ghost"], [model("cm1", "claude-sonnet-4-5")]);
+    const set = agentOriginEnabledWireIds(settings, "claude", bareDecode);
+    expect([...set]).toEqual(["claude-sonnet-4-5"]);
+  });
+
+  it("only reads the requested agentType's enabledModels", () => {
+    const settings = {
+      backends: {
+        claude: { enabledModels: ["cm1"], defaultModel: null },
+        codex: { enabledModels: ["cm2"], defaultModel: null },
+      },
+      configuredModels: [model("cm1", "claude-sonnet-4-5"), model("cm2", "gpt-5")],
+    } as unknown as CopilotSettings;
+    const claude = agentOriginEnabledWireIds(settings, "claude", bareDecode);
+    expect([...claude]).toEqual(["claude-sonnet-4-5"]);
+  });
+});

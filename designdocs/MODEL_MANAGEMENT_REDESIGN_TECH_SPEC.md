@@ -946,6 +946,17 @@ The BYOK tab's empty state (one big `[+ Add provider]` CTA per §5.1) is the onl
 
 ### M8 — BYOK → OpenCode bridge + OpenCode panel model sources
 
+> **SUPERSEDED / LANDED.** The _intent_ of M8 (BYOK providers usable in agent
+> mode; opencode panel unions BYOK + bundled + Plus sources) shipped via
+> `agent_model_curation_migration.md` (M1–M5, landed), but the **mechanics below
+> are superseded**: the shipped code uses `origin`-based `Provider` +
+> `ConfiguredModel` + `BackendConfigRegistry` + `backends.opencode.enabledModels`,
+> not the `ProviderInstance` / `instanceId` / `EnrollmentRegistry` /
+> `consumers[...]` / `source`-tagged refs named here (those never existed in the
+> codebase). Read the curation-migration doc for the shipped design; the file
+> names below (`byokBridge.ts`, `bundledModels.ts`, `plusModels.ts`,
+> `OpencodePanel.tsx`) did not land as written.
+
 **Goal:** BYOK providers usable in agent mode, and the OpenCode sub-tab's three-source picker (OpenCode-bundled ⊕ Copilot Plus ⊕ BYOK). **OpenCode-bundled and Copilot Plus models stay out of the BYOK panel entirely.**
 
 **Deliverables:**
@@ -973,6 +984,14 @@ The BYOK tab's empty state (one big `[+ Add provider]` CTA per §5.1) is the onl
 ---
 
 ### M9 — Cleanup + final removals
+
+> **PARTIALLY LANDED.** The agent-curation slice of cleanup landed via
+> `agent_model_curation_migration.md` M5: the legacy `activeModels` /
+> `plusLicenseKey` / `modelEnabledOverrides` agent paths are removed (the last is
+> retained only as a deprecated, migration-only read field that drains after a
+> one-time seed). The **chat-mode** removals listed below (`ModelSettings.tsx`,
+> `BasicSettings.tsx` picker portion, etc.) remain future work — tracked in
+> `models_management_redesign_cleanup.md`.
 
 **Goal:** Delete legacy code paths, finalize tab labels, update docs.
 

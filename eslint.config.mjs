@@ -272,7 +272,7 @@ export default [
             {
               from: { type: "backend" },
               allow: [
-                { to: { type: ["acp", "sdk", "session", "skills", "host"] } },
+                { to: { type: ["acp", "sdk", "session", "skills", "modelmgmt", "host"] } },
                 { to: { type: "backend", captured: { name: "{{from.captured.name}}" } } },
                 { to: { type: "backend", captured: { name: "shared" } } },
               ],

@@ -10,7 +10,7 @@ import type { ModelInfo, ProviderType } from "./catalog";
  * The three agent backends. Each can own its own `Provider`(s) and
  * reports a runtime model inventory.
  */
-export type AgentType = "opencode" | "claude-code" | "codex";
+export type AgentType = "opencode" | "claude" | "codex";
 
 /**
  * The broader set used for per-backend model curation: the three agents
@@ -19,7 +19,7 @@ export type AgentType = "opencode" | "claude-code" | "codex";
  *
  *   "chat"        → Simple Chat picker
  *   "opencode"    → OpenCode agent picker
- *   "claude-code" → Claude Code agent picker
+ *   "claude" → Claude Code agent picker
  *   "codex"       → Codex agent picker
  *
  * Everything else either has no curated selection (vault-qa / project /

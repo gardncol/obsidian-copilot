@@ -294,12 +294,6 @@ export interface ClaudeBackendSettings {
   /** Sticky model preference — `{ baseModelId, effort }`. Unset = use the agent's default. */
   defaultModel?: ModelSelection | null;
   /**
-   * Sparse user overrides for which agent-reported models should appear in
-   * the model picker. Keyed by SDK model id. Absent → fall back to the
-   * descriptor's `isModelEnabledByDefault` policy.
-   */
-  modelEnabledOverrides?: Record<string, boolean>;
-  /**
    * Opt-in: pass `thinking: { type: "enabled" }` to the SDK so the agent
    * surfaces reasoning chunks. Off by default (matches SDK default).
    */
@@ -319,8 +313,6 @@ export interface CodexBackendSettings {
   binaryPath?: string;
   /** Sticky model preference — `{ baseModelId, effort }`. Unset = use the agent's default. */
   defaultModel?: ModelSelection | null;
-  /** Sparse user overrides; see `ClaudeBackendSettings.modelEnabledOverrides`. */
-  modelEnabledOverrides?: Record<string, boolean>;
   /** See `ClaudeBackendSettings.envOverrides`. Applied to the spawned `codex-acp` subprocess. */
   envOverrides?: Record<string, string>;
 }
@@ -349,8 +341,6 @@ export interface OpencodeBackendSettings {
    * surfaced in the Copilot tab strip or chat history.
    */
   probeSessionId?: string;
-  /** Sparse user overrides; see `ClaudeBackendSettings.modelEnabledOverrides`. */
-  modelEnabledOverrides?: Record<string, boolean>;
   /** See `ClaudeBackendSettings.envOverrides`. Applied to the spawned `opencode` subprocess. */
   envOverrides?: Record<string, string>;
 }
@@ -1000,17 +990,6 @@ function nonEmptyString(v: unknown): string | undefined {
   return typeof v === "string" && v ? v : undefined;
 }
 
-function sanitizeModelEnabledOverrides(raw: unknown): Record<string, boolean> | undefined {
-  if (!raw || typeof raw !== "object") return undefined;
-  const out: Record<string, boolean> = {};
-  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof k === "string" && k.length > 0 && k.length <= 256 && typeof v === "boolean") {
-      out[k] = v;
-    }
-  }
-  return Object.keys(out).length > 0 ? out : undefined;
-}
-
 function sanitizeDefaultModel(raw: unknown): ModelSelection | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const r = raw as Record<string, unknown>;
@@ -1053,7 +1032,6 @@ function sanitizeClaudeBackendSettings(raw: unknown): ClaudeBackendSettings {
   const r = raw as Record<string, unknown>;
   return {
     defaultModel: sanitizeDefaultModel(r.defaultModel),
-    modelEnabledOverrides: sanitizeModelEnabledOverrides(r.modelEnabledOverrides),
     enableThinking: typeof r.enableThinking === "boolean" ? r.enableThinking : undefined,
     envOverrides: sanitizeEnvOverrides(r.envOverrides),
   };
@@ -1065,7 +1043,6 @@ function sanitizeCodexBackendSettings(raw: unknown): CodexBackendSettings {
   return {
     binaryPath: nonEmptyString(r.binaryPath),
     defaultModel: sanitizeDefaultModel(r.defaultModel),
-    modelEnabledOverrides: sanitizeModelEnabledOverrides(r.modelEnabledOverrides),
     envOverrides: sanitizeEnvOverrides(r.envOverrides),
   };
 }
@@ -1088,7 +1065,6 @@ function sanitizeOpencodeBackendSettings(raw: unknown): OpencodeBackendSettings 
     binarySource,
     defaultModel: sanitizeDefaultModel(r.defaultModel),
     probeSessionId: nonEmptyString(r.probeSessionId),
-    modelEnabledOverrides: sanitizeModelEnabledOverrides(r.modelEnabledOverrides),
     envOverrides: sanitizeEnvOverrides(r.envOverrides),
   };
 }
