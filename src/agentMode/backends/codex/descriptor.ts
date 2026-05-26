@@ -75,10 +75,21 @@ export const CodexBackendDescriptor: BackendDescriptor = {
   crossDiscoveredAgents: [],
   restartOnManagedSkillsChange: false,
   wire: codexWire,
+  showModelDescriptions: true,
 
   getEnabledBaseModelIds(settings: CopilotSettings): ReadonlySet<string> {
     // All Codex models are agent-origin.
     return agentOriginEnabledWireIds(settings, "codex", (wireId) => codexWire.decode(wireId));
+  },
+
+  /**
+   * codex-acp reports inconsistently-cased names (`GPT-5.5` but also
+   * `gpt-5.4`, `gpt-5.3-codex`). Uppercase only the anchored `gpt` prefix so
+   * the column reads consistently — no family/token guessing, so the wire
+   * ids and any mid-string tokens are left untouched.
+   */
+  normalizeModelName(name: string): string {
+    return name.replace(/^gpt/i, "GPT");
   },
 
   getInstallState(settings: CopilotSettings): InstallState {

@@ -268,7 +268,14 @@ export function ModelEffortPicker({ override, className }: ModelEffortPickerProp
                     <span className="tw-w-3 tw-text-center tw-text-xs tw-text-muted" aria-hidden>
                       {isActive ? "✓" : isHighlight ? "›" : ""}
                     </span>
-                    <ModelDisplay model={entry} iconSize={12} />
+                    <div className="tw-min-w-0">
+                      <ModelDisplay model={entry} iconSize={12} />
+                      {entry._subtitle && (
+                        <div className="tw-truncate tw-text-xs tw-text-muted">
+                          {entry._subtitle}
+                        </div>
+                      )}
+                    </div>
                   </div>
                   {rightLabel && (
                     <span className="tw-shrink-0 tw-text-xs tw-text-faint">{rightLabel}</span>

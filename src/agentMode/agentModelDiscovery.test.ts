@@ -223,6 +223,32 @@ describe("wireAgentModelDiscovery", () => {
     unsub();
   });
 
+  it("omits a reported empty name from fallbackDisplayNames (never overwrites with '')", async () => {
+    mockDescriptors = [makeDescriptor({ id: "codex" })];
+    const m = makeManagerFake();
+    const a = makeApiFake();
+    m.setState("codex", {
+      model: {
+        current: { baseModelId: "gpt-5", effort: null },
+        availableModels: [
+          { baseModelId: "gpt-5", name: "GPT-5", provider: null, effortOptions: [] },
+          { baseModelId: "blank", name: "", provider: null, effortOptions: [] },
+        ],
+      },
+      mode: null,
+    });
+
+    const unsub = wireAgentModelDiscovery(makePlugin(a.api), m.manager);
+    await flush();
+
+    // "blank" is still enrolled (it's a real wire id) but contributes no
+    // display-name fallback, so resolution falls back to catalog/id instead.
+    expect(a.registerAgentProvider.mock.calls[0][0].fallbackDisplayNames).toEqual({
+      "gpt-5": "GPT-5",
+    });
+    unsub();
+  });
+
   it("seeds enabledModels to the agent's current model on first enrollment", async () => {
     mockDescriptors = [makeDescriptor({ id: "codex" })];
     const m = makeManagerFake();
@@ -297,6 +323,8 @@ describe("wireAgentModelDiscovery", () => {
     expect(a.syncAgentModels.mock.calls[0][0]).toEqual({
       agentType: "codex",
       wireModelIds: ["gpt-5", "gpt-5.5"],
+      fallbackDisplayNames: { "gpt-5": "gpt-5", "gpt-5.5": "gpt-5.5" },
+      fallbackDescriptions: {},
     });
     // Seeding never re-runs on the sync branch.
     expect(a.setEnabledModels).not.toHaveBeenCalled();

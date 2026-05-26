@@ -59,10 +59,14 @@ export function wireAgentModelDiscovery(
 
   const runForBackend = (descriptor: BackendDescriptor): void => {
     const state = manager.getCachedBackendState(descriptor.id);
-    const reported = reportedWireIds(state);
+    const reported = reportedModels(state);
     if (reported === null) return; // No model state yet — agent hasn't settled.
 
-    const signature = reported.join("\n");
+    // Include the display strings in the signature so a CLI upgrade that
+    // renames a model (or rewrites its blurb) re-syncs the persisted info.
+    const signature = reported
+      .map((r) => `${r.wireId}\t${r.name}\t${r.description ?? ""}`)
+      .join("\n");
     if (lastEnrolled.get(descriptor.id) === signature) return; // Unchanged — no-op.
 
     // The model the agent currently has selected — the one first enrollment
@@ -117,13 +121,27 @@ export function wireAgentModelDiscovery(
 async function enrollBackend(
   api: ModelManagementApi,
   descriptor: BackendDescriptor,
-  reported: readonly string[],
+  reported: readonly ReportedModel[],
   currentWireId: string | undefined
 ): Promise<void> {
   // A backend's id doubles as its model-management AgentType.
   const agentType = descriptor.id as AgentType;
+  const reportedWireIds = reported.map((r) => r.wireId);
   const wireModelIds =
-    descriptor.id === "opencode" ? suppressManagedOpencode(api, reported) : reported;
+    descriptor.id === "opencode" ? suppressManagedOpencode(api, reportedWireIds) : reportedWireIds;
+
+  // Agent-reported display strings, keyed by wire id. Passed as fallbacks so
+  // `ConfiguredModel.info.displayName`/`.description` match the chat picker's
+  // `ModelEntry` exactly — the agent owns these for agent-origin models.
+  const fallbackDisplayNames: Record<string, string> = {};
+  const fallbackDescriptions: Record<string, string> = {};
+  for (const r of reported) {
+    // Both guarded by truthiness so a backend that reports an empty name never
+    // overwrites a good catalog/existing displayName with "" (which would strand
+    // the row at its raw configuredModelId in the enable list).
+    if (r.name) fallbackDisplayNames[r.wireId] = r.name;
+    if (r.description) fallbackDescriptions[r.wireId] = r.description;
+  }
 
   // An empty list means a transient/degraded probe (zero models settled, or —
   // for opencode — every model was suppressed as Copilot-managed), NOT "the
@@ -142,7 +160,12 @@ async function enrollBackend(
     .find((p) => p.origin.kind === "agent" && p.origin.agentType === agentType);
 
   if (existing) {
-    await api.setup.agent.syncAgentModels({ agentType, wireModelIds });
+    await api.setup.agent.syncAgentModels({
+      agentType,
+      wireModelIds,
+      fallbackDisplayNames,
+      fallbackDescriptions,
+    });
     return;
   }
 
@@ -156,6 +179,8 @@ async function enrollBackend(
     // own models, so the keychain id stays null.
     apiKey: null,
     wireModelIds,
+    fallbackDisplayNames,
+    fallbackDescriptions,
   });
 
   // `configuredModelIds` come back in `wireModelIds` order, so zip them to
@@ -210,12 +235,25 @@ export function buildManagedOpencodeProviderIds(
   return managed;
 }
 
+/** One agent-reported model: its wire id plus the display strings to persist. */
+interface ReportedModel {
+  wireId: string;
+  name: string;
+  description?: string;
+}
+
 /**
- * The reported `baseModelId`s from a cached `BackendState`, or `null` when the
- * backend hasn't reported a model state yet — distinct from an empty array (a
- * settled state with zero models), which callers treat differently.
+ * The reported models from a cached `BackendState`, or `null` when the backend
+ * hasn't reported a model state yet — distinct from an empty array (a settled
+ * state with zero models), which callers treat differently. Carries each
+ * model's translated `name`/`description` so enrollment persists the same
+ * strings the chat picker shows.
  */
-function reportedWireIds(state: BackendState | null): string[] | null {
+function reportedModels(state: BackendState | null): ReportedModel[] | null {
   if (!state?.model) return null;
-  return state.model.availableModels.map((m) => m.baseModelId);
+  return state.model.availableModels.map((m) => ({
+    wireId: m.baseModelId,
+    name: m.name,
+    description: m.description,
+  }));
 }

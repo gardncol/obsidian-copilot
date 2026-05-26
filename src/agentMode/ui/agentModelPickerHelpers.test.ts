@@ -283,6 +283,64 @@ describe("buildPickerEntries", () => {
     expect(entries.map((e) => e.name)).toEqual(["kept-model"]);
   });
 
+  it("carries the model description onto the picker entry as _subtitle", () => {
+    const entry: ModelEntry = {
+      baseModelId: "gpt-5",
+      name: "GPT-5",
+      description: "Frontier model for complex coding",
+      provider: null,
+      effortOptions: [],
+    };
+    const codex = {
+      ...makeDescriptor("codex"),
+      getEnabledBaseModelIds: () => new Set(["gpt-5"]),
+    } as unknown as BackendDescriptor;
+    const manager = makeManager({
+      cachedStateById: {
+        codex: { model: makeModelState("gpt-5", [entry]), mode: null },
+      },
+    });
+    const ctx: ModelActiveContext = {
+      activeSession: { backendId: "codex" } as unknown as AgentSession,
+      activeChatUIState: null,
+      activeBackendId: "codex",
+      activeDescriptor: codex,
+      activeSessionHasHistory: false,
+      activeModelState: makeModelState("gpt-5", [entry]),
+      activeCurrentEntry: entry,
+    };
+    const { entries } = buildPickerEntries(manager, [codex], ctx, emptySettings);
+    expect(entries[0]._subtitle).toBe("Frontier model for complex coding");
+  });
+
+  it("carries the description onto a synthesized stranded entry", () => {
+    const stranded: ModelEntry = {
+      baseModelId: "ghost",
+      name: "Ghost",
+      description: "Opus 4.7 with 1M context",
+      provider: null,
+      effortOptions: [],
+    };
+    const visible = makeModelEntry("real-model");
+    const codex = makeDescriptor("codex");
+    const manager = makeManager({
+      cachedStateById: {
+        codex: { model: makeModelState("real-model", [visible]), mode: null },
+      },
+    });
+    const ctx: ModelActiveContext = {
+      activeSession: { backendId: "codex" } as unknown as AgentSession,
+      activeChatUIState: null,
+      activeBackendId: "codex",
+      activeDescriptor: codex,
+      activeSessionHasHistory: false,
+      activeModelState: makeModelState("ghost", [stranded]),
+      activeCurrentEntry: stranded,
+    };
+    const { entries } = buildPickerEntries(manager, [codex], ctx, emptySettings);
+    expect(entries[0]._subtitle).toBe("Opus 4.7 with 1M context");
+  });
+
   it("keeps the sticky active model even when getEnabledBaseModelIds excludes it", () => {
     // The active (sticky) model is no longer in the enabled set, but
     // keepBaseModelId must preserve it so curation never strands the

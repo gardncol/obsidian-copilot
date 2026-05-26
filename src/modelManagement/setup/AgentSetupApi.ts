@@ -33,13 +33,20 @@ export interface RegisterAgentProviderInput {
   /** Full set of wire ids the agent reports; the existing model set is diffed
    *  against this list. */
   wireModelIds: readonly string[];
-  /** Display names for wire ids the catalog doesn't know yet. Keyed by wire id. */
+  /** Agent-reported display names, keyed by wire id. For agent-origin
+   *  providers these win over catalog metadata (the agent owns the name). */
   fallbackDisplayNames?: Record<string, string>;
+  /** Agent-reported capability blurbs, keyed by wire id. Win over catalog. */
+  fallbackDescriptions?: Record<string, string>;
 }
 
 export interface SyncAgentModelsInput {
   agentType: AgentType;
   wireModelIds: readonly string[];
+  /** See `RegisterAgentProviderInput.fallbackDisplayNames`. */
+  fallbackDisplayNames?: Record<string, string>;
+  /** See `RegisterAgentProviderInput.fallbackDescriptions`. */
+  fallbackDescriptions?: Record<string, string>;
 }
 
 export interface AgentSetupResult {
@@ -116,7 +123,8 @@ export class AgentSetupApi {
     const infos = await this.#resolveModelInfos(
       input.providerType,
       input.wireModelIds,
-      input.fallbackDisplayNames
+      input.fallbackDisplayNames,
+      input.fallbackDescriptions
     );
     const { added, removed } = await this.#reconcileModels(input.agentType, providerId, infos);
 
@@ -159,7 +167,12 @@ export class AgentSetupApi {
     if (providers.length === 1) {
       const provider = providers[0];
       // Every reported wire id belongs to this one provider.
-      const infos = await this.#resolveModelInfosForProvider(provider, input.wireModelIds);
+      const infos = await this.#resolveModelInfosForProvider(
+        provider,
+        input.wireModelIds,
+        input.fallbackDisplayNames,
+        input.fallbackDescriptions
+      );
       const { added, removed } = await this.#reconcileModels(
         input.agentType,
         provider.providerId,
@@ -187,7 +200,12 @@ export class AgentSetupApi {
       // Reconcile only owned ids: a dropped id is one this provider owned and
       // the agent no longer reports. Unowned ids aren't added here (no
       // providerType to resolve their catalog metadata).
-      const infos = await this.#resolveModelInfosForProvider(provider, ownedWireIds);
+      const infos = await this.#resolveModelInfosForProvider(
+        provider,
+        ownedWireIds,
+        input.fallbackDisplayNames,
+        input.fallbackDescriptions
+      );
       const { added, removed } = await this.#reconcileModels(
         input.agentType,
         provider.providerId,
@@ -236,9 +254,11 @@ export class AgentSetupApi {
   }
 
   /**
-   * Catalog-enrich each wire id under one `providerType`, falling back to
-   * `fallbackDisplayNames[id] ?? id` on a miss (so correctness never depends on
-   * the catalog being reachable).
+   * Catalog-enrich each wire id under one `providerType`, then overlay the
+   * agent-reported `fallbackDisplayNames`/`fallbackDescriptions` so the agent
+   * owns the display strings (catalog `limits`/`cost` survive). On a catalog
+   * miss the id itself is the base, so correctness never depends on the catalog
+   * being reachable.
    *
    * The input carries only `providerType`, which maps to many catalog
    * providers, so the lookup scans them and takes the first match. A wire id
@@ -248,28 +268,38 @@ export class AgentSetupApi {
   async #resolveModelInfos(
     providerType: ProviderType,
     wireModelIds: readonly string[],
-    fallbackDisplayNames?: Record<string, string>
+    fallbackDisplayNames?: Record<string, string>,
+    fallbackDescriptions?: Record<string, string>
   ): Promise<ModelInfo[]> {
     const wireToInfo = await this.#buildCatalogLookup(providerType);
-    return this.#snapshotInfos(wireModelIds, wireToInfo, fallbackDisplayNames);
+    return this.#snapshotInfos(
+      wireModelIds,
+      wireToInfo,
+      fallbackDisplayNames,
+      fallbackDescriptions
+    );
   }
 
   /**
    * Like `#resolveModelInfos` but scoped to one provider: on a catalog miss it
    * reuses the existing `ConfiguredModel.info`, so a re-sync never downgrades an
-   * already-enriched row to a bare fallback.
+   * already-enriched row to a bare fallback. Agent-reported display strings
+   * still override the resolved name/description (see `#applyAgentDisplay`).
    */
   async #resolveModelInfosForProvider(
     provider: Provider,
-    wireModelIds: readonly string[]
+    wireModelIds: readonly string[],
+    fallbackDisplayNames?: Record<string, string>,
+    fallbackDescriptions?: Record<string, string>
   ): Promise<ModelInfo[]> {
     const wireToInfo = await this.#buildCatalogLookup(provider.providerType);
     return wireModelIds.map((wireId) => {
-      const fromCatalog = wireToInfo.get(wireId);
-      if (fromCatalog) return fromCatalog;
-      const existing = this.#models.getByWireId(provider.providerId, wireId);
-      if (existing) return existing.info;
-      return { id: wireId, displayName: wireId };
+      const base = wireToInfo.get(wireId) ??
+        this.#models.getByWireId(provider.providerId, wireId)?.info ?? {
+          id: wireId,
+          displayName: wireId,
+        };
+      return this.#applyAgentDisplay(base, wireId, fallbackDisplayNames, fallbackDescriptions);
     });
   }
 
@@ -277,13 +307,36 @@ export class AgentSetupApi {
   #snapshotInfos(
     wireModelIds: readonly string[],
     wireToInfo: ReadonlyMap<string, ModelInfo>,
-    fallbackDisplayNames?: Record<string, string>
+    fallbackDisplayNames?: Record<string, string>,
+    fallbackDescriptions?: Record<string, string>
   ): ModelInfo[] {
     return wireModelIds.map((wireId) => {
-      const fromCatalog = wireToInfo.get(wireId);
-      if (fromCatalog) return fromCatalog;
-      return { id: wireId, displayName: fallbackDisplayNames?.[wireId] ?? wireId };
+      const base = wireToInfo.get(wireId) ?? { id: wireId, displayName: wireId };
+      return this.#applyAgentDisplay(base, wireId, fallbackDisplayNames, fallbackDescriptions);
     });
+  }
+
+  /**
+   * Overlay the agent's reported name/description onto a resolved `ModelInfo`.
+   * For agent-origin models the agent owns these strings, so they win over any
+   * catalog match — this is what keeps `ConfiguredModel.info` byte-identical to
+   * the chat picker's `ModelEntry`. Catalog-supplied `limits`/`cost`/etc. are
+   * preserved. A missing fallback leaves the resolved value untouched.
+   */
+  #applyAgentDisplay(
+    base: ModelInfo,
+    wireId: string,
+    fallbackDisplayNames?: Record<string, string>,
+    fallbackDescriptions?: Record<string, string>
+  ): ModelInfo {
+    const displayName = fallbackDisplayNames?.[wireId];
+    const description = fallbackDescriptions?.[wireId];
+    if (displayName === undefined && description === undefined) return base;
+    return {
+      ...base,
+      displayName: displayName ?? base.displayName,
+      description: description ?? base.description,
+    };
   }
 
   /**
@@ -313,9 +366,10 @@ export class AgentSetupApi {
   /**
    * Diff-reconcile one provider's ConfiguredModel set against `infos`: add new
    * wire ids (auto-enrolling each into `backends[agentType]` only),
-   * cascade-remove vanished ones, leave unchanged ids untouched. Only real
-   * deltas write, so re-syncing an unchanged list is a no-op that never resets
-   * user curation.
+   * refresh the display strings of existing ids whose name/description changed
+   * (so a CLI upgrade or this feature's rollout updates already-enrolled rows),
+   * and cascade-remove vanished ones. Only real deltas write, so re-syncing an
+   * unchanged list is a no-op that never resets user curation.
    */
   async #reconcileModels(
     agentType: AgentType,
@@ -331,12 +385,25 @@ export class AgentSetupApi {
 
     const added: Array<{ wireId: string; configuredModelId: string }> = [];
     for (const info of infos) {
-      if (existingByWireId.has(info.id)) continue;
-      const configuredModelId = await this.#models.add({ providerId, info });
-      // Enroll into this agent's backend only — agent models never leak into
-      // chat or another agent's picker.
-      await this.#backends.enableModel(agentType, configuredModelId);
-      added.push({ wireId: info.id, configuredModelId });
+      const current = existingByWireId.get(info.id);
+      if (!current) {
+        const configuredModelId = await this.#models.add({ providerId, info });
+        // Enroll into this agent's backend only — agent models never leak into
+        // chat or another agent's picker.
+        await this.#backends.enableModel(agentType, configuredModelId);
+        added.push({ wireId: info.id, configuredModelId });
+        continue;
+      }
+      // Refresh display strings in place when they drifted, without touching the
+      // configuredModelId (so `BackendConfig.enabledModels` refs don't churn).
+      if (
+        current.info.displayName !== info.displayName ||
+        current.info.description !== info.description
+      ) {
+        await this.#models.update(current.configuredModelId, {
+          info: { displayName: info.displayName, description: info.description },
+        });
+      }
     }
 
     const removed: Array<{ wireId: string; configuredModelId: string }> = [];

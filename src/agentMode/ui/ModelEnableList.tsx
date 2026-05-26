@@ -9,8 +9,10 @@ export interface ModelEnableRow {
   id: string;
   /** Primary label shown to the user. */
   label: string;
-  /** Optional secondary line (e.g. wire id / description). */
+  /** Optional secondary line — the model's capability blurb. */
   description?: string;
+  /** Wire id, matched by search but never rendered (it duplicates the label). */
+  wireId?: string;
   /** Whether the model is currently enabled. */
   enabled: boolean;
 }

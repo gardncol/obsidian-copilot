@@ -41,6 +41,13 @@ export interface ModelInfo {
   id: string;
   displayName: string;
   /**
+   * Optional one-line capability blurb. `models.dev` never sends this
+   * (see `modelsDevWire.ts`), so it stays empty for catalog-derived models;
+   * agent backends populate it from their own reported metadata (e.g. the
+   * Claude SDK's "Opus 4.7 with 1M context · …" or codex-acp's model blurb).
+   */
+  description?: string;
+  /**
    * Every sub-field is optional so partial catalog coverage (e.g. a
    * model that publishes only an `input` limit, or `output`-only cost)
    * survives the transform without zero-defaults masking "unknown".

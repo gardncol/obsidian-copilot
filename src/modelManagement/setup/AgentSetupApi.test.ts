@@ -88,6 +88,12 @@ class FakeConfiguredModelRegistry {
     return configuredModelId;
   });
 
+  update = jest.fn(async (configuredModelId: string, patch: { info?: Partial<ModelInfo> }) => {
+    const row = this.rows.find((m) => m.configuredModelId === configuredModelId);
+    if (!row) throw new Error(`unknown ${configuredModelId}`);
+    if (patch.info) row.info = { ...row.info, ...patch.info };
+  });
+
   remove = jest.fn(async (configuredModelId: string) => {
     this.rows = this.rows.filter((m) => m.configuredModelId !== configuredModelId);
   });
@@ -249,6 +255,70 @@ describe("AgentSetupApi.registerAgentProvider", () => {
     expect(h.backends.enabledFor("chat")).toEqual([]);
     expect(h.backends.enabledFor("opencode")).toEqual([]);
     expect(h.backends.enabledFor("codex")).toEqual([]);
+  });
+
+  it("lets the agent-reported name + description win over catalog metadata", async () => {
+    const h = makeHarness();
+    // Catalog knows "claude-sonnet-4-5" as "Claude Sonnet 4.5"; the agent's
+    // own name/description must override so settings match the chat picker.
+    const result = await h.api.registerAgentProvider({
+      agentType: "claude",
+      providerType: "anthropic",
+      displayName: "Claude Code",
+      apiKey: null,
+      wireModelIds: ["claude-sonnet-4-5"],
+      fallbackDisplayNames: { "claude-sonnet-4-5": "Sonnet" },
+      fallbackDescriptions: { "claude-sonnet-4-5": "Sonnet 4.6 · Best for everyday tasks" },
+    });
+    const info = h.models.listByProvider(result.providerId)[0].info;
+    expect(info.displayName).toBe("Sonnet");
+    expect(info.description).toBe("Sonnet 4.6 · Best for everyday tasks");
+  });
+
+  it("uses the fallback name + description for wire ids the catalog doesn't know", async () => {
+    const h = makeHarness();
+    const result = await h.api.registerAgentProvider({
+      agentType: "claude",
+      providerType: "anthropic",
+      displayName: "Claude Code",
+      apiKey: null,
+      wireModelIds: ["default"],
+      fallbackDisplayNames: { default: "Default (recommended)" },
+      fallbackDescriptions: { default: "Opus 4.7 with 1M context · Most capable for complex work" },
+    });
+    const info = h.models.listByProvider(result.providerId)[0].info;
+    expect(info.id).toBe("default");
+    expect(info.displayName).toBe("Default (recommended)");
+    expect(info.description).toBe("Opus 4.7 with 1M context · Most capable for complex work");
+  });
+
+  it("refreshes an existing model's display strings on re-register, preserving its id", async () => {
+    const h = makeHarness();
+    const first = await h.api.registerAgentProvider({
+      agentType: "claude",
+      providerType: "anthropic",
+      displayName: "Claude Code",
+      apiKey: null,
+      wireModelIds: ["default"],
+      fallbackDisplayNames: { default: "default" }, // stale, pre-feature label
+    });
+    const idBefore = h.models.listByProvider(first.providerId)[0].configuredModelId;
+
+    await h.api.registerAgentProvider({
+      agentType: "claude",
+      providerType: "anthropic",
+      displayName: "Claude Code",
+      apiKey: null,
+      wireModelIds: ["default"],
+      fallbackDisplayNames: { default: "Default (recommended)" },
+      fallbackDescriptions: { default: "Opus 4.7 with 1M context · Most capable for complex work" },
+    });
+
+    const row = h.models.listByProvider(first.providerId)[0];
+    // Same row (enabled-set refs don't churn), refreshed strings.
+    expect(row.configuredModelId).toBe(idBefore);
+    expect(row.info.displayName).toBe("Default (recommended)");
+    expect(row.info.description).toBe("Opus 4.7 with 1M context · Most capable for complex work");
   });
 
   it("is idempotent on (agentType, providerType): re-running updates in place, no duplicate provider", async () => {

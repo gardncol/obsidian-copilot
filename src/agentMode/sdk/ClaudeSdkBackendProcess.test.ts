@@ -62,6 +62,7 @@ function fakeDescriptor(): BackendDescriptor {
   return {
     id: "claude",
     displayName: "Claude",
+    showModelDescriptions: true,
     wire: {
       encode: (sel: { baseModelId: string; effort: string | null }) => sel.baseModelId,
       decode: (id: string) => ({
@@ -413,10 +414,11 @@ describe("ClaudeSdkBackendProcess.newSession dynamic catalog", () => {
     const ids = resp.state.model?.availableModels.map((m) => m.baseModelId);
     expect(ids).toContain("claude-fake-pro");
     expect(ids).toContain("claude-fake-mini");
-    const proEffort = resp.state.model?.availableModels
-      .find((m) => m.baseModelId === "claude-fake-pro")
-      ?.effortOptions.map((o) => o.value);
-    expect(proEffort).toEqual(["low", "medium", "high"]);
+    const pro = resp.state.model?.availableModels.find((m) => m.baseModelId === "claude-fake-pro");
+    expect(pro?.effortOptions.map((o) => o.value)).toEqual(["low", "medium", "high"]);
+    // The SDK's per-model `description` is carried into the entry (used as the
+    // capability second line in the picker + settings).
+    expect(pro?.description).toBe("test");
   });
 
   it("honors persisted default model when it appears in the catalog", async () => {

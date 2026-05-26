@@ -77,14 +77,15 @@ export function appendBackendSection(
       enabledSet?.has(entry.baseModelId) === true || entry.baseModelId === ctx.keepBaseModelId
   );
   for (const m of filtered) {
-    entries.push(synthesizeAgentEntry(m.baseModelId, m.name, descriptor));
+    entries.push(synthesizeAgentEntry(m.baseModelId, m.name, descriptor, m.description));
   }
 }
 
 export function synthesizeAgentEntry(
   baseModelId: string,
   humanName: string,
-  descriptor: BackendDescriptor
+  descriptor: BackendDescriptor,
+  subtitle?: string
 ): ModelSelectorEntry {
   return {
     name: baseModelId,
@@ -94,6 +95,7 @@ export function synthesizeAgentEntry(
     displayName: humanName || baseModelId,
     _group: descriptor.displayName,
     _backendId: descriptor.id,
+    _subtitle: subtitle,
   };
 }
 
@@ -217,7 +219,12 @@ export function buildPickerEntries(
     if (match) {
       valueKey = getModelKeyFromModel(match);
     } else {
-      const synth = synthesizeAgentEntry(baseId, ctx.activeCurrentEntry.name, ctx.activeDescriptor);
+      const synth = synthesizeAgentEntry(
+        baseId,
+        ctx.activeCurrentEntry.name,
+        ctx.activeDescriptor,
+        ctx.activeCurrentEntry.description
+      );
       entries.unshift(synth);
       valueKey = getModelKeyFromModel(synth);
     }

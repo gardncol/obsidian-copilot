@@ -38,6 +38,13 @@ export type ModelSelectorEntry = CustomModel & {
   _disabledReason?: string;
   _group?: string;
   _backendId?: string;
+  /**
+   * Optional second line rendered beneath the title in the dropdown row
+   * (agent backends only). Carries the model's capability blurb so the
+   * picker row matches the settings list row. The collapsed trigger pill
+   * ignores it and stays single-line.
+   */
+  _subtitle?: string;
 };
 
 interface ModelSelectorProps {
