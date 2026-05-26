@@ -111,8 +111,13 @@ function translateModel(
     // becomes redundant. The recognized vocabulary comes from the
     // variants themselves (decoded by the descriptor's wire codec),
     // so backends own their effort tokens — we don't duplicate them.
-    name: g.variants.length >= 2 ? stripEffortSuffix(g.name, g.variants) : g.name,
-    description: g.description,
+    name: normalizeName(
+      g.variants.length >= 2 ? stripEffortSuffix(g.name, g.variants) : g.name,
+      descriptor
+    ),
+    // Only backends that opt in surface their per-model blurb; others (opencode)
+    // would just add noisy/duplicative lines, so the field is dropped here.
+    description: descriptor.showModelDescriptions ? g.description : undefined,
     provider: g.provider,
     effortOptions: deriveEffortOptions(g, descriptor),
   }));
@@ -130,7 +135,7 @@ function translateModel(
       : [];
     currentEntry = {
       baseModelId: currentBaseId,
-      name: currentBaseId,
+      name: normalizeName(currentBaseId, descriptor),
       provider: decodedCurrent.provider,
       effortOptions: synthEffortOptions,
     };
@@ -294,6 +299,11 @@ function reverseProjectMode(
     if (canonical[opt] === nativeId) return opt;
   }
   return null;
+}
+
+/** Apply the descriptor's optional display-name normalization, if any. */
+function normalizeName(name: string, descriptor: BackendDescriptor): string {
+  return descriptor.normalizeModelName?.(name) ?? name;
 }
 
 function stripEffortSuffix(name: string, variants: { effort: string | null }[]): string {

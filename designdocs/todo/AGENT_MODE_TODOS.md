@@ -18,10 +18,13 @@
   - [x] Redesign the model settings - discussed on May 7 group meeting
   - [x] support self host model
   - [x] remove built-in models
+  - [ ] migrate existing models to the new format
 - [ ] P0: Test opencode works well with local models
+- [ ] P0: Test migration (skill, model) to make sure no unrecoverable migration is introduced in pre-release
 - [ ] P0: 非migrate的skill最好能直接引用,同名的skill如果内容一样migrate可以做得更好
 - [x] P0: Auto-save chat history controls
 - [x] P0: Support image context
+- [ ] P1: Better binary detection
 - [ ] P1: MCP
   - Basic functionality is ready
   - [ ] P1: Surface externally-managed MCP servers (claude.ai remote, plugin-provided) — see [MCP_EXTERNALLY_MANAGED_SERVERS.md](./MCP_EXTERNALLY_MANAGED_SERVERS.md)

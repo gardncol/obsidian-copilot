@@ -571,7 +571,11 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
       catalog.length > 0 && seedModel
         ? {
             currentModelId: seedModel,
-            availableModels: catalog.map((m) => ({ modelId: m.value, name: m.displayName })),
+            availableModels: catalog.map((m) => ({
+              modelId: m.value,
+              name: m.displayName,
+              description: m.description,
+            })),
           }
         : null;
     const modes: RawModeState = {

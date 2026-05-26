@@ -73,14 +73,22 @@ export function opencodeOnlySubGroupLabel(model: ConfiguredModel, provider: Prov
   return provider.displayName;
 }
 
-/** A `ModelEnableRow` from a candidate, surfacing the wire id as a secondary line when it differs from the label. */
+/**
+ * A `ModelEnableRow` from a candidate. The secondary line is the model's
+ * capability blurb (`info.description`), which only the curated agent backends
+ * persist (claude, codex); BYOK/Plus and opencode carry none and so render a
+ * single line. We deliberately don't fall back to the wire id for display — it
+ * duplicates the label — but we still carry it in `wireId` so search keeps
+ * matching it. This keeps the row identical to the chat picker.
+ */
 export function toRow(candidate: Candidate): ModelEnableRow {
   const { configuredModel, enabled } = candidate;
-  const label = configuredModel.info.displayName || configuredModel.info.id;
+  const { displayName, id, description } = configuredModel.info;
   return {
     id: configuredModel.configuredModelId,
-    label,
-    description: label === configuredModel.info.id ? undefined : configuredModel.info.id,
+    label: displayName || id,
+    description: description || undefined,
+    wireId: id,
     enabled,
   };
 }
@@ -91,6 +99,7 @@ export function rowMatches(row: ModelEnableRow, q: string): boolean {
   return (
     row.label.toLowerCase().includes(q) ||
     row.id.toLowerCase().includes(q) ||
+    (row.wireId?.toLowerCase().includes(q) ?? false) ||
     (row.description?.toLowerCase().includes(q) ?? false)
   );
 }

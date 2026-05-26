@@ -2,6 +2,7 @@ import {
   buildModelEnableGroups,
   opencodeOnlySubGroupLabel,
   partitionCandidates,
+  rowMatches,
   toRow,
   type Candidate,
 } from "./configuredModelGrouping";
@@ -177,7 +178,7 @@ describe("opencodeOnlySubGroupLabel", () => {
 });
 
 describe("toRow", () => {
-  it("surfaces the wire id as a description only when it differs from the label", () => {
+  it("never surfaces the wire id as the description (it duplicates the label)", () => {
     const provider = byokProvider("p", "Anthropic");
     const withName: Candidate = {
       configuredModel: {
@@ -191,7 +192,9 @@ describe("toRow", () => {
     };
     const row = toRow(withName);
     expect(row.label).toBe("Claude Sonnet 4.5");
-    expect(row.description).toBe("claude-sonnet-4-5");
+    expect(row.description).toBeUndefined();
+    // ...but the wire id is still carried for search (just not rendered).
+    expect(row.wireId).toBe("claude-sonnet-4-5");
 
     const sameAsId: Candidate = {
       configuredModel: model("cm2", "p", "raw-id"),
@@ -199,6 +202,45 @@ describe("toRow", () => {
       enabled: false,
     };
     expect(toRow(sameAsId).description).toBeUndefined();
+  });
+
+  it("prefers the capability blurb over the wire id for the description line", () => {
+    const provider = agentProvider("claude", "claude", "Claude");
+    const candidate: Candidate = {
+      configuredModel: {
+        configuredModelId: "cm",
+        providerId: "claude",
+        info: {
+          id: "default",
+          displayName: "Default (recommended)",
+          description: "Opus 4.7 with 1M context · Most capable for complex work",
+        },
+        configuredAt: 0,
+      },
+      provider,
+      enabled: true,
+    };
+    const row = toRow(candidate);
+    expect(row.label).toBe("Default (recommended)");
+    expect(row.description).toBe("Opus 4.7 with 1M context · Most capable for complex work");
+  });
+});
+
+describe("rowMatches", () => {
+  it("matches a model by its wire id even when the label differs", () => {
+    const row = toRow({
+      configuredModel: {
+        configuredModelId: "cm",
+        providerId: "p",
+        info: { id: "claude-sonnet-4-5", displayName: "Claude Sonnet 4.5" },
+        configuredAt: 0,
+      },
+      provider: byokProvider("p", "Anthropic"),
+      enabled: true,
+    });
+    expect(rowMatches(row, "claude-sonnet-4-5")).toBe(true);
+    expect(rowMatches(row, "sonnet")).toBe(true); // label still matches
+    expect(rowMatches(row, "gpt")).toBe(false);
   });
 });
 

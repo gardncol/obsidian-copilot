@@ -133,6 +133,7 @@ export const ClaudeBackendDescriptor: BackendDescriptor = {
   crossDiscoveredAgents: [],
   restartOnManagedSkillsChange: false,
   wire: claudeWire,
+  showModelDescriptions: true,
 
   getEnabledBaseModelIds(settings: CopilotSettings): ReadonlySet<string> {
     // All Claude Code models are agent-origin.

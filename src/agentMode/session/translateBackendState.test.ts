@@ -86,6 +86,47 @@ describe("translateBackendState — model: null cases", () => {
   });
 });
 
+describe("translateBackendState — name normalization + description", () => {
+  it("passes the backend-reported description through when the backend opts in", () => {
+    const models: RawModelState = {
+      currentModelId: "m",
+      availableModels: [{ modelId: "m", name: "M", description: "Opus 4.7 with 1M context" }],
+    };
+    const desc = descriptor({ showModelDescriptions: true });
+    const state = translateBackendState({ models, modes: null, configOptions: null }, desc);
+    expect(findModelEntry(state.model, "m")?.description).toBe("Opus 4.7 with 1M context");
+  });
+
+  it("drops the description when the backend does not opt in (e.g. opencode)", () => {
+    const models: RawModelState = {
+      currentModelId: "m",
+      availableModels: [{ modelId: "m", name: "M", description: "noisy blurb" }],
+    };
+    const state = translateBackendState({ models, modes: null, configOptions: null }, descriptor());
+    expect(findModelEntry(state.model, "m")?.description).toBeUndefined();
+  });
+
+  it("applies descriptor.normalizeModelName to the entry name", () => {
+    const models: RawModelState = {
+      currentModelId: "gpt-5.4",
+      availableModels: [{ modelId: "gpt-5.4", name: "gpt-5.4" }],
+    };
+    const desc = descriptor({ normalizeModelName: (n: string) => n.replace(/^gpt/i, "GPT") });
+    const state = translateBackendState({ models, modes: null, configOptions: null }, desc);
+    expect(findModelEntry(state.model, "gpt-5.4")?.name).toBe("GPT-5.4");
+  });
+
+  it("normalizes the synthesized current entry's name (current not in catalog)", () => {
+    const models: RawModelState = {
+      currentModelId: "gpt-x",
+      availableModels: [{ modelId: "other", name: "Other" }],
+    };
+    const desc = descriptor({ normalizeModelName: (n: string) => n.replace(/^gpt/i, "GPT") });
+    const state = translateBackendState({ models, modes: null, configOptions: null }, desc);
+    expect(findModelEntry(state.model, "gpt-x")?.name).toBe("GPT-x");
+  });
+});
+
 describe("translateBackendState — suffix-style backends", () => {
   it("collapses gpt-5 + variants into one entry with effort options (case 2)", () => {
     const models: RawModelState = {
@@ -364,7 +405,7 @@ describe("translateBackendState — provider/parsing edge cases", () => {
     expect(state.model!.current.effort).toBeNull();
   });
 
-  it("description present / absent round-trips (case 14)", () => {
+  it("description present / absent round-trips for opted-in backends (case 14)", () => {
     const models: RawModelState = {
       currentModelId: "claude-sonnet",
       availableModels: [
@@ -372,7 +413,8 @@ describe("translateBackendState — provider/parsing edge cases", () => {
         { modelId: "claude-haiku", name: "Haiku" },
       ],
     };
-    const state = translateBackendState({ models, modes: null, configOptions: null }, descriptor());
+    const desc = descriptor({ showModelDescriptions: true });
+    const state = translateBackendState({ models, modes: null, configOptions: null }, desc);
     expect(state.model!.availableModels[0].description).toBe("Smart and balanced");
     expect(state.model!.availableModels[1].description).toBeUndefined();
   });

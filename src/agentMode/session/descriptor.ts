@@ -115,6 +115,27 @@ export interface BackendDescriptor {
   readonly wire: ModelWireCodec;
 
   /**
+   * Optional: normalize a backend-reported model display name before it
+   * becomes the canonical `ModelEntry.name`. Applied by the translator at
+   * the single point that builds the name, so every downstream consumer
+   * (chat picker and settings enrollment alike) inherits the same string.
+   *
+   * Keep transforms robust and anchored — no free-text parsing. Codex uses
+   * it to uppercase the inconsistently-cased `gpt` prefix that codex-acp
+   * reports (`gpt-5.4` → `GPT-5.4`); most backends omit it.
+   */
+  normalizeModelName?(name: string): string;
+
+  /**
+   * Opt in to surfacing this backend's per-model `description` as the row
+   * subtitle in the chat picker and the settings enable list. Set for backends
+   * whose catalog is small and curated with meaningful blurbs (claude, codex);
+   * left off for flooding catalogs (opencode) where the line is just noise.
+   * BYOK/Plus models have no description, so they never show one regardless.
+   */
+  readonly showModelDescriptions?: boolean;
+
+  /**
    * Apply a (baseModelId, effort) selection to a live session. The descriptor
    * decides whether effort travels in the wire model id (suffix-style
    * backends: codex, opencode) or via a separate `setConfigOption` call
