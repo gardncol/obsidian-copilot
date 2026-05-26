@@ -45,7 +45,11 @@ import { ChatManager } from "@/core/ChatManager";
 import { MessageRepository } from "@/core/MessageRepository";
 import { logError, logInfo, logWarn } from "@/logger";
 import { logFileManager } from "@/logFileManager";
-import { createModelManagement, type ModelManagementApi } from "@/modelManagement";
+import {
+  createModelManagement,
+  syncCopilotPlusProvider,
+  type ModelManagementApi,
+} from "@/modelManagement";
 import { KeychainService } from "@/services/keychainService";
 import {
   persistSettings,
@@ -148,6 +152,22 @@ export default class CopilotPlugin extends Plugin {
     this.modelManagement = createModelManagement({
       app: this.app,
     });
+    // Register/unregister the Copilot Plus provider (and its models) to match
+    // Plus state, so Plus models surface in the chat + opencode pickers. The
+    // license key (raw/encrypted) is decrypted inside the sync for the relay's
+    // Bearer token. Idempotent, so the redundant initial call below + per-change
+    // calls are safe. Serialized through `plusSyncChain` so a fast
+    // sign-out→sign-in (each its own settings change) settles in issue order,
+    // not in whichever overlapping reconcile happens to finish last.
+    let plusSyncChain: Promise<void> = Promise.resolve();
+    const syncPlus = (isPlusUser: boolean | undefined, licenseKey: string): void => {
+      plusSyncChain = plusSyncChain.then(() =>
+        syncCopilotPlusProvider(this.modelManagement, !!isPlusUser, licenseKey)
+      );
+    };
+    // Initial reconcile: an already-signed-in user's `isPlusUser` is restored
+    // from disk without firing the subscription, so register on load.
+    syncPlus(getSettings().isPlusUser, getSettings().plusLicenseKey);
     this.settingsUnsubscriber = subscribeToSettingsChange((prev, next) => {
       void (async () => {
         try {
@@ -165,6 +185,13 @@ export default class CopilotPlugin extends Plugin {
         registerCommands(this, prev, next);
         if (prev && prev.agentMode?.enabled !== next.agentMode?.enabled) {
           this.refreshRibbonIcon();
+        }
+        // Sign-in / sign-out (isPlusUser flip) or key rotation while signed in.
+        if (
+          prev?.isPlusUser !== next.isPlusUser ||
+          (next.isPlusUser && prev?.plusLicenseKey !== next.plusLicenseKey)
+        ) {
+          syncPlus(next.isPlusUser, next.plusLicenseKey);
         }
       })();
     });

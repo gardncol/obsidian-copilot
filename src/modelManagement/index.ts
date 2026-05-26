@@ -73,6 +73,7 @@ export type {
 
 export { CopilotPlusSetupApi } from "./setup/CopilotPlusSetupApi";
 export type { PlusSetupResult, RegisterPlusProviderInput } from "./setup/CopilotPlusSetupApi";
+export { COPILOT_PLUS_MODELS, syncCopilotPlusProvider } from "./setup/copilotPlusSync";
 
 // ---------------------------------------------------------------------------
 // Top-level factory + coordinator
