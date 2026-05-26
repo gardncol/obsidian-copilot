@@ -104,12 +104,36 @@ export function rowMatches(row: ModelEnableRow, q: string): boolean {
   );
 }
 
+/** Provider-origin kind, used to label the per-group disambiguation badge. */
+type OriginKind = Provider["origin"]["kind"];
+
+/** User-facing badge label for a provider's origin. */
+function originBadgeLabel(kind: OriginKind): string {
+  switch (kind) {
+    case "byok":
+      return "BYOK";
+    case "copilot-plus":
+      return "Copilot Plus";
+    case "agent":
+      return "Agent Provided";
+  }
+}
+
+/** A built group paired with the origin kind every row in it shares. */
+interface OriginGroup {
+  group: ModelEnableGroup;
+  kind: OriginKind;
+}
+
 /**
  * Provider-grouped rows for the shared list. BYOK/Plus candidates get one group
  * per provider; agent-origin candidates get wire-prefix sub-groups for opencode
  * (`opencode`, `openrouter`, …) or a per-provider group for claude/codex. All
- * groups render the same flat, always-visible way. Groups emptied by `query`
- * are dropped.
+ * groups render the same flat way. Groups emptied by `query` are dropped.
+ *
+ * Each group maps to a single origin, so when the list spans more than one
+ * origin (opencode mixes BYOK/Plus/agent) we tag every group with an origin
+ * badge to disambiguate; a single-origin list (claude/codex) gets none.
  */
 export function buildModelEnableGroups(
   partition: CandidatePartition,
@@ -117,20 +141,25 @@ export function buildModelEnableGroups(
   query: string
 ): ModelEnableGroup[] {
   const q = query.trim().toLowerCase();
-  const out: ModelEnableGroup[] = [];
+  const out: OriginGroup[] = [];
 
-  // BYOK/Plus providers — one group per provider, always visible.
-  const byProvider = new Map<string, { label: string; rows: ModelEnableRow[] }>();
+  // BYOK/Plus providers — one group per provider.
+  const byProvider = new Map<string, { label: string; kind: OriginKind; rows: ModelEnableRow[] }>();
   for (const candidate of partition.byokPlusCandidates) {
     const row = toRow(candidate);
     if (!rowMatches(row, q)) continue;
     const key = candidate.provider.providerId;
     const bucket = byProvider.get(key);
     if (bucket) bucket.rows.push(row);
-    else byProvider.set(key, { label: candidate.provider.displayName, rows: [row] });
+    else
+      byProvider.set(key, {
+        label: candidate.provider.displayName,
+        kind: candidate.provider.origin.kind,
+        rows: [row],
+      });
   }
-  for (const [key, { label, rows }] of byProvider) {
-    out.push({ key: `byok:${key}`, label, rows });
+  for (const [key, { label, kind, rows }] of byProvider) {
+    out.push({ group: { key: `byok:${key}`, label, rows }, kind });
   }
 
   // Agent-origin models — opencode-only sub-groups (by wire prefix) or a
@@ -147,8 +176,13 @@ export function buildModelEnableGroups(
     else bySubGroup.set(label, { label, rows: [row] });
   }
   for (const [label, { rows }] of bySubGroup) {
-    out.push({ key: `agent:${label}`, label, rows });
+    out.push({ group: { key: `agent:${label}`, label, rows }, kind: "agent" });
   }
 
-  return out;
+  // Badge each group only when the list actually mixes origins.
+  const mixed = new Set(out.map((o) => o.kind)).size > 1;
+  if (mixed) {
+    for (const o of out) o.group.badge = originBadgeLabel(o.kind);
+  }
+  return out.map((o) => o.group);
 }
