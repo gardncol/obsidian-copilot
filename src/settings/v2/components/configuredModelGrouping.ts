@@ -96,10 +96,11 @@ export function rowMatches(row: ModelEnableRow, q: string): boolean {
 }
 
 /**
- * Provider-grouped rows for the shared list. BYOK/Plus candidates get one
- * always-visible group per provider; agent-origin candidates get collapsible
- * wire-prefix sub-groups for opencode (its catalog floods) or a per-provider
- * group for claude/codex. Groups emptied by `query` are dropped.
+ * Provider-grouped rows for the shared list. BYOK/Plus candidates get one group
+ * per provider; agent-origin candidates get wire-prefix sub-groups for opencode
+ * (`opencode`, `openrouter`, …) or a per-provider group for claude/codex. All
+ * groups render the same flat, always-visible way. Groups emptied by `query`
+ * are dropped.
  */
 export function buildModelEnableGroups(
   partition: CandidatePartition,
@@ -120,7 +121,7 @@ export function buildModelEnableGroups(
     else byProvider.set(key, { label: candidate.provider.displayName, rows: [row] });
   }
   for (const [key, { label, rows }] of byProvider) {
-    out.push({ key: `byok:${key}`, label, collapsible: false, rows });
+    out.push({ key: `byok:${key}`, label, rows });
   }
 
   // Agent-origin models — opencode-only sub-groups (by wire prefix) or a
@@ -137,7 +138,7 @@ export function buildModelEnableGroups(
     else bySubGroup.set(label, { label, rows: [row] });
   }
   for (const [label, { rows }] of bySubGroup) {
-    out.push({ key: `agent:${label}`, label, collapsible: isOpencode, rows });
+    out.push({ key: `agent:${label}`, label, rows });
   }
 
   return out;
