@@ -1,6 +1,9 @@
+import { Badge } from "@/components/ui/badge";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { SearchBar } from "@/components/ui/SearchBar";
 import { SettingSwitch } from "@/components/ui/setting-switch";
 import { cn } from "@/lib/utils";
+import { ChevronRight } from "lucide-react";
 import React from "react";
 
 /** A single toggleable model row. */
@@ -23,6 +26,11 @@ export interface ModelEnableGroup {
   key: string;
   /** Group heading — a provider display name (no glyphs/avatars). */
   label: string;
+  /**
+   * Origin badge (e.g. "BYOK", "Copilot Plus", "Agent Provided"). Set only when
+   * the list spans multiple origins, so it actually disambiguates.
+   */
+  badge?: string;
   rows: ModelEnableRow[];
 }
 
@@ -55,6 +63,14 @@ export const ModelEnableList: React.FC<ModelEnableListProps> = ({
   emptyState,
 }) => {
   const searching = query.trim().length > 0;
+
+  // Open by default — track only the keys the user explicitly collapsed. While
+  // searching, force every group open so matches are never hidden; the collapse
+  // intent is remembered and re-applies once the query clears.
+  const [collapsed, setCollapsed] = React.useState<Record<string, boolean>>({});
+  const isOpen = (key: string) => searching || !collapsed[key];
+  const handleOpenChange = (key: string, open: boolean) =>
+    setCollapsed((prev) => ({ ...prev, [key]: !open }));
 
   const renderRows = (rows: ModelEnableRow[]): React.ReactNode => (
     <div className="tw-space-y-1">
@@ -94,10 +110,31 @@ export const ModelEnableList: React.FC<ModelEnableListProps> = ({
             {groups
               .filter((g) => g.rows.length > 0)
               .map((group) => (
-                <div key={group.key}>
-                  <div className="tw-px-2 tw-py-1.5 tw-font-medium">{group.label}</div>
-                  <div className="tw-pl-2">{renderRows(group.rows)}</div>
-                </div>
+                <Collapsible
+                  key={group.key}
+                  open={isOpen(group.key)}
+                  onOpenChange={(open) => handleOpenChange(group.key, open)}
+                >
+                  <CollapsibleTrigger asChild>
+                    <div className="tw-flex tw-w-full tw-cursor-pointer tw-items-center tw-gap-1 tw-rounded tw-px-2 tw-py-1.5 tw-text-left tw-text-ui-medium tw-font-bold hover:tw-bg-modifier-hover">
+                      <ChevronRight
+                        className={cn(
+                          "tw-size-3 tw-shrink-0 tw-text-muted tw-transition-transform",
+                          isOpen(group.key) && "tw-rotate-90"
+                        )}
+                      />
+                      <span className="tw-truncate">{group.label}</span>
+                      {group.badge && (
+                        <Badge variant="secondary" className="tw-shrink-0 tw-font-normal">
+                          {group.badge}
+                        </Badge>
+                      )}
+                    </div>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <div className="tw-pl-4">{renderRows(group.rows)}</div>
+                  </CollapsibleContent>
+                </Collapsible>
               ))}
           </div>
         )}

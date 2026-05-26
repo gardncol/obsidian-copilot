@@ -317,4 +317,55 @@ describe("buildModelEnableGroups", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0].label).toBe("Codex");
   });
+
+  it("badges each group with its origin when the list mixes origins (opencode)", () => {
+    const plusProvider: Provider = {
+      providerId: "plus-1",
+      providerType: "anthropic",
+      displayName: "Copilot Plus",
+      origin: { kind: "copilot-plus" },
+      addedAt: 0,
+    };
+    const partition = {
+      byokPlusCandidates: [
+        {
+          configuredModel: model("m-byok", "byok-1", "claude-sonnet-4-5"),
+          provider: byok,
+          enabled: true,
+        },
+        {
+          configuredModel: model("m-plus", "plus-1", "gpt-5"),
+          provider: plusProvider,
+          enabled: false,
+        },
+      ],
+      agentOriginCandidates: [
+        {
+          configuredModel: model("m-oc", "oc-agent", "opencode/big-pickle"),
+          provider: ocAgent,
+          enabled: false,
+        },
+      ],
+    };
+    const groups = buildModelEnableGroups(partition, true, "");
+    expect(groups.find((g) => g.key === "byok:byok-1")?.badge).toBe("BYOK");
+    expect(groups.find((g) => g.key === "byok:plus-1")?.badge).toBe("Copilot Plus");
+    expect(groups.find((g) => g.label === "opencode")?.badge).toBe("Agent Provided");
+  });
+
+  it("omits badges when the list has a single origin (claude/codex)", () => {
+    const codexAgent = agentProvider("codex-agent", "codex", "Codex");
+    const partition = {
+      byokPlusCandidates: [],
+      agentOriginCandidates: [
+        {
+          configuredModel: model("m-codex", "codex-agent", "gpt-5"),
+          provider: codexAgent,
+          enabled: true,
+        },
+      ],
+    };
+    const groups = buildModelEnableGroups(partition, false, "");
+    expect(groups[0].badge).toBeUndefined();
+  });
 });

@@ -10,6 +10,7 @@
   - [ ] Allow users to share system prompt
   - [ ] Do a quick spike on the concrete behavior
   - [ ] Investigate opencode provider specific prompt
+- [ ] P0: Test sandbox mode
 - [x] P0: Skills
   - [x] Check out cc-switch to understand how to make skills compatible cross other agents https://github.com/farion1231/cc-switch
 - [x] P0: Permission management
