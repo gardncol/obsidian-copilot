@@ -285,7 +285,9 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
     if (session.permissionMode) options.permissionMode = session.permissionMode;
     if (session.effort) options.effort = session.effort;
     if (this.opts.getEnableThinking?.()) {
-      options.thinking = { type: "adaptive" };
+      // Opus 4.7+ defaults thinking.display to "omitted", so summaries never
+      // reach the UI; force "summarized" (pre-4.7 models default to summarized).
+      options.thinking = { type: "adaptive", display: "summarized" };
     }
     const envOverrides = this.opts.getEnvOverrides?.();
     if (envOverrides && Object.keys(envOverrides).length > 0) {
