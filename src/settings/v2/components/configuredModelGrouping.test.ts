@@ -318,7 +318,7 @@ describe("buildModelEnableGroups", () => {
     expect(groups[0].label).toBe("Codex");
   });
 
-  it("badges each group with its origin when the list mixes origins (opencode)", () => {
+  it("badges non-Plus origins when the list mixes origins (opencode)", () => {
     const plusProvider: Provider = {
       providerId: "plus-1",
       providerType: "anthropic",
@@ -349,8 +349,45 @@ describe("buildModelEnableGroups", () => {
     };
     const groups = buildModelEnableGroups(partition, true, "");
     expect(groups.find((g) => g.key === "byok:byok-1")?.badge).toBe("BYOK");
-    expect(groups.find((g) => g.key === "byok:plus-1")?.badge).toBe("Copilot Plus");
     expect(groups.find((g) => g.label === "opencode")?.badge).toBe("Agent Provided");
+  });
+
+  it("floats Copilot Plus to the top, highlights it, and gives it no redundant badge", () => {
+    const plusProvider: Provider = {
+      providerId: "plus-1",
+      providerType: "anthropic",
+      displayName: "Copilot Plus",
+      origin: { kind: "copilot-plus" },
+      addedAt: 0,
+    };
+    const partition = {
+      byokPlusCandidates: [
+        {
+          configuredModel: model("m-byok", "byok-1", "claude-sonnet-4-5"),
+          provider: byok,
+          enabled: true,
+        },
+        {
+          configuredModel: model("m-plus", "plus-1", "gpt-5"),
+          provider: plusProvider,
+          enabled: false,
+        },
+      ],
+      agentOriginCandidates: [
+        {
+          configuredModel: model("m-oc", "oc-agent", "opencode/big-pickle"),
+          provider: ocAgent,
+          enabled: false,
+        },
+      ],
+    };
+    const groups = buildModelEnableGroups(partition, true, "");
+    // Copilot Plus is first regardless of candidate order.
+    expect(groups[0].key).toBe("byok:plus-1");
+    expect(groups[0].highlight).toBe(true);
+    expect(groups[0].badge).toBeUndefined();
+    // Non-Plus groups are not highlighted.
+    expect(groups.find((g) => g.key === "byok:byok-1")?.highlight).toBeUndefined();
   });
 
   it("omits badges when the list has a single origin (claude/codex)", () => {

@@ -18,11 +18,12 @@
 
 import type { ModelManagementCoordinator } from "@/modelManagement/createModelManagement";
 import type { ProviderType } from "@/modelManagement/types/catalog";
-import type { BackendType } from "@/modelManagement/types/persisted";
+import type { BackendType, Provider } from "@/modelManagement/types/persisted";
 import type { ModelInfo } from "@/modelManagement/types/catalog";
 import type { BackendConfigRegistry } from "@/modelManagement/backends/BackendConfigRegistry";
 import type { ConfiguredModelRegistry } from "@/modelManagement/models/ConfiguredModelRegistry";
 import type { ProviderRegistry } from "@/modelManagement/providers/ProviderRegistry";
+import { BYOK_DEFAULT_AUTO_ENROLL } from "@/modelManagement/setup/ByokSetupApi";
 
 export interface RegisterPlusProviderInput {
   /** Which adapter family backs the Plus relay (Plus may add more
@@ -47,6 +48,11 @@ export interface PlusSetupResult {
 }
 
 export class CopilotPlusSetupApi {
+  readonly #providers: ProviderRegistry;
+  readonly #models: ConfiguredModelRegistry;
+  readonly #backends: BackendConfigRegistry;
+  readonly #coordinator: ModelManagementCoordinator;
+
   constructor(
     providerRegistry: ProviderRegistry,
     configuredModelRegistry: ConfiguredModelRegistry,
@@ -56,7 +62,12 @@ export class CopilotPlusSetupApi {
      *  `coordinator.removeConfiguredModel` /
      *  `coordinator.removeProvider`. */
     coordinator: ModelManagementCoordinator
-  ) {}
+  ) {
+    this.#providers = providerRegistry;
+    this.#models = configuredModelRegistry;
+    this.#backends = backendConfigRegistry;
+    this.#coordinator = coordinator;
+  }
 
   /**
    * Idempotent. First call creates a `Provider` row with
@@ -69,11 +80,45 @@ export class CopilotPlusSetupApi {
    * `autoEnrollIn ?? BYOK_DEFAULT_AUTO_ENROLL`. Existing models that
    * are no longer in `input.models` are removed (cascading their
    * backend refs through the coordinator).
+   *
+   * Writes happen in order — provider row, then key (only if non-null),
+   * then models — so a failed later step leaves earlier writes for
+   * `coordinator.removeProvider` (sign-out) to clean up.
    */
-  registerPlusProvider(input: RegisterPlusProviderInput): Promise<PlusSetupResult> {
-    throw new Error(
-      "[modelManagement] CopilotPlusSetupApi.registerPlusProvider not implemented yet"
+  async registerPlusProvider(input: RegisterPlusProviderInput): Promise<PlusSetupResult> {
+    const existing = this.#findPlusProvider();
+
+    let providerId: string;
+    if (existing) {
+      providerId = existing.providerId;
+      // Reuse the row so re-syncing never spawns a second Plus provider;
+      // providerType/origin/keychain id are immutable through `update`.
+      await this.#providers.update(providerId, {
+        displayName: input.displayName,
+        baseUrl: input.baseUrl,
+      });
+    } else {
+      providerId = await this.#providers.add({
+        providerType: input.providerType,
+        displayName: input.displayName,
+        baseUrl: input.baseUrl,
+        origin: { kind: "copilot-plus" },
+      });
+    }
+
+    // The license key IS the relay token; store it so the chat factory and
+    // `buildOpencodeConfig` can read it back via `getApiKey` at call time.
+    if (input.apiKey != null) {
+      await this.#providers.setApiKey(providerId, input.apiKey);
+    }
+
+    const configuredModelIds = await this.#reconcileModels(
+      providerId,
+      input.models,
+      input.autoEnrollIn ?? BYOK_DEFAULT_AUTO_ENROLL
     );
+
+    return { providerId, configuredModelIds };
   }
 
   /**
@@ -81,9 +126,77 @@ export class CopilotPlusSetupApi {
    * dropping its ConfiguredModels and clearing backend refs. No-op
    * when no Plus provider exists.
    */
-  unregisterPlusProvider(): Promise<void> {
-    throw new Error(
-      "[modelManagement] CopilotPlusSetupApi.unregisterPlusProvider not implemented yet"
-    );
+  async unregisterPlusProvider(): Promise<void> {
+    const existing = this.#findPlusProvider();
+    if (!existing) return;
+    await this.#coordinator.removeProvider(existing.providerId);
+  }
+
+  /**
+   * The single Plus provider (origin filter). Throws if more than one exists —
+   * Plus is a singleton origin and a silent pick would corrupt state.
+   */
+  #findPlusProvider(): Provider | undefined {
+    const matches = this.#providers.listByOrigin("copilot-plus");
+    if (matches.length > 1) {
+      throw new Error(
+        `[modelManagement] CopilotPlusSetupApi: ${matches.length} copilot-plus providers ` +
+          `found; the singleton invariant is violated`
+      );
+    }
+    return matches[0];
+  }
+
+  /**
+   * Diff-reconcile the Plus provider's ConfiguredModel set against `models`:
+   * add new wire ids (auto-enrolling each non-embedding model), refresh drifted
+   * display strings in place (no configuredModelId churn), and cascade-remove
+   * vanished ones. Returns the resulting ids in input order. Mirrors
+   * `AgentSetupApi.#reconcileModels`; only real deltas write, so re-syncing an
+   * unchanged list never resets user curation.
+   */
+  async #reconcileModels(
+    providerId: string,
+    models: readonly ModelInfo[],
+    autoEnrollIn: readonly BackendType[]
+  ): Promise<string[]> {
+    const existing = this.#models.listByProvider(providerId);
+    const existingByWireId = new Map(existing.map((m) => [m.info.id, m]));
+    const desiredWireIds = new Set(models.map((info) => info.id));
+
+    for (const info of models) {
+      const current = existingByWireId.get(info.id);
+      if (!current) {
+        const configuredModelId = await this.#models.add({ providerId, info });
+        // Embedding models aren't chat models — enrolling them into chat/agent
+        // backends would surface them in completion pickers where they fail.
+        if (!info.isEmbedding) {
+          for (const backend of autoEnrollIn) {
+            await this.#backends.enableModel(backend, configuredModelId);
+          }
+        }
+        continue;
+      }
+      if (
+        current.info.displayName !== info.displayName ||
+        current.info.description !== info.description
+      ) {
+        await this.#models.update(current.configuredModelId, {
+          info: { displayName: info.displayName, description: info.description },
+        });
+      }
+    }
+
+    for (const model of existing) {
+      if (desiredWireIds.has(model.info.id)) continue;
+      await this.#coordinator.removeConfiguredModel(model.configuredModelId);
+    }
+
+    const ids: string[] = [];
+    for (const info of models) {
+      const found = this.#models.getByWireId(providerId, info.id);
+      if (found) ids.push(found.configuredModelId);
+    }
+    return ids;
   }
 }

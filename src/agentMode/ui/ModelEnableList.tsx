@@ -27,10 +27,16 @@ export interface ModelEnableGroup {
   /** Group heading — a provider display name (no glyphs/avatars). */
   label: string;
   /**
-   * Origin badge (e.g. "BYOK", "Copilot Plus", "Agent Provided"). Set only when
-   * the list spans multiple origins, so it actually disambiguates.
+   * Origin badge (e.g. "BYOK", "Agent Provided"). Set only when the list spans
+   * multiple origins, so it actually disambiguates. Copilot Plus carries no
+   * badge — its label already reads "Copilot Plus".
    */
   badge?: string;
+  /**
+   * Visually emphasize the group header (accent color). Set for Copilot Plus,
+   * which the caller also floats to the top of the list.
+   */
+  highlight?: boolean;
   rows: ModelEnableRow[];
 }
 
@@ -123,7 +129,14 @@ export const ModelEnableList: React.FC<ModelEnableListProps> = ({
                           isOpen(group.key) && "tw-rotate-90"
                         )}
                       />
-                      <span className="tw-truncate">{group.label}</span>
+                      <span
+                        className={cn(
+                          "tw-truncate",
+                          group.highlight && "tw-font-bold tw-text-accent"
+                        )}
+                      >
+                        {group.label}
+                      </span>
                       {group.badge && (
                         <Badge variant="secondary" className="tw-shrink-0 tw-font-normal">
                           {group.badge}

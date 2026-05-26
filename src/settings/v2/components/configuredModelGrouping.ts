@@ -179,10 +179,18 @@ export function buildModelEnableGroups(
     out.push({ group: { key: `agent:${label}`, label, rows }, kind: "agent" });
   }
 
-  // Badge each group only when the list actually mixes origins.
+  // Copilot Plus is highlighted and floated to the top; its provider name
+  // already reads "Copilot Plus", so it carries no disambiguating badge. Every
+  // other origin gets a badge only when the list actually mixes origins.
   const mixed = new Set(out.map((o) => o.kind)).size > 1;
-  if (mixed) {
-    for (const o of out) o.group.badge = originBadgeLabel(o.kind);
+  for (const o of out) {
+    if (o.kind === "copilot-plus") {
+      o.group.highlight = true;
+    } else if (mixed) {
+      o.group.badge = originBadgeLabel(o.kind);
+    }
   }
+  // Stable sort (V8 sort is stable): Copilot Plus first, others keep their order.
+  out.sort((a, b) => Number(b.kind === "copilot-plus") - Number(a.kind === "copilot-plus"));
   return out.map((o) => o.group);
 }
