@@ -265,7 +265,10 @@ export function ModelEffortPicker({ override, className }: ModelEffortPickerProp
                   title={disabledReason ?? undefined}
                 >
                   <div className="tw-flex tw-min-w-0 tw-items-center tw-gap-2">
-                    <span className="tw-w-3 tw-text-center tw-text-xs tw-text-muted" aria-hidden>
+                    <span
+                      className="tw-flex tw-w-3 tw-shrink-0 tw-items-center tw-justify-center tw-text-xs tw-text-muted"
+                      aria-hidden
+                    >
                       {isActive ? "✓" : isHighlight ? "›" : ""}
                     </span>
                     <div className="tw-min-w-0">
