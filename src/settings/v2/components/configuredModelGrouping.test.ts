@@ -206,7 +206,7 @@ describe("buildModelEnableGroups", () => {
   const byok = byokProvider("byok-1", "Anthropic");
   const ocAgent = agentProvider("oc-agent", "opencode", "opencode");
 
-  it("opencode: BYOK group is always-visible; opencode-only sub-groups derive from wire prefix and collapse", () => {
+  it("opencode: BYOK group plus opencode-only sub-groups derived from the wire prefix", () => {
     const partition = {
       byokPlusCandidates: [
         {
@@ -230,13 +230,10 @@ describe("buildModelEnableGroups", () => {
     };
     const groups = buildModelEnableGroups(partition, true, "");
     const byokGroup = groups.find((g) => g.key === "byok:byok-1");
-    expect(byokGroup?.collapsible).toBe(false);
     expect(byokGroup?.label).toBe("Anthropic");
 
     const openGroup = groups.find((g) => g.label === "opencode");
     const routerGroup = groups.find((g) => g.label === "openrouter");
-    expect(openGroup?.collapsible).toBe(true);
-    expect(routerGroup?.collapsible).toBe(true);
     expect(openGroup?.rows.map((r) => r.id)).toEqual(["m-oc1"]);
     expect(routerGroup?.rows.map((r) => r.id)).toEqual(["m-oc2"]);
   });
@@ -262,7 +259,7 @@ describe("buildModelEnableGroups", () => {
     expect(groups[0].rows.map((r) => r.id)).toEqual(["m-oc1"]);
   });
 
-  it("claude/codex: agent-origin rows render as an always-visible provider group", () => {
+  it("claude/codex: agent-origin rows render as a single provider group", () => {
     const codexAgent = agentProvider("codex-agent", "codex", "Codex");
     const partition = {
       byokPlusCandidates: [],
@@ -277,6 +274,5 @@ describe("buildModelEnableGroups", () => {
     const groups = buildModelEnableGroups(partition, false, "");
     expect(groups).toHaveLength(1);
     expect(groups[0].label).toBe("Codex");
-    expect(groups[0].collapsible).toBe(false);
   });
 });

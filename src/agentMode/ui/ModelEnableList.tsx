@@ -1,8 +1,6 @@
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { SearchBar } from "@/components/ui/SearchBar";
 import { SettingSwitch } from "@/components/ui/setting-switch";
 import { cn } from "@/lib/utils";
-import { ChevronDown, ChevronRight } from "lucide-react";
 import React from "react";
 
 /** A single toggleable model row. */
@@ -19,16 +17,10 @@ export interface ModelEnableRow {
 
 /** A provider-display-name-grouped section of model rows. */
 export interface ModelEnableGroup {
-  /** Stable key used for collapse state + React keys. */
+  /** Stable key used for React keys. */
   key: string;
   /** Group heading — a provider display name (no glyphs/avatars). */
   label: string;
-  /**
-   * When `true`, the group renders inside a `Collapsible` with a count and
-   * starts collapsed by default. When `false`/omitted the rows render
-   * directly (small, always-visible groups).
-   */
-  collapsible?: boolean;
   rows: ModelEnableRow[];
 }
 
@@ -47,10 +39,10 @@ interface ModelEnableListProps {
 }
 
 /**
- * Presentational toggle list for agent model curation: provider-grouped rows
- * (optionally collapsible), a search box, and a switch per row. Owns no
- * registry/atom access — the container passes grouped data and `onToggle`.
- * Group headings show the provider display name only (no glyphs/avatars).
+ * Presentational toggle list for agent model curation: provider-grouped rows, a
+ * search box, and a switch per row. Owns no registry/atom access — the container
+ * passes grouped data and `onToggle`. Group headings show the provider display
+ * name only (no glyphs/avatars).
  */
 export const ModelEnableList: React.FC<ModelEnableListProps> = ({
   groups,
@@ -60,24 +52,7 @@ export const ModelEnableList: React.FC<ModelEnableListProps> = ({
   searchPlaceholder = "Search models…",
   emptyState,
 }) => {
-  // Per-group user-controlled expand state. While searching every group with
-  // matches auto-expands so results are visible without an extra click.
-  const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
   const searching = query.trim().length > 0;
-
-  const isExpanded = (group: ModelEnableGroup): boolean => {
-    if (!group.collapsible) return true;
-    if (searching) return true;
-    const userToggle = expanded[group.key];
-    if (typeof userToggle === "boolean") return userToggle;
-    // Collapsible groups default to collapsed.
-    return false;
-  };
-
-  const toggleExpanded = (group: ModelEnableGroup): void => {
-    const currentlyOpen = isExpanded(group);
-    setExpanded((prev) => ({ ...prev, [group.key]: !currentlyOpen }));
-  };
 
   const renderRows = (rows: ModelEnableRow[]): React.ReactNode => (
     <div className="tw-space-y-1">
@@ -116,41 +91,12 @@ export const ModelEnableList: React.FC<ModelEnableListProps> = ({
           <div className="tw-space-y-2">
             {groups
               .filter((g) => g.rows.length > 0)
-              .map((group) =>
-                group.collapsible ? (
-                  <Collapsible
-                    key={group.key}
-                    open={isExpanded(group)}
-                    onOpenChange={() => toggleExpanded(group)}
-                  >
-                    <CollapsibleTrigger
-                      className={cn(
-                        "tw-flex tw-w-full tw-items-center tw-justify-between tw-rounded tw-px-2 tw-py-1.5 tw-text-left",
-                        "hover:tw-bg-modifier-hover"
-                      )}
-                      type="button"
-                    >
-                      <div className="tw-flex tw-items-center tw-gap-2">
-                        {isExpanded(group) ? (
-                          <ChevronDown className="tw-size-4 tw-text-muted" />
-                        ) : (
-                          <ChevronRight className="tw-size-4 tw-text-muted" />
-                        )}
-                        <span className="tw-font-medium">{group.label}</span>
-                      </div>
-                      <span className="tw-text-xs tw-text-muted">{group.rows.length}</span>
-                    </CollapsibleTrigger>
-                    <CollapsibleContent>
-                      <div className="tw-mt-1 tw-pl-6">{renderRows(group.rows)}</div>
-                    </CollapsibleContent>
-                  </Collapsible>
-                ) : (
-                  <div key={group.key}>
-                    <div className="tw-px-2 tw-py-1.5 tw-font-medium">{group.label}</div>
-                    <div className="tw-pl-2">{renderRows(group.rows)}</div>
-                  </div>
-                )
-              )}
+              .map((group) => (
+                <div key={group.key}>
+                  <div className="tw-px-2 tw-py-1.5 tw-font-medium">{group.label}</div>
+                  <div className="tw-pl-2">{renderRows(group.rows)}</div>
+                </div>
+              ))}
           </div>
         )}
       </div>
