@@ -54,6 +54,26 @@ This is the canonical "get my changes running" step — don't hand-roll `npm run
 build && cp main.js …`. If the user has multiple Conductor worktrees, whichever
 one ran `test:vault` last wins; verify with the preflight in the next section.
 
+## Reset the test vault's settings
+
+```bash
+npm run test:reset-data                 # bundled clean-onboarding fixture
+npm run test:reset-data -- <path>       # any data.json you point at
+```
+
+Companion to `test:vault`. Overwrites
+`$COPILOT_TEST_VAULT_PATH/.obsidian/plugins/copilot/data.json` with a fixture,
+then reloads the plugin (same Obsidian CLI reload as `test:vault`) so the reset
+takes effect immediately — the reload matters because a running plugin holds
+settings in memory and would otherwise overwrite the file on its next save.
+
+With no argument it uses `scripts/test-fixtures/data.clean-onboarding.json`: no
+coding agent and no BYOK model configured (empty `providers` / `configuredModels`
+/ `backends`), for testing the agent onboarding flow from a clean slate. The
+fixture omits `_keychainOnly`, so the plugin loads in disk mode and ignores any
+API keys left in the OS keychain from prior runs — a deterministic clean state.
+The source file is validated as JSON before the target is touched.
+
 ## 0. Golden rule: pick the right window first
 
 Obsidian is a single Electron app with one renderer per open vault. The CLI

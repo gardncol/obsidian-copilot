@@ -541,12 +541,38 @@ describe("AgentSetupApi.syncAgentModels", () => {
     expect(h.providers.add).not.toHaveBeenCalled();
     expect(h.providers.update).not.toHaveBeenCalled();
 
-    // New model added + enrolled; existing one preserved.
+    // New model added but left DISABLED; existing one preserved + still enabled.
     expect(result.added).toHaveLength(1);
     expect(result.removed).toHaveLength(0);
     const opusId = h.models.getByWireId(reg.providerId, "claude-opus-4-5")!.configuredModelId;
     expect(result.added).toEqual([opusId]);
-    expect(h.backends.enabledFor("claude")).toEqual(expect.arrayContaining([sonnetId, opusId]));
+    expect(h.backends.enabledFor("claude")).toEqual([sonnetId]);
+    expect(h.backends.enabledFor("claude")).not.toContain(opusId);
+  });
+
+  it("leaves every model a later probe introduces disabled (only the seeded one stays on)", async () => {
+    // Mirrors opencode's first→follow-up flow: enrollment seeds one model, then
+    // a later probe floods in many more — none of which should turn themselves on.
+    const h = makeHarness();
+    const reg = await h.api.registerAgentProvider({
+      agentType: "claude",
+      providerType: "anthropic",
+      displayName: "Claude Code",
+      apiKey: null,
+      wireModelIds: ["claude-sonnet-4-5"],
+    });
+    const sonnetId = reg.configuredModelIds[0];
+
+    await h.api.syncAgentModels({
+      agentType: "claude",
+      wireModelIds: ["claude-sonnet-4-5", "claude-opus-4-5", "claude-haiku-4-5"],
+    });
+
+    // The enabled set is unchanged: still just the seeded model.
+    expect(h.backends.enabledFor("claude")).toEqual([sonnetId]);
+    // ...even though both new models now exist as configured (toggleable) rows.
+    expect(h.models.getByWireId(reg.providerId, "claude-opus-4-5")).toBeDefined();
+    expect(h.models.getByWireId(reg.providerId, "claude-haiku-4-5")).toBeDefined();
   });
 
   it("cascade-removes a vanished model on sync", async () => {
