@@ -1,9 +1,15 @@
 /**
  * Enrolls an agent's reported model list into the data model. Creates one
- * `Provider` per `(agentType, providerType)` with `origin: "agent"`, snapshots
- * a `ConfiguredModel` per `wireModelId`, and auto-enrolls each into
- * `backends[agentType]` only, so agent-owned models stay exclusive to their
- * agent's picker.
+ * `Provider` per `(agentType, providerType)` with `origin: "agent"` and
+ * snapshots a `ConfiguredModel` per `wireModelId`.
+ *
+ * Enablement follows one rule: only the agent's *current* model ends up
+ * enabled. `registerAgentProvider` (first enrollment) auto-enrolls every model
+ * into `backends[agentType]` so the discovery wiring can then narrow the
+ * enabled set down to the current model; `syncAgentModels` (later probes) adds
+ * newly-reported models *disabled*, so a model the agent introduces later never
+ * silently turns itself on. Either way agent-owned models stay exclusive to
+ * their agent's picker.
  *
  * `registerAgentProvider` is idempotent on `(agentType, providerType)`:
  * re-running reconciles the model list. `syncAgentModels` is the narrower
@@ -126,7 +132,11 @@ export class AgentSetupApi {
       input.fallbackDisplayNames,
       input.fallbackDescriptions
     );
-    const { added, removed } = await this.#reconcileModels(input.agentType, providerId, infos);
+    // First enrollment enables every model; the discovery wiring narrows the
+    // enabled set to the current model afterward.
+    const { added, removed } = await this.#reconcileModels(input.agentType, providerId, infos, {
+      enableNewModels: true,
+    });
 
     // Return the configured-model ids in wire-id order, joining freshly-added
     // ids with the surviving ones.
@@ -157,6 +167,10 @@ export class AgentSetupApi {
    * today) reconciles directly. When several agent providers share one
    * `agentType`, wire ids are partitioned by their owning provider so each only
    * reconciles its own — never corrupting another provider's list.
+   *
+   * Newly-reported models are added *disabled*: a model the agent introduces on
+   * a later probe never turns itself on, so the enabled set keeps reflecting the
+   * user's curation (only the current model was seeded at first enrollment).
    */
   async syncAgentModels(input: SyncAgentModelsInput): Promise<AgentSyncResult> {
     const providers = this.#listAgentProviders(input.agentType);
@@ -176,7 +190,8 @@ export class AgentSetupApi {
       const { added, removed } = await this.#reconcileModels(
         input.agentType,
         provider.providerId,
-        infos
+        infos,
+        { enableNewModels: false }
       );
       return {
         added: added.map((a) => a.configuredModelId),
@@ -209,7 +224,8 @@ export class AgentSetupApi {
       const { added, removed } = await this.#reconcileModels(
         input.agentType,
         provider.providerId,
-        infos
+        infos,
+        { enableNewModels: false }
       );
       for (const a of added) addedAll.push(a.configuredModelId);
       for (const r of removed) removedAll.push(r.configuredModelId);
@@ -365,16 +381,22 @@ export class AgentSetupApi {
 
   /**
    * Diff-reconcile one provider's ConfiguredModel set against `infos`: add new
-   * wire ids (auto-enrolling each into `backends[agentType]` only),
-   * refresh the display strings of existing ids whose name/description changed
-   * (so a CLI upgrade or this feature's rollout updates already-enrolled rows),
-   * and cascade-remove vanished ones. Only real deltas write, so re-syncing an
-   * unchanged list is a no-op that never resets user curation.
+   * wire ids, refresh the display strings of existing ids whose
+   * name/description changed (so a CLI upgrade or this feature's rollout updates
+   * already-enrolled rows), and cascade-remove vanished ones. Only real deltas
+   * write, so re-syncing an unchanged list is a no-op that never resets user
+   * curation.
+   *
+   * `enableNewModels` controls whether each freshly-added model is enrolled into
+   * `backends[agentType]`: `true` on first enrollment (the discovery wiring
+   * narrows to the current model afterward), `false` on later syncs so a model
+   * the agent introduces later stays disabled until the user enables it.
    */
   async #reconcileModels(
     agentType: AgentType,
     providerId: string,
-    infos: readonly ModelInfo[]
+    infos: readonly ModelInfo[],
+    opts: { enableNewModels: boolean }
   ): Promise<{
     added: Array<{ wireId: string; configuredModelId: string }>;
     removed: Array<{ wireId: string; configuredModelId: string }>;
@@ -389,8 +411,11 @@ export class AgentSetupApi {
       if (!current) {
         const configuredModelId = await this.#models.add({ providerId, info });
         // Enroll into this agent's backend only — agent models never leak into
-        // chat or another agent's picker.
-        await this.#backends.enableModel(agentType, configuredModelId);
+        // chat or another agent's picker. Skipped on sync so later-discovered
+        // models stay disabled until the user enables them.
+        if (opts.enableNewModels) {
+          await this.#backends.enableModel(agentType, configuredModelId);
+        }
         added.push({ wireId: info.id, configuredModelId });
         continue;
       }

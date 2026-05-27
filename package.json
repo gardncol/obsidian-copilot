@@ -20,7 +20,8 @@
     "test:integration": "jest src/integration_tests/",
     "prepare": "husky",
     "prompt:debug": "node scripts/printPromptDebug.js",
-    "test:vault": "bash scripts/test-vault.sh"
+    "test:vault": "bash scripts/test-vault.sh",
+    "test:reset-data": "bash scripts/test-reset-data.sh"
   },
   "keywords": [],
   "author": "Logan Yang",
