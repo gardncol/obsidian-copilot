@@ -29,7 +29,6 @@ describe("CodexBackend.buildSpawnDescriptor", () => {
     resetSettings();
     setSettings({
       agentMode: {
-        enabled: true,
         byok: {},
         mcpServers: [],
         activeBackend: "codex",
@@ -62,7 +61,6 @@ describe("CodexBackend.buildSpawnDescriptor", () => {
   it("templates a custom skills folder at spawn time", async () => {
     setSettings({
       agentMode: {
-        enabled: true,
         byok: {},
         mcpServers: [],
         activeBackend: "codex",
@@ -134,7 +132,6 @@ describe("CodexBackend.buildSpawnDescriptor", () => {
   it("throws when the codex binary path is unset", async () => {
     setSettings({
       agentMode: {
-        enabled: true,
         byok: {},
         mcpServers: [],
         activeBackend: "codex",
