@@ -230,7 +230,6 @@ export interface CopilotSettings {
   settingsVersion?: number;
   /** Agent Mode (ACP-backed BYOK agent harness). Desktop only. */
   agentMode: {
-    enabled: boolean;
     byok: { anthropic?: string; openai?: string; google?: string };
     /**
      * User-configured MCP servers passed to the agent on session start.
@@ -844,7 +843,6 @@ function sanitizeAgentMode(raw: unknown): CopilotSettings["agentMode"] {
     return { ...DEFAULT_SETTINGS.agentMode };
   }
   const r = raw as Record<string, unknown>;
-  const enabled = typeof r.enabled === "boolean" ? r.enabled : DEFAULT_SETTINGS.agentMode.enabled;
   const byok =
     r.byok && typeof r.byok === "object"
       ? (r.byok as { anthropic?: string; openai?: string; google?: string })
@@ -904,7 +902,6 @@ function sanitizeAgentMode(raw: unknown): CopilotSettings["agentMode"] {
   };
 
   return {
-    enabled,
     byok,
     mcpServers,
     activeBackend,
