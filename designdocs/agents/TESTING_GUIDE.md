@@ -74,6 +74,35 @@ fixture omits `_keychainOnly`, so the plugin loads in disk mode and ignores any
 API keys left in the OS keychain from prior runs — a deterministic clean state.
 The source file is validated as JSON before the target is touched.
 
+### `data.legacy-byok.json` — one-time BYOK migration
+
+`npm run test:reset-data -- scripts/test-fixtures/data.legacy-byok.json` loads a
+pre-versioned legacy install (no `settingsVersion`; legacy `activeModels` +
+top-level provider keys; empty new slices apart from one pre-seeded BYOK
+Anthropic provider that proves dedup). On the next plugin load,
+`runSettingsMigrations` converts the legacy BYOK providers/models into the new
+`providers` / `configuredModels` / `backends` shape so they work in OpenCode, and
+stamps `settingsVersion`. It runs in disk mode with obvious fake `sk-test-…`
+keys. After reset, read back and verify the migrated shape:
+
+```bash
+$OBS vault=$VAULT eval code='app.plugins.plugins.copilot.loadData().then(d=>JSON.stringify({
+  settingsVersion: d.settingsVersion,
+  providers: Object.values(d.providers).map(p=>({type:p.providerType, origin:p.origin.kind, catalog:p.origin.catalogProviderId, hasKey: p.apiKeyKeychainId!=null})),
+  configuredModels: d.configuredModels.map(m=>m.info.id),
+  chat: d.backends.chat?.enabledModels?.length,
+  opencode: d.backends.opencode?.enabledModels?.length,
+  legacyUntouched: { anthropicApiKey: d.anthropicApiKey, activeModels: d.activeModels.length }
+}))'
+```
+
+Expect: `settingsVersion` stamped; routable providers carry a `catalogProviderId`
+and a key; `backends.opencode.enabledModels` is non-empty and excludes the
+embedding (`BAAI/bge-m3`) and Bedrock rows; exactly one Anthropic BYOK provider
+(the pre-seeded one — its descriptor deduped, not re-created); legacy
+`anthropicApiKey` and `activeModels` untouched. A second reload must not change
+`settingsVersion` or create duplicates (the version gate holds).
+
 ## 0. Golden rule: pick the right window first
 
 Obsidian is a single Electron app with one renderer per open vault. The CLI

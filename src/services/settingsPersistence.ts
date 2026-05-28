@@ -39,6 +39,7 @@ import {
 // but only used in code paths that run AFTER settings are loaded. Functions that
 // run DURING settings loading (loadSettingsWithKeychain) use console.* directly.
 import { logError, logWarn } from "@/logger";
+import { CURRENT_SETTINGS_VERSION } from "@/settings/migrations/version";
 import { Notice } from "obsidian";
 
 // ---------------------------------------------------------------------------
@@ -357,6 +358,9 @@ export async function loadSettingsWithKeychain(
   // nothing changes" rule for users who manually deleted their keys.
   if (isFreshInstall) {
     (settings as unknown as Record<string, unknown>)._keychainOnly = true;
+    // Stamp the current schema version so brand-new vaults skip the one-time
+    // migrations entirely (nothing to migrate; avoids a needless save).
+    settings.settingsVersion = CURRENT_SETTINGS_VERSION;
   }
 
   // ---- Vault namespace ID bootstrap (shared by both modes). ----
@@ -399,6 +403,7 @@ export async function loadSettingsWithKeychain(
       };
       if (isFreshInstall) {
         currentDisk._keychainOnly = true;
+        currentDisk.settingsVersion = CURRENT_SETTINGS_VERSION;
       }
       await saveData(currentDisk as unknown as CopilotSettings);
       rawDiskData = currentDisk;

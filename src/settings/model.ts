@@ -221,6 +221,13 @@ export interface CopilotSettings {
    * renaming or moving the vault folder does not orphan keychain entries.
    */
   _keychainVaultId?: string;
+  /**
+   * Schema version, bumped by one-time migrations in `src/settings/migrations`.
+   * Absent on pre-versioned installs (treated as `0`). Deliberately NOT in
+   * `DEFAULT_SETTINGS` — a default value would defeat the migration gate via
+   * the `setSettings` merge. See `runSettingsMigrations`.
+   */
+  settingsVersion?: number;
   /** Agent Mode (ACP-backed BYOK agent harness). Desktop only. */
   agentMode: {
     enabled: boolean;

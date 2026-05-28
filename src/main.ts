@@ -66,6 +66,7 @@ import {
 } from "@/services/webViewerService/webViewerServiceSingleton";
 import { WebSelectionTracker } from "@/services/webViewerService/webViewerServiceSelection";
 import VectorStoreManager from "@/search/vectorStoreManager";
+import { runSettingsMigrations } from "@/settings/migrations";
 import { CopilotSettingTab } from "@/settings/SettingsPage";
 import {
   getModelKeyFromModel,
@@ -195,6 +196,12 @@ export default class CopilotPlugin extends Plugin {
         }
       })();
     });
+    // One-time settings migrations. Runs after the persist subscriber is wired
+    // (so every mutation is saved) and after createModelManagement, and before
+    // agent/model-discovery init below — so migrated BYOK providers are present
+    // when OpenCode first enumerates models. Awaited for deterministic ordering;
+    // it's a fast, one-time, no-op for already-migrated/fresh vaults.
+    await runSettingsMigrations(this.modelManagement);
     this.addSettingTab(new CopilotSettingTab(this.app, this));
 
     // Core plugin initialization
