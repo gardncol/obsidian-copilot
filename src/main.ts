@@ -189,6 +189,13 @@ export default class CopilotPlugin extends Plugin {
         ) {
           syncPlus(next.isPlusUser, next.plusLicenseKey);
         }
+        // Sign-in / sign-out (isPlusUser flip) or key rotation while signed in.
+        if (
+          prev?.isPlusUser !== next.isPlusUser ||
+          (next.isPlusUser && prev?.plusLicenseKey !== next.plusLicenseKey)
+        ) {
+          syncPlus(next.isPlusUser, next.plusLicenseKey);
+        }
       })();
     });
     // One-time settings migrations. Runs after the persist subscriber is wired
