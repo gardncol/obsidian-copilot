@@ -82,23 +82,23 @@ export interface BuiltChatModel {
 }
 
 /**
- * A built-in self-hosted provider template.
+ * A pickable provider definition surfaced in the BYOK "Add provider"
+ * wizard. Carries everything the configure dialog needs to start a new
+ * provider — no model list, since available ids are fetched live from
+ * the endpoint and `models.dev` only contributes metadata.
  *
- * Templates cover providers that `models.dev` does not (and never
- * will) list — local runners (Ollama, LMStudio), per-tenant deploys
- * (Azure, Bedrock), and the catch-all custom OpenAI-compatible
- * endpoint. Surfaced by `ModelCatalogService.listBuiltinTemplates()`
- * for the BYOK wizard's "Add provider" picker, next to the catalog
- * entries.
- *
- * Unlike `CatalogProvider`, a template carries no model list — the
- * user hand-types models, and the wizard creates `ConfiguredModel`
- * rows with just `id` + `displayName` populated.
+ * Two flavors share the same shape:
+ *   - **Built-in definitions** (Ollama, LM Studio, custom OpenAI-compatible,
+ *     Azure, Bedrock) live in `builtinDefinitions.ts`.
+ *   - **Catalog-backed definitions** are synthesized from a
+ *     `CatalogProvider` at pick time and carry `catalogProviderId` so
+ *     the configure dialog can resolve metadata.
  */
-export interface ProviderTemplate {
-  /** Template id ("ollama", "lmstudio", "custom-openai-compatible",
-   *  "azure-openai", "aws-bedrock"). Not the resulting provider id —
-   *  that gets minted at setup time. */
+export interface ProviderDefinition {
+  /** Definition id — for built-ins, the template slug ("ollama",
+   *  "lmstudio", "custom-openai-compatible", …); for catalog-backed
+   *  picks, the catalog provider id. Not the persisted provider id
+   *  — that gets minted at setup time. */
   id: string;
   displayName: string;
   /** Which adapter family the wizard will dispatch to. */
@@ -109,7 +109,10 @@ export interface ProviderTemplate {
   /** Hides the API-key field in the wizard when `false` (Ollama,
    *  LMStudio). */
   requiresApiKey: boolean;
-  /** Placeholder shown in the wizard's "Add model" text input, since
-   *  the user types model ids by hand. */
+  /** Placeholder shown in the wizard's "Add model" text input. */
   modelInputHint: string;
+  /** When set, the configure dialog enriches model metadata via
+   *  `catalogService.getProvider(catalogProviderId)`. Absent for
+   *  built-in templates with no `models.dev` entry. */
+  catalogProviderId?: string;
 }

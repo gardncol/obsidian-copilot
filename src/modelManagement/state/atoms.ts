@@ -88,7 +88,7 @@ export const copilotPlusProvidersAtom = atom<readonly Provider[]>((get) =>
  */
 export const backendPickerAtomFamily = atomFamily((backend: BackendType) =>
   atom<readonly EnabledBackendEntry[]>((get) => {
-    const config = get(backendsAtom)[backend] ?? { enabledModels: [], defaultModel: null };
+    const config = get(backendsAtom)[backend] ?? { enabledModels: [] };
     const models = get(configuredModelsAtom);
     const providers = get(providersAtom);
     return config.enabledModels.map<EnabledBackendEntry>((configuredModelId) => {

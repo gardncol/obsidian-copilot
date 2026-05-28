@@ -70,6 +70,22 @@ export interface BackendDescriptor {
    */
   readonly restartOnManagedSkillsChange: boolean;
 
+  /**
+   * When true, the host restarts this backend whenever provider rows, API
+   * keys, or this backend's enabled-models list change. Set for backends
+   * (opencode) that bake provider configuration — `apiKey`, `baseURL`, the
+   * enabled-model set — into spawn-time config. Without this, editing a key
+   * after the subprocess is running silently has no effect: the running
+   * process keeps the old (often empty) value and requests fail upstream.
+   *
+   * Backends that resolve auth out-of-band (codex inherits `codex login` /
+   * shell env; the Claude SDK adapter defers to the spawned CLI) set this
+   * to `false`.
+   *
+   * Required (not optional) so a new backend must make an explicit decision.
+   */
+  readonly restartOnProviderConfigChange: boolean;
+
   /** Sync read of install/setup state from settings + last-known disk reconcile. */
   getInstallState(settings: CopilotSettings): InstallState;
 

@@ -20,16 +20,25 @@ const EMPTY_WIRE_IDS: ReadonlySet<string> = Object.freeze(new Set<string>());
 
 /**
  * Map a Copilot `Provider` onto its opencode provider id, or `null` when
- * opencode can't route it (so callers skip it). BYOK maps to its
- * `catalogProviderId` (identical to opencode's provider id) and is unroutable
- * without one (custom-endpoint / azure / bedrock / self-hosted).
+ * opencode can't route it (so callers skip it). A BYOK provider with a
+ * `catalogProviderId` maps to it (identical to opencode's provider id). A BYOK
+ * provider without one has no catalog identity opencode can resolve: when it
+ * speaks OpenAI's wire format (`openai-compatible` — Ollama, LM Studio, custom)
+ * it's routable as a per-provider `@ai-sdk/openai-compatible` entry keyed by its
+ * `providerId` (see `buildOpencodeConfig`); azure / bedrock speak other formats
+ * and stay unroutable.
  */
 export function mapProviderToOpencodeId(provider: Provider): OpencodeProviderMapping | null {
   switch (provider.origin.kind) {
     case "byok": {
       const catalogProviderId = provider.origin.catalogProviderId;
-      if (!catalogProviderId) return null;
-      return { id: catalogProviderId, native: false };
+      if (catalogProviderId) return { id: catalogProviderId, native: false };
+      if (provider.providerType === "openai-compatible") {
+        // The providerId is unique + stable and can't collide with a real
+        // models.dev provider id; it's the wire-id prefix `<providerId>/<model>`.
+        return { id: provider.providerId, native: false };
+      }
+      return null;
     }
     case "copilot-plus":
       return { id: COPILOT_PLUS_OPENCODE_PROVIDER_ID, native: false };

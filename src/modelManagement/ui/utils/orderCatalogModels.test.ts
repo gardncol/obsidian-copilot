@@ -37,6 +37,38 @@ describe("orderCatalogModels", () => {
     expect(ids(result).slice(1).sort()).toEqual(["garbage", "undated"]);
   });
 
+  it("floats custom ids above discovered within each selection group", () => {
+    // Unchecked group only — proves custom-first applies regardless of date.
+    const models = [
+      model("catalog-new", "2025-09-01"),
+      model("catalog-old", "2024-01-01"),
+      model("custom-old", "2024-06-01"),
+      model("custom-new", "2025-03-01"),
+    ];
+    const result = orderCatalogModels(models, new Set(), new Set(["custom-old", "custom-new"]));
+    expect(ids(result)).toEqual(["custom-new", "custom-old", "catalog-new", "catalog-old"]);
+  });
+
+  it("applies custom-first within both checked and unchecked groups", () => {
+    const models = [
+      model("checked-catalog", "2025-01-01"),
+      model("checked-custom", "2024-01-01"),
+      model("unchecked-catalog", "2025-02-01"),
+      model("unchecked-custom", "2024-02-01"),
+    ];
+    const result = orderCatalogModels(
+      models,
+      new Set(["checked-catalog", "checked-custom"]),
+      new Set(["checked-custom", "unchecked-custom"])
+    );
+    expect(ids(result)).toEqual([
+      "checked-custom",
+      "checked-catalog",
+      "unchecked-custom",
+      "unchecked-catalog",
+    ]);
+  });
+
   it("does not mutate the input array", () => {
     const models = [model("a", "2024-01-01"), model("b", "2025-01-01")];
     const snapshot = ids(models);

@@ -2,10 +2,6 @@
  * Single global table that renders every BYOK provider as a section row
  * with indented model rows beneath it.
  *
- *   ▾ Anthropic       2 models                                ⋮
- *         Claude Sonnet 4.5      200K      Sep 25
- *         Claude Opus 4.5        200K      Sep 25
- *
  * Model rows are display-only. To edit which models a provider exposes,
  * use the Configure entry in the section's overflow menu. Model metadata
  * (context window, release date) is read from the persisted
@@ -154,9 +150,6 @@ const ProviderSection: React.FC<ProviderSectionProps> = ({
           <Chevron className="tw-size-4" />
         </Button>
         <span className="tw-font-medium tw-text-normal">{provider.displayName}</span>
-        <Badge variant="outline" className="tw-text-ui-smaller">
-          {models.length} {models.length === 1 ? "model" : "models"}
-        </Badge>
         <span className="tw-flex-1" />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -206,7 +199,7 @@ const ModelRow: React.FC<{ model: ConfiguredModel }> = ({ model }) => {
       data-testid={`byok-model-${model.configuredModelId}`}
       className={cn(
         "tw-grid tw-grid-cols-[1fr_auto_auto] tw-items-center tw-gap-3",
-        "tw-px-3 tw-py-1.5 tw-pl-10 tw-text-sm"
+        "tw-px-3 tw-pb-3 tw-pl-12 tw-pt-1.5 tw-text-sm"
       )}
     >
       <div className="tw-flex tw-min-w-0 tw-items-center tw-gap-2">

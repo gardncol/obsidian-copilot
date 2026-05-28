@@ -44,7 +44,6 @@ describe("BackendConfigRegistry", () => {
     const b = registry.get(CHAT);
     expect(a).toBe(b);
     expect(a.enabledModels).toEqual([]);
-    expect(a.defaultModel).toBeNull();
   });
 
   it("enableModel() is idempotent", async () => {
@@ -60,58 +59,23 @@ describe("BackendConfigRegistry", () => {
     expect(registry.get(CHAT).enabledModels).toEqual(["m1", "m2", "m3"]);
   });
 
-  it("disableModel() is idempotent and clears default if it was the removed id", async () => {
+  it("disableModel() is idempotent", async () => {
     await registry.setEnabledModels(CHAT, ["m1", "m2"]);
-    await registry.setDefaultModel(CHAT, "m2");
     await registry.disableModel(CHAT, "m2");
     expect(registry.get(CHAT).enabledModels).toEqual(["m1"]);
-    expect(registry.get(CHAT).defaultModel).toBeNull();
     // Idempotent.
     await registry.disableModel(CHAT, "m2");
     expect(registry.get(CHAT).enabledModels).toEqual(["m1"]);
   });
 
-  it("setEnabledModels() drops the default when it leaves the list", async () => {
-    await registry.setEnabledModels(CHAT, ["m1", "m2"]);
-    await registry.setDefaultModel(CHAT, "m1");
-    await registry.setEnabledModels(CHAT, ["m2", "m3"]);
-    expect(registry.get(CHAT).defaultModel).toBeNull();
-    expect(registry.get(CHAT).enabledModels).toEqual(["m2", "m3"]);
-  });
-
-  it("setDefaultModel() throws when the id is not enabled (invariant #4)", async () => {
-    await registry.setEnabledModels(CHAT, ["m1"]);
-    await expect(registry.setDefaultModel(CHAT, "m2")).rejects.toThrow(/invariant/);
-    expect(registry.get(CHAT).defaultModel).toBeNull();
-  });
-
-  it("setDefaultModel(null) clears regardless of enabled list", async () => {
-    await registry.setEnabledModels(CHAT, ["m1"]);
-    await registry.setDefaultModel(CHAT, "m1");
-    await registry.setDefaultModel(CHAT, null);
-    expect(registry.get(CHAT).defaultModel).toBeNull();
-  });
-
-  it("setDefaultModel(null) on an untouched backend is a no-op (no spurious row)", async () => {
-    const before = getSettings().backends;
-    await registry.setDefaultModel(CHAT, null);
-    // The backends slice must not have gained an empty entry.
-    expect(getSettings().backends).toBe(before);
-    expect(getSettings().backends[CHAT]).toBeUndefined();
-  });
-
-  it("removeRefs() sweeps every backend and nulls matching defaults", async () => {
+  it("removeRefs() sweeps every backend", async () => {
     await registry.setEnabledModels(CHAT, ["m1", "m2", "m3"]);
-    await registry.setDefaultModel(CHAT, "m2");
     await registry.setEnabledModels(OPENCODE, ["m2", "m4"]);
-    await registry.setDefaultModel(OPENCODE, "m4");
 
     await registry.removeRefs(["m2", "m3"]);
 
     expect(registry.get(CHAT).enabledModels).toEqual(["m1"]);
-    expect(registry.get(CHAT).defaultModel).toBeNull(); // m2 was the default
     expect(registry.get(OPENCODE).enabledModels).toEqual(["m4"]);
-    expect(registry.get(OPENCODE).defaultModel).toBe("m4"); // untouched
   });
 
   it("removeRefs() with empty input is a no-op", async () => {
@@ -119,6 +83,65 @@ describe("BackendConfigRegistry", () => {
     const before = getSettings().backends;
     await registry.removeRefs([]);
     expect(getSettings().backends).toBe(before);
+  });
+
+  describe("subscribe()", () => {
+    it("fires on enable/disable/setEnabledModels/removeRefs that actually mutate", async () => {
+      const listener = jest.fn();
+      const unsubscribe = registry.subscribe(listener);
+
+      await registry.enableModel(CHAT, "m1");
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      // Idempotent enable: no settings change, no emit.
+      await registry.enableModel(CHAT, "m1");
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      await registry.setEnabledModels(CHAT, ["m1", "m2"]);
+      expect(listener).toHaveBeenCalledTimes(2);
+
+      await registry.disableModel(CHAT, "m2");
+      expect(listener).toHaveBeenCalledTimes(3);
+
+      // Idempotent disable on an absent id: no change, no emit.
+      await registry.disableModel(CHAT, "m99");
+      expect(listener).toHaveBeenCalledTimes(3);
+
+      await registry.removeRefs(["m1"]);
+      expect(listener).toHaveBeenCalledTimes(4);
+
+      // Empty / no-match removeRefs: no change, no emit.
+      await registry.removeRefs([]);
+      await registry.removeRefs(["missing-id"]);
+      expect(listener).toHaveBeenCalledTimes(4);
+
+      unsubscribe();
+      await registry.enableModel(OPENCODE, "x");
+      expect(listener).toHaveBeenCalledTimes(4);
+    });
+
+    it("setEnabledModels() with the same ordered ids is a no-op (no emit, no slice rotation)", async () => {
+      await registry.setEnabledModels(CHAT, ["m1", "m2"]);
+      const listener = jest.fn();
+      registry.subscribe(listener);
+      const before = getSettings().backends;
+
+      await registry.setEnabledModels(CHAT, ["m1", "m2"]);
+
+      expect(listener).not.toHaveBeenCalled();
+      expect(getSettings().backends).toBe(before);
+    });
+
+    it("setEnabledModels() with reordered ids is NOT a no-op (positional list)", async () => {
+      await registry.setEnabledModels(CHAT, ["m1", "m2"]);
+      const listener = jest.fn();
+      registry.subscribe(listener);
+
+      await registry.setEnabledModels(CHAT, ["m2", "m1"]);
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(registry.get(CHAT).enabledModels).toEqual(["m2", "m1"]);
+    });
   });
 
   it("resolveEnabled() returns ok entries when refs exist, broken otherwise", async () => {

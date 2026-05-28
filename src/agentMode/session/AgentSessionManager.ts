@@ -1132,7 +1132,16 @@ export class AgentSessionManager {
 
   /** Immediately tear down `backendId` and replace the active affected tab. */
   private async restartBackendNow(backendId: BackendId, reason: string): Promise<void> {
-    if (this.restartingBackends.has(backendId)) return;
+    // A restart is already running for this backend. Stash the reason so the
+    // tail of the in-flight restart can re-run with the latest settings —
+    // otherwise rapid-fire emits (e.g. one BYOK save touching many models)
+    // would be silently dropped and the running backend would keep stale
+    // config until something else triggered another restart.
+    if (this.restartingBackends.has(backendId)) {
+      const prev = this.pendingBackendRestarts.get(backendId);
+      this.pendingBackendRestarts.set(backendId, prev ? `${prev}; ${reason}` : reason);
+      return;
+    }
     const proc = this.backends.get(backendId);
     if (!proc) return;
     this.restartingBackends.add(backendId);
@@ -1149,13 +1158,33 @@ export class AgentSessionManager {
         this.backends.delete(backendId);
       }
       this.preloader.clearCached(backendId);
-      new Notice(`${this.resolveDescriptor(backendId).displayName} refreshed after skill changes.`);
+      new Notice(`${this.resolveDescriptor(backendId).displayName} refreshed.`);
       if (shouldCreateReplacement && !this.disposed) {
         await this.createSession(backendId);
       }
       this.notify();
     } finally {
       this.restartingBackends.delete(backendId);
+    }
+    // Drain any restart requests that landed while we were running. Clear the
+    // entry BEFORE re-invoking so the recursion can't loop forever — a fresh
+    // request landing during the next restart will repopulate it.
+    const queued = this.pendingBackendRestarts.get(backendId);
+    if (queued !== undefined && !this.disposed) {
+      this.pendingBackendRestarts.delete(backendId);
+      if (this.hasBusySession(backendId)) {
+        // A session went busy between requests; fall back to the deferral
+        // path so we don't tear down mid-turn.
+        this.pendingBackendRestarts.set(backendId, queued);
+        return;
+      }
+      try {
+        await this.restartBackendNow(backendId, queued);
+      } catch (err) {
+        this.lastError = err2String(err);
+        logError(`[AgentMode] queued ${backendId} backend restart failed`, err);
+        this.notify();
+      }
     }
   }
 }

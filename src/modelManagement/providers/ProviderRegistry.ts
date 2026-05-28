@@ -68,9 +68,34 @@ export class ProviderRegistry {
       )
   );
 
+  // Listeners fire after a mutation that may change spawn-time config for
+  // any consumer that bakes provider config (notably the opencode backend's
+  // `OPENCODE_CONFIG_CONTENT`). Settings changes are already broadcast via
+  // `subscribeToSettingsChange`, but `setApiKey` only writes settings when
+  // the keychain id rotates — a same-id key change is invisible there. A
+  // dedicated emitter keeps both signals on one channel for consumers.
+  readonly #listeners = new Set<() => void>();
+
   constructor(app: App, adapters: ProviderAdapterRegistry) {
     this.#app = app;
     this.#adapters = adapters;
+  }
+
+  /** Subscribe to provider/key mutations. Returns unsubscribe. Fires after
+   *  the change has been persisted (settings + keychain). */
+  subscribe(listener: () => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  #emit(): void {
+    for (const listener of [...this.#listeners]) {
+      try {
+        listener();
+      } catch (err) {
+        logError("[modelManagement] ProviderRegistry listener threw", err);
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -123,6 +148,7 @@ export class ProviderRegistry {
     setSettings((cur) => ({
       providers: { ...cur.providers, [providerId]: row },
     }));
+    this.#emit();
     return providerId;
   }
 
@@ -166,6 +192,7 @@ export class ProviderRegistry {
     setSettings((cur) => ({
       providers: { ...cur.providers, [providerId]: next },
     }));
+    this.#emit();
   }
 
   /** Internal: writes `apiKeyKeychainId` on the row. Bypasses the public
@@ -208,6 +235,7 @@ export class ProviderRegistry {
       delete next[providerId];
       return { providers: next };
     });
+    this.#emit();
   }
 
   // -------------------------------------------------------------------------
@@ -246,6 +274,7 @@ export class ProviderRegistry {
       this.#setApiKeyKeychainId(providerId, keychainId);
     }
     keychain.setSecretById(keychainId, apiKey);
+    this.#emit();
   }
 
   /** Drops the keychain entry and clears `apiKeyKeychainId` on the row. */
@@ -259,6 +288,7 @@ export class ProviderRegistry {
         logError(`[modelManagement] ProviderRegistry.clearApiKey: failed to delete keychain`, err);
       }
       this.#setApiKeyKeychainId(providerId, null);
+      this.#emit();
     }
   }
 

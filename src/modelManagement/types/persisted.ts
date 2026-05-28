@@ -132,14 +132,14 @@ export interface ConfiguredModel {
  * (`settings.backends: Record<BackendType, BackendConfig>`), not a
  * field on this row.
  *
- * `enabledModels` and `defaultModel` reference `ConfiguredModel` rows
- * by `configuredModelId`. The picker shows every entry regardless of
- * any runtime ACP inventory; unreachable models surface at request
- * time, not as silent filters.
+ * `enabledModels` references `ConfiguredModel` rows by
+ * `configuredModelId`. The picker shows every entry regardless of any
+ * runtime ACP inventory; unreachable models surface at request time,
+ * not as silent filters. There is no designated default — the first
+ * enabled model is used on first use, and subsequent sessions inherit
+ * the previous session's selection.
  */
 export interface BackendConfig {
   /** Each entry is a `ConfiguredModel.configuredModelId`. */
   enabledModels: string[];
-  /** A `ConfiguredModel.configuredModelId` or `null`. */
-  defaultModel?: string | null;
 }

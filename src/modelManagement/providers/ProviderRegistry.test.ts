@@ -269,4 +269,91 @@ describe("ProviderRegistry", () => {
     await registry.remove(id);
     expect(getSettings().providers[id]).toBeUndefined();
   });
+
+  describe("subscribe()", () => {
+    it("fires on add/update/remove and on every setApiKey (including key rotation)", async () => {
+      const listener = jest.fn();
+      const unsubscribe = registry.subscribe(listener);
+
+      const id = await registry.add({
+        providerType: "anthropic",
+        displayName: "A",
+        origin: { kind: "byok" },
+      });
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      await registry.update(id, { displayName: "A-renamed" });
+      expect(listener).toHaveBeenCalledTimes(2);
+
+      // First setApiKey: fresh keychainId, settings row also updates.
+      await registry.setApiKey(id, "sk-first");
+      expect(listener).toHaveBeenCalledTimes(3);
+
+      // Rotating the key reuses `apiKeyKeychainId` → settings row is
+      // unchanged. The emitter must still fire so subprocess backends
+      // (opencode) restart and pick up the new key. This is the case that
+      // caused the LM Studio silent-failure diagnostic.
+      await registry.setApiKey(id, "sk-rotated");
+      expect(listener).toHaveBeenCalledTimes(4);
+
+      await registry.clearApiKey(id);
+      expect(listener).toHaveBeenCalledTimes(5);
+
+      await registry.remove(id);
+      expect(listener).toHaveBeenCalledTimes(6);
+
+      unsubscribe();
+      await registry.add({
+        providerType: "anthropic",
+        displayName: "B",
+        origin: { kind: "byok" },
+      });
+      expect(listener).toHaveBeenCalledTimes(6);
+    });
+
+    // Regression: keychain writes must complete before #emit() fires.
+    // Otherwise subscribers reading apiKey inside their listener (e.g. the
+    // opencode-restart wiring re-reading provider creds) would observe the
+    // prior value and the freshly-set key would be lost until the next emit.
+    it("setApiKey listener observes the new key synchronously, not stale state", async () => {
+      const id = await registry.add({
+        providerType: "anthropic",
+        displayName: "A",
+        origin: { kind: "byok" },
+      });
+      await registry.setApiKey(id, "sk-old");
+
+      const seenInListener: Array<string | null> = [];
+      registry.subscribe(() => {
+        // Read the keychain synchronously inside the listener — mirrors what
+        // the opencode-restart wiring does (it queues a respawn that reads
+        // the just-emitted credentials). If setApiKey emitted before the
+        // keychain write was durable, this snapshot would still be "sk-old".
+        const row = getSettings().providers[id];
+        const keychainId = row?.apiKeyKeychainId ?? null;
+        seenInListener.push(
+          keychainId ? KeychainService.getInstance(app).getSecretById(keychainId) : null
+        );
+      });
+
+      await registry.setApiKey(id, "sk-new");
+      expect(seenInListener).toEqual(["sk-new"]);
+    });
+
+    it("a throwing listener does not block other listeners", async () => {
+      const bad = jest.fn(() => {
+        throw new Error("boom");
+      });
+      const good = jest.fn();
+      registry.subscribe(bad);
+      registry.subscribe(good);
+      await registry.add({
+        providerType: "anthropic",
+        displayName: "A",
+        origin: { kind: "byok" },
+      });
+      expect(bad).toHaveBeenCalledTimes(1);
+      expect(good).toHaveBeenCalledTimes(1);
+    });
+  });
 });

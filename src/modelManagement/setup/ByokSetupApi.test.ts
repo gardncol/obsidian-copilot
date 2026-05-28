@@ -1,11 +1,11 @@
 /**
- * Tests for `ByokSetupApi.addCatalogProvider`.
+ * Tests for `ByokSetupApi.setupProvider` + `addModels`.
  *
  * Real settings store + real registries. Keychain is mocked with the
  * same fake `app.secretStorage` shim used in `ProviderRegistry.test.ts`.
  */
 
-import { resetSettings, getSettings } from "@/settings/model";
+import { resetSettings } from "@/settings/model";
 import { KeychainService } from "@/services/keychainService";
 
 import { BackendConfigRegistry } from "@/modelManagement/backends/BackendConfigRegistry";
@@ -53,7 +53,7 @@ const ANTHROPIC_CATALOG: CatalogProvider = {
   },
 };
 
-describe("ByokSetupApi.addCatalogProvider", () => {
+describe("ByokSetupApi.addModels", () => {
   let api: ByokSetupApi;
   let providers: ProviderRegistry;
   let models: ConfiguredModelRegistry;
@@ -70,29 +70,100 @@ describe("ByokSetupApi.addCatalogProvider", () => {
     api = new ByokSetupApi(providers, models, backends);
   });
 
-  it("creates a BYOK provider, snapshots models, stores key, and auto-enrolls into chat + opencode", async () => {
-    const result = await api.addCatalogProvider({
-      template: ANTHROPIC_CATALOG,
-      displayName: "My Anthropic",
-      apiKey: "sk-ant-test",
-      selectedWireModelIds: ["claude-sonnet-4-5", "claude-opus-4-5"],
+  it("adds only new models, reuses existing ids, and enrolls just the new ones", async () => {
+    const { providerId, configuredModelIds } = await api.setupProvider({
+      providerType: "openai-compatible",
+      displayName: "Ollama",
+      baseUrl: "http://localhost:11434/v1",
+      models: [{ id: "llama3.2", displayName: "llama3.2" }],
+    });
+    const existingId = configuredModelIds[0];
+
+    const ids = await api.addModels({
+      providerId,
+      models: [
+        { id: "llama3.2", displayName: "llama3.2" }, // already configured
+        { id: "mistral", displayName: "mistral" }, // new
+      ],
     });
 
-    expect(result.configuredModelIds).toHaveLength(2);
+    // Existing model resolves to its original id; new model gets a fresh one.
+    expect(ids[0]).toBe(existingId);
+    expect(ids[1]).not.toBe(existingId);
+    expect(models.listByProvider(providerId)).toHaveLength(2);
+
+    for (const backend of BYOK_DEFAULT_AUTO_ENROLL) {
+      const enabled = backends.get(backend).enabledModels;
+      expect(enabled).toContain(existingId);
+      expect(enabled).toContain(ids[1]);
+    }
+  });
+
+  // `addModels` receives bare `ModelInfo` (id + displayName) from the
+  // hand-typed flow; without the id heuristic it would enroll embedding
+  // models into chat backends where they fail at inference.
+  it("does not enroll embedding-named ids into chat-shaped backends", async () => {
+    const { providerId } = await api.setupProvider({
+      providerType: "openai-compatible",
+      displayName: "Ollama",
+      baseUrl: "http://localhost:11434/v1",
+      models: [{ id: "llama3.2", displayName: "llama3.2" }],
+    });
+
+    const ids = await api.addModels({
+      providerId,
+      models: [{ id: "nomic-embed-text", displayName: "nomic-embed-text" }],
+    });
+    const embedId = ids[0];
+
+    for (const backend of BYOK_DEFAULT_AUTO_ENROLL) {
+      expect(backends.get(backend).enabledModels).not.toContain(embedId);
+    }
+  });
+});
+
+describe("ByokSetupApi.setupProvider", () => {
+  let api: ByokSetupApi;
+  let providers: ProviderRegistry;
+  let models: ConfiguredModelRegistry;
+  let backends: BackendConfigRegistry;
+
+  beforeEach(() => {
+    resetSettings();
+    KeychainService.resetInstance();
+    const app = makeFakeApp();
+    KeychainService.getInstance(app);
+    providers = new ProviderRegistry(app, new ProviderAdapterRegistry());
+    models = new ConfiguredModelRegistry();
+    backends = new BackendConfigRegistry(providers, models);
+    api = new ByokSetupApi(providers, models, backends);
+  });
+
+  it("creates a catalog-linked BYOK provider, snapshots the supplied ModelInfos, and auto-enrolls", async () => {
+    const result = await api.setupProvider({
+      catalogProviderId: "anthropic",
+      providerType: "anthropic",
+      displayName: "My Anthropic",
+      baseUrl: "https://api.anthropic.com/v1",
+      apiKey: "sk-ant",
+      models: [
+        ANTHROPIC_CATALOG.models["claude-sonnet-4-5"],
+        ANTHROPIC_CATALOG.models["claude-opus-4-5"],
+      ],
+    });
 
     const provider = providers.get(result.providerId)!;
-    expect(provider.providerType).toBe("anthropic");
-    expect(provider.displayName).toBe("My Anthropic");
-    expect(provider.baseUrl).toBe("https://api.anthropic.com/v1");
     expect(provider.origin).toEqual({ kind: "byok", catalogProviderId: "anthropic" });
-    expect(provider.apiKeyKeychainId).toBeTruthy();
-    expect(await providers.getApiKey(result.providerId)).toBe("sk-ant-test");
+    expect(provider.providerType).toBe("anthropic");
+    expect(provider.baseUrl).toBe("https://api.anthropic.com/v1");
+    expect(await providers.getApiKey(result.providerId)).toBe("sk-ant");
 
-    const provModels = models.listByProvider(result.providerId);
-    expect(provModels.map((m) => m.info.id).sort()).toEqual([
-      "claude-opus-4-5",
-      "claude-sonnet-4-5",
-    ]);
+    expect(
+      models
+        .listByProvider(result.providerId)
+        .map((m) => m.info.id)
+        .sort()
+    ).toEqual(["claude-opus-4-5", "claude-sonnet-4-5"]);
 
     for (const backend of BYOK_DEFAULT_AUTO_ENROLL) {
       expect(backends.get(backend).enabledModels.sort()).toEqual(
@@ -101,93 +172,69 @@ describe("ByokSetupApi.addCatalogProvider", () => {
     }
   });
 
-  it("baseUrl override takes precedence over the catalog default", async () => {
-    const result = await api.addCatalogProvider({
-      template: ANTHROPIC_CATALOG,
-      displayName: "Anthropic via proxy",
-      baseUrl: "https://proxy.example.com/v1",
-      apiKey: "sk-ant-test",
-      selectedWireModelIds: ["claude-sonnet-4-5"],
-    });
-    expect(providers.get(result.providerId)!.baseUrl).toBe("https://proxy.example.com/v1");
-  });
-
-  it("skips auto-enrollment when autoEnrollIn is the empty list", async () => {
-    const result = await api.addCatalogProvider({
-      template: ANTHROPIC_CATALOG,
-      displayName: "Anthropic",
-      apiKey: "sk-ant",
-      selectedWireModelIds: ["claude-sonnet-4-5"],
-      autoEnrollIn: [],
-    });
-    expect(result.configuredModelIds).toHaveLength(1);
-    expect(getSettings().backends).toEqual({});
-  });
-
-  it("ignores wire ids that aren't in the template's models map", async () => {
-    const result = await api.addCatalogProvider({
-      template: ANTHROPIC_CATALOG,
-      displayName: "Anthropic",
-      apiKey: "sk-ant",
-      selectedWireModelIds: ["claude-sonnet-4-5", "made-up-model"],
-    });
-    expect(result.configuredModelIds).toHaveLength(1);
-    expect(models.listByProvider(result.providerId)[0].info.id).toBe("claude-sonnet-4-5");
-  });
-
-  it("configures embedding models but does not auto-enroll them into chat backends", async () => {
-    const mixedCatalog: CatalogProvider = {
-      id: "openai",
-      displayName: "OpenAI",
-      defaultBaseUrl: "https://api.openai.com/v1",
+  it("omits catalogProviderId on origin when none is supplied (template / custom flow)", async () => {
+    const result = await api.setupProvider({
       providerType: "openai-compatible",
-      models: {
-        "gpt-4o": { id: "gpt-4o", displayName: "GPT-4o" },
-        "text-embedding-3-small": {
-          id: "text-embedding-3-small",
-          displayName: "text-embedding-3-small",
-          isEmbedding: true,
-        },
-      },
-    };
-
-    const result = await api.addCatalogProvider({
-      template: mixedCatalog,
-      displayName: "OpenAI",
-      apiKey: "sk-test",
-      selectedWireModelIds: ["gpt-4o", "text-embedding-3-small"],
+      displayName: "My Ollama",
+      baseUrl: "http://localhost:11434/v1",
+      models: [
+        { id: "llama3.2", displayName: "llama3.2" },
+        { id: "qwen2.5-coder:7b", displayName: "qwen2.5-coder:7b" },
+      ],
     });
+    const provider = providers.get(result.providerId)!;
+    expect(provider.origin).toEqual({ kind: "byok" });
+    expect(provider.baseUrl).toBe("http://localhost:11434/v1");
+    expect(provider.apiKeyKeychainId).toBeNull();
+  });
 
-    // Both models are configured (snapshotted under the provider)...
-    expect(result.configuredModelIds).toHaveLength(2);
-    const embeddingModel = models
-      .listByProvider(result.providerId)
-      .find((m) => m.info.id === "text-embedding-3-small")!;
-    const chatModel = models.listByProvider(result.providerId).find((m) => m.info.id === "gpt-4o")!;
-
-    // ...but only the chat model is enrolled in the chat/agent pickers.
+  it("respects the caller's `isEmbedding` flag when deciding auto-enrollment", async () => {
+    const result = await api.setupProvider({
+      providerType: "openai-compatible",
+      displayName: "Ollama",
+      baseUrl: "http://localhost:11434/v1",
+      models: [
+        { id: "llama3.2", displayName: "llama3.2" },
+        // Explicitly tagged as embedding by the caller (catalog said so).
+        { id: "nomic-embed-text", displayName: "nomic-embed-text", isEmbedding: true },
+      ],
+    });
+    const [chatId, embedId] = result.configuredModelIds;
     for (const backend of BYOK_DEFAULT_AUTO_ENROLL) {
       const enabled = backends.get(backend).enabledModels;
-      expect(enabled).toContain(chatModel.configuredModelId);
-      expect(enabled).not.toContain(embeddingModel.configuredModelId);
+      expect(enabled).toContain(chatId);
+      expect(enabled).not.toContain(embedId);
     }
   });
 
-  it("does not call setApiKey when apiKey is omitted (no-key providers)", async () => {
-    const ollamaLike: CatalogProvider = {
-      id: "self-hosted",
-      displayName: "Self Hosted",
-      defaultBaseUrl: "http://localhost:11434/v1",
+  it("rolls back the provider row when setApiKey throws", async () => {
+    const setApiKeySpy = jest
+      .spyOn(providers, "setApiKey")
+      .mockRejectedValueOnce(new Error("keychain unavailable"));
+
+    await expect(
+      api.setupProvider({
+        catalogProviderId: "anthropic",
+        providerType: "anthropic",
+        displayName: "My Anthropic",
+        apiKey: "sk-ant",
+        models: [ANTHROPIC_CATALOG.models["claude-sonnet-4-5"]],
+      })
+    ).rejects.toThrow("keychain unavailable");
+
+    expect(setApiKeySpy).toHaveBeenCalledTimes(1);
+    expect(providers.list()).toHaveLength(0);
+  });
+
+  it("honors a custom autoEnrollIn override", async () => {
+    const result = await api.setupProvider({
       providerType: "openai-compatible",
-      models: { "llama-3": { id: "llama-3", displayName: "Llama 3" } },
-    };
-    const result = await api.addCatalogProvider({
-      template: ollamaLike,
-      displayName: "Local",
-      selectedWireModelIds: ["llama-3"],
+      displayName: "Ollama",
+      baseUrl: "http://localhost:11434/v1",
+      models: [{ id: "llama3.2", displayName: "llama3.2" }],
+      autoEnrollIn: ["chat"],
     });
-    const provider = providers.get(result.providerId)!;
-    expect(provider.apiKeyKeychainId).toBeNull();
-    expect(await providers.getApiKey(result.providerId)).toBeNull();
+    expect(backends.get("chat").enabledModels).toEqual([...result.configuredModelIds]);
+    expect(backends.get("opencode").enabledModels).toEqual([]);
   });
 });

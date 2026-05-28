@@ -83,7 +83,6 @@ export class ModelManagementCoordinator {
    * Cascade:
    *   1. Look up all ConfiguredModel ids under this provider.
    *   2. Drop those ids from every BackendConfig (`removeRefs`).
-   *      `defaultModel` becomes `null` if it pointed at a removed id.
    *   3. Remove the ConfiguredModel rows (`removeByProvider`).
    *   4. Remove the Provider row + clear its keychain entry.
    *

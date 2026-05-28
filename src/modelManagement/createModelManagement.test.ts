@@ -73,7 +73,6 @@ describe("ModelManagementCoordinator.removeProvider", () => {
       info: { id: "claude-opus-4-5", displayName: "Opus" },
     });
     await backends.setEnabledModels("chat", [id1, id2]);
-    await backends.setDefaultModel("chat", id1);
     await backends.setEnabledModels("opencode", [id2]);
 
     await coordinator.removeProvider(providerId);
@@ -81,7 +80,6 @@ describe("ModelManagementCoordinator.removeProvider", () => {
     expect(providers.get(providerId)).toBeUndefined();
     expect(models.listByProvider(providerId)).toHaveLength(0);
     expect(backends.get("chat").enabledModels).toEqual([]);
-    expect(backends.get("chat").defaultModel).toBeNull();
     expect(backends.get("opencode").enabledModels).toEqual([]);
     expect(await providers.getApiKey(providerId)).toBeNull();
   });
@@ -158,7 +156,6 @@ describe("ModelManagementCoordinator.removeConfiguredModel", () => {
       info: { id: "claude-opus-4-5", displayName: "Opus" },
     });
     await backends.setEnabledModels("chat", [id1, id2]);
-    await backends.setDefaultModel("chat", id1);
     await backends.setEnabledModels("opencode", [id1]);
 
     await coordinator.removeConfiguredModel(id1);
@@ -166,10 +163,8 @@ describe("ModelManagementCoordinator.removeConfiguredModel", () => {
     // The target row is gone; the sibling row survives.
     expect(models.get(id1)).toBeUndefined();
     expect(models.get(id2)).toBeDefined();
-    // Refs dropped from every backend; the default that pointed at it
-    // becomes null.
+    // Refs dropped from every backend.
     expect(backends.get("chat").enabledModels).toEqual([id2]);
-    expect(backends.get("chat").defaultModel).toBeNull();
     expect(backends.get("opencode").enabledModels).toEqual([]);
     // The provider row is untouched (per-model removal, not per-provider).
     expect(providers.get(providerId)).toBeDefined();

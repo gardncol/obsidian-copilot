@@ -8,7 +8,6 @@
  * `resolveEnabled()`.
  *
  * Invariants enforced here:
- *   - `defaultModel`, if non-null, must be in `enabledModels` (#4).
  *   - Broken refs (`enabledModels[i]` not found in
  *     `configuredModels`) are surfaced as `state: "broken"`, never
  *     silently dropped (#3).
@@ -18,6 +17,7 @@
  * is for mutations and non-React callers.
  */
 
+import { logError } from "@/logger";
 import { getSettings, setSettings } from "@/settings/model";
 
 import type { BackendConfig, BackendType } from "@/modelManagement/types/persisted";
@@ -31,14 +31,30 @@ import type { ProviderRegistry } from "@/modelManagement/providers/ProviderRegis
 const EMPTY_ENABLED: string[] = Object.freeze([]) as unknown as string[];
 const EMPTY_CONFIG: BackendConfig = Object.freeze({
   enabledModels: EMPTY_ENABLED,
-  defaultModel: null,
 });
 
 const EMPTY_RESOLVED: readonly EnabledBackendEntry[] = Object.freeze([]);
 
+// Positional equality — same length, same order, same ids. The enabled-
+// models list is a display order, not a set, so reorders are real writes.
+function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 export class BackendConfigRegistry {
   readonly #providers: ProviderRegistry;
   readonly #models: ConfiguredModelRegistry;
+
+  // Listeners fire when the `backends` settings slice actually changes (by
+  // reference). Consumers that bake the enabled-models list into spawn-time
+  // config (notably the opencode backend's `OPENCODE_CONFIG_CONTENT`) hang
+  // off this so a fresh spawn picks up the new set.
+  readonly #listeners = new Set<() => void>();
 
   constructor(
     providerRegistry: ProviderRegistry,
@@ -48,15 +64,42 @@ export class BackendConfigRegistry {
     this.#models = configuredModelRegistry;
   }
 
+  /** Subscribe to enabled-models mutations. Returns unsubscribe. Fires
+   *  after the change has been persisted. */
+  subscribe(listener: () => void): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  #emit(): void {
+    // Snapshot before iterating so a listener that (un)subscribes mid-emit
+    // doesn't fire a phantom notification or skip a peer.
+    for (const listener of [...this.#listeners]) {
+      try {
+        listener();
+      } catch (err) {
+        logError("[modelManagement] BackendConfigRegistry listener threw", err);
+      }
+    }
+  }
+
+  /** Run `mutate`, then emit only if `settings.backends` changed by reference
+   *  (cheap and accurate — the registry's writers always allocate a fresh
+   *  slice on real changes, and return `{}` from the updater on no-ops). */
+  #mutateAndEmit(mutate: () => void): void {
+    const before = getSettings().backends;
+    mutate();
+    if (getSettings().backends !== before) this.#emit();
+  }
+
   // -------------------------------------------------------------------------
   // Reads
   // -------------------------------------------------------------------------
 
   /** Returns a `BackendConfig` even when none is persisted yet —
-   *  empty default `{ enabledModels: [], defaultModel: null }` so
-   *  callers don't have to null-check. The same `EMPTY_CONFIG`
-   *  reference is returned for every untouched backend (referential
-   *  stability). */
+   *  empty default `{ enabledModels: [] }` so callers don't have to
+   *  null-check. The same `EMPTY_CONFIG` reference is returned for
+   *  every untouched backend (referential stability). */
   get(backend: BackendType): BackendConfig {
     return getSettings().backends[backend] ?? EMPTY_CONFIG;
   }
@@ -88,23 +131,22 @@ export class BackendConfigRegistry {
   // -------------------------------------------------------------------------
 
   /**
-   * Replace the enabled-models list for a backend. Clears
-   * `defaultModel` if it pointed at an id that's no longer in the
-   * list (invariant #4).
+   * Replace the enabled-models list for a backend.
    */
   async setEnabledModels(
     backend: BackendType,
     configuredModelIds: readonly string[]
   ): Promise<void> {
-    setSettings((cur) => {
-      const existing = cur.backends[backend];
-      const nextIds = [...configuredModelIds];
-      const defaultModel =
-        existing?.defaultModel && nextIds.includes(existing.defaultModel)
-          ? existing.defaultModel
-          : null;
-      const next: BackendConfig = { enabledModels: nextIds, defaultModel };
-      return { backends: { ...cur.backends, [backend]: next } };
+    this.#mutateAndEmit(() => {
+      setSettings((cur) => {
+        const existing = cur.backends[backend];
+        const nextIds = [...configuredModelIds];
+        if (existing && arraysEqual(existing.enabledModels, nextIds)) {
+          return {};
+        }
+        const next: BackendConfig = { enabledModels: nextIds };
+        return { backends: { ...cur.backends, [backend]: next } };
+      });
     });
   }
 
@@ -112,90 +154,59 @@ export class BackendConfigRegistry {
   async enableModel(backend: BackendType, configuredModelId: string): Promise<void> {
     const existing = getSettings().backends[backend];
     if (existing?.enabledModels.includes(configuredModelId)) return;
-    setSettings((cur) => {
-      const current = cur.backends[backend];
-      // Re-check inside the updater so a concurrent write that already
-      // added the id doesn't produce a duplicate row.
-      if (current?.enabledModels.includes(configuredModelId)) return {};
-      const next: BackendConfig = {
-        enabledModels: [...(current?.enabledModels ?? []), configuredModelId],
-        defaultModel: current?.defaultModel ?? null,
-      };
-      return { backends: { ...cur.backends, [backend]: next } };
+    this.#mutateAndEmit(() => {
+      setSettings((cur) => {
+        const current = cur.backends[backend];
+        // Re-check inside the updater so a concurrent write that already
+        // added the id doesn't produce a duplicate row.
+        if (current?.enabledModels.includes(configuredModelId)) return {};
+        const next: BackendConfig = {
+          enabledModels: [...(current?.enabledModels ?? []), configuredModelId],
+        };
+        return { backends: { ...cur.backends, [backend]: next } };
+      });
     });
   }
 
-  /** Idempotent. Clears `defaultModel` if it was the removed id. */
+  /** Idempotent. */
   async disableModel(backend: BackendType, configuredModelId: string): Promise<void> {
     const existing = getSettings().backends[backend];
     if (!existing || !existing.enabledModels.includes(configuredModelId)) return;
-    setSettings((cur) => {
-      const current = cur.backends[backend];
-      if (!current) return {};
-      const nextIds = current.enabledModels.filter((id) => id !== configuredModelId);
-      const next: BackendConfig = {
-        enabledModels: nextIds,
-        defaultModel:
-          current.defaultModel === configuredModelId ? null : (current.defaultModel ?? null),
-      };
-      return { backends: { ...cur.backends, [backend]: next } };
-    });
-  }
-
-  /**
-   * Setting a non-null id that isn't in `enabledModels` throws
-   * (invariant #4). Setting `null` clears the default.
-   */
-  async setDefaultModel(backend: BackendType, configuredModelId: string | null): Promise<void> {
-    if (configuredModelId !== null) {
-      const existing = getSettings().backends[backend];
-      if (!existing || !existing.enabledModels.includes(configuredModelId)) {
-        throw new Error(
-          `[modelManagement] BackendConfigRegistry.setDefaultModel: ` +
-            `id ${configuredModelId} is not in ${backend}.enabledModels (invariant #4)`
-        );
-      }
-    }
-    setSettings((cur) => {
-      const current = cur.backends[backend];
-      // Clearing the default on a backend that has no config row is a
-      // no-op — avoid creating a spurious empty BackendConfig entry.
-      if (!current && configuredModelId === null) return {};
-      const base = current ?? { enabledModels: [], defaultModel: null };
-      const next: BackendConfig = {
-        enabledModels: [...base.enabledModels],
-        defaultModel: configuredModelId,
-      };
-      return { backends: { ...cur.backends, [backend]: next } };
+    this.#mutateAndEmit(() => {
+      setSettings((cur) => {
+        const current = cur.backends[backend];
+        if (!current) return {};
+        const nextIds = current.enabledModels.filter((id) => id !== configuredModelId);
+        const next: BackendConfig = { enabledModels: nextIds };
+        return { backends: { ...cur.backends, [backend]: next } };
+      });
     });
   }
 
   /**
    * Used by `ModelManagementCoordinator` to drop refs to deleted
-   * configured models. Sweeps every backend's `enabledModels`;
-   * updates `defaultModel` to `null` if it was one of the removed
-   * ids. Single `setSettings` write so subscribers only see one
-   * settings revision per cascade.
+   * configured models. Sweeps every backend's `enabledModels`. Single
+   * `setSettings` write so subscribers only see one settings revision
+   * per cascade.
    */
   async removeRefs(configuredModelIds: readonly string[]): Promise<void> {
     if (configuredModelIds.length === 0) return;
     const removed = new Set(configuredModelIds);
-    setSettings((cur) => {
-      let mutated = false;
-      const nextBackends: Partial<Record<BackendType, BackendConfig>> = { ...cur.backends };
-      for (const [backendKey, config] of Object.entries(cur.backends) as Array<
-        [BackendType, BackendConfig]
-      >) {
-        const touchesEnabled = config.enabledModels.some((id) => removed.has(id));
-        const touchesDefault = config.defaultModel != null && removed.has(config.defaultModel);
-        if (!touchesEnabled && !touchesDefault) continue;
-        nextBackends[backendKey] = {
-          enabledModels: config.enabledModels.filter((id) => !removed.has(id)),
-          defaultModel: touchesDefault ? null : (config.defaultModel ?? null),
-        };
-        mutated = true;
-      }
-      return mutated ? { backends: nextBackends } : {};
+    this.#mutateAndEmit(() => {
+      setSettings((cur) => {
+        let mutated = false;
+        const nextBackends: Partial<Record<BackendType, BackendConfig>> = { ...cur.backends };
+        for (const [backendKey, config] of Object.entries(cur.backends) as Array<
+          [BackendType, BackendConfig]
+        >) {
+          if (!config.enabledModels.some((id) => removed.has(id))) continue;
+          nextBackends[backendKey] = {
+            enabledModels: config.enabledModels.filter((id) => !removed.has(id)),
+          };
+          mutated = true;
+        }
+        return mutated ? { backends: nextBackends } : {};
+      });
     });
   }
 }

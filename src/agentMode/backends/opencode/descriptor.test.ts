@@ -122,10 +122,33 @@ describe("OpencodeBackendDescriptor.wire.encode", () => {
       "openrouter/anthropic/claude-sonnet-4.5",
       "openrouter/anthropic/claude-sonnet-4.5/none",
       "openrouter/anthropic/claude-sonnet-4.5/high",
+      // Catalog-less BYOK (openai-compatible) — provider id is the synthetic
+      // copilot providerId, and the model id may itself contain slashes
+      // (LM Studio repo-prefixed ids like `lmstudio-community/Qwen-…-GGUF`).
+      // The trailing segment isn't a known effort, so decode treats the
+      // whole string as `baseModelId` with `effort: null` — and encode
+      // reproduces it verbatim.
+      "lmstudio-byok-id/lmstudio-community/Qwen2.5-7B-Instruct-GGUF",
+      "ollama-byok-id/llama3.2",
     ];
     for (const id of ids) {
       const decoded = OpencodeBackendDescriptor.wire.decode(id);
       expect(encode(decoded.selection)).toBe(id);
     }
+  });
+
+  it("preserves slashes-in-model for catalog-less BYOK wire ids", () => {
+    // The wire id `<copilotProviderId>/<lmstudioRepoPrefix>/<modelName>`
+    // round-trips: baseModelId carries the full id, effort is null,
+    // provider is null because the synthetic providerId isn't in
+    // OPENCODE_PROVIDER_MAP (and that's the correct, lossless mapping
+    // — the picker just doesn't get a Copilot-provider section header).
+    const wireId = "byok-uuid-abc/lmstudio-community/Qwen2.5-7B-Instruct-GGUF";
+    const decoded = OpencodeBackendDescriptor.wire.decode(wireId);
+    expect(decoded).toEqual({
+      selection: { baseModelId: wireId, effort: null },
+      provider: null,
+    });
+    expect(OpencodeBackendDescriptor.wire.encode(decoded.selection)).toBe(wireId);
   });
 });

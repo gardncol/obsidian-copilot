@@ -74,6 +74,7 @@ export const CodexBackendDescriptor: BackendDescriptor = {
   skillsProjectDir: ".agents/skills",
   crossDiscoveredAgents: [],
   restartOnManagedSkillsChange: false,
+  restartOnProviderConfigChange: false,
   wire: codexWire,
   showModelDescriptions: true,
 

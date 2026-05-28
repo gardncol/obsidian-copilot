@@ -32,7 +32,7 @@ function settingsWith(
   configuredModels: ConfiguredModel[]
 ): CopilotSettings {
   return {
-    backends: { [agentType]: { enabledModels, defaultModel: null } },
+    backends: { [agentType]: { enabledModels } },
     configuredModels,
   } as unknown as CopilotSettings;
 }
@@ -71,8 +71,8 @@ describe("agentOriginEnabledWireIds", () => {
   it("only reads the requested agentType's enabledModels", () => {
     const settings = {
       backends: {
-        claude: { enabledModels: ["cm1"], defaultModel: null },
-        codex: { enabledModels: ["cm2"], defaultModel: null },
+        claude: { enabledModels: ["cm1"] },
+        codex: { enabledModels: ["cm2"] },
       },
       configuredModels: [model("cm1", "claude-sonnet-4-5"), model("cm2", "gpt-5")],
     } as unknown as CopilotSettings;

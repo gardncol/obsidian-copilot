@@ -3,12 +3,12 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import React from "react";
 
 const mockVerifyCredentials = jest.fn<Promise<VerificationResult>, [string, unknown]>();
-const mockAddCatalogProvider = jest
+const mockSetupProvider = jest
   .fn<Promise<{ providerId: string; configuredModelIds: string[] }>, [unknown]>()
-  .mockResolvedValue({ providerId: "p1", configuredModelIds: ["m1"] });
+  .mockResolvedValue({ providerId: "p-new", configuredModelIds: ["cm1"] });
 const mockSetApiKey = jest.fn().mockResolvedValue(undefined);
+const mockClearApiKey = jest.fn().mockResolvedValue(undefined);
 const mockGetApiKey = jest.fn().mockResolvedValue("existing-key");
-const mockVerify = jest.fn();
 const mockUpdate = jest.fn().mockResolvedValue(undefined);
 const mockBulkSet = jest.fn().mockResolvedValue([]);
 const mockEnableModel = jest.fn().mockResolvedValue(undefined);
@@ -19,11 +19,11 @@ jest.mock("@/modelManagement/ui/ModelManagementContext", () => ({
   // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks the real `useModelManagement` hook; the name must match the export
   useModelManagement: () => ({
     adapters: { verifyCredentials: mockVerifyCredentials },
-    setup: { byok: { addCatalogProvider: mockAddCatalogProvider } },
+    setup: { byok: { setupProvider: mockSetupProvider } },
     providerRegistry: {
       setApiKey: mockSetApiKey,
+      clearApiKey: mockClearApiKey,
       getApiKey: mockGetApiKey,
-      verify: mockVerify,
       update: mockUpdate,
     },
     configuredModelRegistry: { bulkSet: mockBulkSet },
@@ -42,7 +42,18 @@ jest.mock("@/modelManagement/state/atoms", () => {
         providerId: "p1",
         providerType: "anthropic",
         displayName: "Anthropic",
+        baseUrl: "https://api.anthropic.com",
         origin: { kind: "byok", catalogProviderId: "anthropic" },
+        addedAt: 0,
+      },
+      {
+        // Catalog-less edit-mode row (template-origin); used to assert the
+        // fetch path works with a saved key when the user hasn't re-typed it.
+        providerId: "p-custom",
+        providerType: "openai-compatible",
+        displayName: "Custom",
+        baseUrl: "https://proxy.example/v1",
+        origin: { kind: "byok" },
         addedAt: 0,
       },
     ]),
@@ -75,38 +86,60 @@ jest.mock("@/components/ui/password-input", () => ({
     <input data-testid="api-key" value={value} onChange={(e) => onChange?.(e.target.value)} />
   ),
 }));
+const mockListProviderModels = jest.fn<Promise<unknown>, unknown[]>();
+jest.mock("@/modelManagement/providers/adapters/listProviderModels", () => ({
+  listProviderModels: (...args: unknown[]) => mockListProviderModels(...args),
+}));
 
-import type { CatalogProvider } from "@/modelManagement/types/catalog";
+import type { ProviderDefinition } from "@/modelManagement/types/runtime";
 import { ConfigureProviderForm } from "./ConfigureProviderDialog";
 
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockGetApiKey.mockResolvedValue("existing-key");
+  mockListProviderModels.mockResolvedValue({ ok: true, modelIds: [] });
+});
 
-const catalog: CatalogProvider = {
+const anthropicSource: ProviderDefinition = {
   id: "anthropic",
   displayName: "Anthropic",
   providerType: "anthropic",
   defaultBaseUrl: "https://api.anthropic.com",
-  models: {
-    "claude-sonnet": {
-      id: "claude-sonnet",
-      displayName: "Claude Sonnet 4.5",
-      limits: { context: 200000 },
-      releaseDate: "2025-09-01",
-    },
-    "claude-opus": {
-      id: "claude-opus",
-      displayName: "Claude Opus 4.5",
-      limits: { context: 200000 },
-    },
-  },
+  requiresApiKey: true,
+  modelInputHint: "e.g. claude-sonnet-5",
+  catalogProviderId: "anthropic",
 };
 
-// Live catalog used by edit-mode tests: the two configured models plus a new
-// chat model (claude-haiku) and a new embedding model (voyage-embed).
-const editCatalog: CatalogProvider = {
+const openaiSource: ProviderDefinition = {
+  id: "openai",
+  displayName: "OpenAI",
+  providerType: "openai-compatible",
+  requiresApiKey: true,
+  modelInputHint: "e.g. gpt-5",
+  catalogProviderId: "openai",
+};
+
+const ollamaSource: ProviderDefinition = {
+  id: "ollama",
+  displayName: "Ollama",
+  providerType: "openai-compatible",
+  defaultBaseUrl: "http://localhost:11434/v1",
+  requiresApiKey: false,
+  modelInputHint: "e.g. llama3.2",
+};
+
+const customSource: ProviderDefinition = {
+  id: "custom-openai-compatible",
+  displayName: "Custom OpenAI-compatible",
+  providerType: "openai-compatible",
+  requiresApiKey: true,
+  modelInputHint: "e.g. gpt-5.5",
+};
+
+const anthropicCatalogMetadata = {
   id: "anthropic",
   displayName: "Anthropic",
-  providerType: "anthropic",
+  providerType: "anthropic" as const,
   defaultBaseUrl: "https://api.anthropic.com",
   models: {
     "claude-sonnet": {
@@ -120,120 +153,230 @@ const editCatalog: CatalogProvider = {
   },
 };
 
-function selectModel(wireId: string): void {
-  const row = screen.getByTestId(`catalog-row-${wireId}`);
-  fireEvent.click(within(row).getByRole("checkbox"));
+function manualAddId(id: string): void {
+  fireEvent.change(screen.getByTestId("model-checklist-manual-input"), { target: { value: id } });
+  fireEvent.click(screen.getByRole("button", { name: "Add" }));
+}
+
+function rowCheckbox(id: string): HTMLElement {
+  const row = screen.getByTestId(`model-row-${id}`);
+  return within(row).getByRole("checkbox");
 }
 
 describe("ConfigureProviderForm (new mode)", () => {
-  it("enables Verify & save only after verification and a model selection", async () => {
-    mockVerifyCredentials.mockResolvedValue({ ok: true, checkedAt: 1 });
-    render(<ConfigureProviderForm state={{ mode: "new", catalog }} onClose={jest.fn()} />);
-
-    const save = screen.getByRole("button", { name: "Verify & save" });
-    expect(save.hasAttribute("disabled")).toBe(true);
-
-    // Selecting a model alone is not enough — still unverified.
-    selectModel("claude-sonnet");
-    expect(save.hasAttribute("disabled")).toBe(true);
-
-    // Once verification succeeds, both gates are satisfied.
-    fireEvent.click(screen.getByRole("button", { name: "Test" }));
-    await waitFor(() => expect(save.hasAttribute("disabled")).toBe(false));
+  it("skips the mount fetch when the source requires an API key and the field is empty", () => {
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: anthropicSource }} onClose={jest.fn()} />
+    );
+    expect(mockListProviderModels).not.toHaveBeenCalled();
   });
 
-  it("calls addCatalogProvider with the catalog template and selected ids", async () => {
-    mockVerifyCredentials.mockResolvedValue({ ok: true, checkedAt: 1 });
+  it("fires the mount fetch for a key-less template (no auth required)", async () => {
+    mockListProviderModels.mockResolvedValue({ ok: true, modelIds: ["llama3.2"] });
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: ollamaSource }} onClose={jest.fn()} />
+    );
+    await waitFor(() => expect(mockListProviderModels).toHaveBeenCalledTimes(1));
+    expect(mockListProviderModels).toHaveBeenCalledWith(
+      "openai-compatible",
+      "http://localhost:11434/v1",
+      expect.objectContaining({ apiKey: null })
+    );
+    // Discovered ids appear as unchecked candidates; user opts in.
+    await waitFor(() => expect(screen.getByTestId("model-row-llama3.2")).toBeTruthy());
+    expect(rowCheckbox("llama3.2").getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("uses the source default URL as the input placeholder", () => {
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: anthropicSource }} onClose={jest.fn()} />
+    );
+    expect(screen.getByPlaceholderText("https://api.anthropic.com")).toBeTruthy();
+  });
+
+  it("falls back to a known default endpoint when the source ships none", async () => {
+    // OpenAI catalog has no defaultBaseUrl; the known-default lookup fills in.
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: openaiSource }} onClose={jest.fn()} />
+    );
+    expect(screen.getByPlaceholderText("https://api.openai.com/v1")).toBeTruthy();
+  });
+
+  it("Save is gated only on a non-empty selection", async () => {
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: ollamaSource }} onClose={jest.fn()} />
+    );
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save.hasAttribute("disabled")).toBe(true);
+    manualAddId("llama3.2");
+    expect(save.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("calls setupProvider with the catalog id + enriched model metadata", async () => {
+    mockGetProvider.mockReturnValue(anthropicCatalogMetadata);
     const onClose = jest.fn();
-    render(<ConfigureProviderForm state={{ mode: "new", catalog }} onClose={onClose} />);
-
-    selectModel("claude-sonnet");
-    fireEvent.click(screen.getByRole("button", { name: "Test" }));
-    const save = screen.getByRole("button", { name: "Verify & save" });
-    await waitFor(() => expect(save.hasAttribute("disabled")).toBe(false));
-    fireEvent.click(save);
-
-    await waitFor(() => expect(mockAddCatalogProvider).toHaveBeenCalledTimes(1));
-    expect(mockAddCatalogProvider).toHaveBeenCalledWith(
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: anthropicSource }} onClose={onClose} />
+    );
+    manualAddId("claude-sonnet");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mockSetupProvider).toHaveBeenCalledTimes(1));
+    expect(mockSetupProvider).toHaveBeenCalledWith(
       expect.objectContaining({
-        template: catalog,
+        catalogProviderId: "anthropic",
+        providerType: "anthropic",
         displayName: "Anthropic",
-        selectedWireModelIds: ["claude-sonnet"],
+        baseUrl: "https://api.anthropic.com",
+        models: [
+          // The manually-added id matches a catalog entry, so the saved
+          // ModelInfo carries the enriched displayName + limits.
+          expect.objectContaining({
+            id: "claude-sonnet",
+            displayName: "Claude Sonnet 4.5",
+            limits: { context: 200000 },
+          }),
+        ],
       })
     );
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
-  it("shows an error below the input when verification fails", async () => {
-    mockVerifyCredentials.mockResolvedValue({ ok: false, message: "bad key", checkedAt: 1 });
-    render(<ConfigureProviderForm state={{ mode: "new", catalog }} onClose={jest.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "Test" }));
-    expect(await screen.findByText("bad key")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Verify & save" }).hasAttribute("disabled")).toBe(
-      true
-    );
-  });
-
-  it("uses the catalog base URL as the input placeholder in new mode", () => {
-    render(<ConfigureProviderForm state={{ mode: "new", catalog }} onClose={jest.fn()} />);
-    expect(screen.getByPlaceholderText("https://api.anthropic.com")).toBeTruthy();
-  });
-
-  it("falls back to a known default endpoint for providers the catalog omits", async () => {
-    // models.dev reports no `api` for OpenAI; the form fills the known default
-    // so a blank Base URL still verifies and saves.
-    const openai: CatalogProvider = {
-      id: "openai",
-      displayName: "OpenAI",
-      providerType: "openai-compatible",
-      models: { "gpt-5": { id: "gpt-5", displayName: "GPT-5" } },
-    };
-    mockVerifyCredentials.mockResolvedValue({ ok: true, checkedAt: 1 });
+  it("synthesizes minimal ModelInfo for a manual id with no catalog entry", async () => {
     const onClose = jest.fn();
-    render(<ConfigureProviderForm state={{ mode: "new", catalog: openai }} onClose={onClose} />);
-
-    // The known default is shown as the placeholder...
-    expect(screen.getByPlaceholderText("https://api.openai.com/v1")).toBeTruthy();
-
-    selectModel("gpt-5");
-    fireEvent.click(screen.getByRole("button", { name: "Test" }));
-    const save = screen.getByRole("button", { name: "Verify & save" });
-    await waitFor(() => expect(save.hasAttribute("disabled")).toBe(false));
-    fireEvent.click(save);
-
-    // ...and persisted as the base URL when the field is left blank.
-    await waitFor(() =>
-      expect(mockAddCatalogProvider).toHaveBeenCalledWith(
-        expect.objectContaining({ baseUrl: "https://api.openai.com/v1" })
-      )
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: ollamaSource }} onClose={onClose} />
     );
+    manualAddId("nomic-embed-text");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mockSetupProvider).toHaveBeenCalled());
+    expect(mockSetupProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        // No catalogProviderId for a template-origin save.
+        providerType: "openai-compatible",
+        models: [
+          expect.objectContaining({
+            id: "nomic-embed-text",
+            displayName: "nomic-embed-text",
+            // Embedding heuristic kicks in for the embed-named id.
+            isEmbedding: true,
+          }),
+        ],
+      })
+    );
+  });
+
+  it("re-fetches the model list after a successful API key test", async () => {
+    mockVerifyCredentials.mockResolvedValue({ ok: true, checkedAt: 1 });
+    mockListProviderModels
+      // mount-skip (requiresApiKey + no key); post-test fetch returns ids
+      .mockResolvedValueOnce({ ok: true, modelIds: ["claude-sonnet"] });
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: anthropicSource }} onClose={jest.fn()} />
+    );
+
+    fireEvent.change(screen.getByTestId("api-key"), { target: { value: "sk-ant" } });
+    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(mockListProviderModels).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId("model-row-claude-sonnet")).toBeTruthy());
+    // Fetched ids are candidates only — user must explicitly tick them.
+    expect(rowCheckbox("claude-sonnet").getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("surfaces a fetch error inline (mount fetch failure)", async () => {
+    mockListProviderModels.mockResolvedValue({ ok: false, message: "connection refused" });
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: ollamaSource }} onClose={jest.fn()} />
+    );
+    expect(await screen.findByText("connection refused")).toBeTruthy();
+  });
+
+  it("only manually-added ids get an X (remove) button — discovered rows do not", async () => {
+    mockGetProvider.mockReturnValue(anthropicCatalogMetadata);
+    mockListProviderModels.mockResolvedValueOnce({ ok: true, modelIds: ["claude-sonnet"] });
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: anthropicSource }} onClose={jest.fn()} />
+    );
+    // Trigger a fetch by typing an API key + Test.
+    mockVerifyCredentials.mockResolvedValue({ ok: true, checkedAt: 1 });
+    fireEvent.change(screen.getByTestId("api-key"), { target: { value: "sk-ant" } });
+    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(screen.getByTestId("model-row-claude-sonnet")).toBeTruthy());
+    // Discovered (live-fetched + catalog-known) row → no X.
+    expect(screen.queryByTestId("model-row-remove-claude-sonnet")).toBeNull();
+    // Manually-typed id → X visible.
+    manualAddId("my-private-model");
+    expect(screen.getByTestId("model-row-remove-my-private-model")).toBeTruthy();
+  });
+
+  it("ignores adapters that don't support listing (azure / bedrock)", async () => {
+    mockListProviderModels.mockResolvedValue(null);
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: ollamaSource }} onClose={jest.fn()} />
+    );
+    await waitFor(() => expect(mockListProviderModels).toHaveBeenCalled());
+    // No error chrome rendered.
+    expect(screen.queryByText(/Listing not supported/i)).toBeNull();
   });
 });
 
 describe("ConfigureProviderForm (edit mode)", () => {
-  it("verifies without persisting the API key (Test never writes the key)", async () => {
+  it("seeds the selection from existing configured models", async () => {
+    render(
+      <ConfigureProviderForm state={{ mode: "edit", providerId: "p1" }} onClose={jest.fn()} />
+    );
+    await waitFor(() => expect(screen.getByTestId("model-row-claude-sonnet")).toBeTruthy());
+    expect(rowCheckbox("claude-sonnet").getAttribute("aria-checked")).toBe("true");
+    expect(rowCheckbox("claude-opus").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("does not auto-check newly fetched ids (no silent subscription)", async () => {
+    // Mount fetch returns claude-haiku as a new id, on top of the two seeded
+    // from existing configured models.
+    mockListProviderModels.mockResolvedValue({ ok: true, modelIds: ["claude-haiku"] });
+    render(
+      <ConfigureProviderForm state={{ mode: "edit", providerId: "p1" }} onClose={jest.fn()} />
+    );
+    await waitFor(() => expect(screen.getByTestId("model-row-claude-haiku")).toBeTruthy());
+    expect(rowCheckbox("claude-haiku").getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("verifies without writing the API key (Test never persists)", async () => {
     mockVerifyCredentials.mockResolvedValue({ ok: true, checkedAt: 1 });
     render(
       <ConfigureProviderForm state={{ mode: "edit", providerId: "p1" }} onClose={jest.fn()} />
     );
-
     fireEvent.click(screen.getByRole("button", { name: "Test" }));
-
-    await waitFor(() => expect(mockVerifyCredentials).toHaveBeenCalledTimes(1));
-    // The already-saved key is re-tested via getApiKey, never re-written.
+    await waitFor(() => expect(mockVerifyCredentials).toHaveBeenCalled());
     expect(mockGetApiKey).toHaveBeenCalledWith("p1");
     expect(mockSetApiKey).not.toHaveBeenCalled();
   });
 
-  it("removes de-selected models from every backend picker on save", async () => {
+  it("Test verifies the edited base URL, not the persisted one", async () => {
+    mockVerifyCredentials.mockResolvedValue({ ok: true, checkedAt: 1 });
+    render(
+      <ConfigureProviderForm state={{ mode: "edit", providerId: "p1" }} onClose={jest.fn()} />
+    );
+    const baseUrlInput = screen.getByPlaceholderText("https://api.anthropic.com");
+    fireEvent.change(baseUrlInput, { target: { value: "https://proxy.example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(mockVerifyCredentials).toHaveBeenCalled());
+    const [providerType, ctx] = mockVerifyCredentials.mock.calls[0];
+    expect(providerType).toBe("anthropic");
+    expect((ctx as { provider: { baseUrl?: string } }).provider.baseUrl).toBe(
+      "https://proxy.example.com"
+    );
+  });
+
+  it("removes de-selected models from every backend on save", async () => {
     mockBulkSet.mockResolvedValue(["cm1"]);
     const onClose = jest.fn();
     render(<ConfigureProviderForm state={{ mode: "edit", providerId: "p1" }} onClose={onClose} />);
-
-    // Both models start checked; uncheck Claude Opus, then save changes.
-    selectModel("claude-opus");
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-
+    // Wait for seed to apply.
+    await waitFor(() =>
+      expect(rowCheckbox("claude-opus").getAttribute("aria-checked")).toBe("true")
+    );
+    fireEvent.click(rowCheckbox("claude-opus"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(mockRemoveRefs).toHaveBeenCalledWith(["cm2"]));
     expect(mockBulkSet).toHaveBeenCalledWith("p1", [
       expect.objectContaining({ id: "claude-sonnet" }),
@@ -241,50 +384,145 @@ describe("ConfigureProviderForm (edit mode)", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
-  it("auto-enrolls only newly added chat models — skips embeddings, never re-enables existing", async () => {
-    // Live catalog adds a new chat model and a new embedding model on top of
-    // the two already configured (claude-sonnet, claude-opus).
-    mockGetProvider.mockReturnValue(editCatalog);
-    // bulkSet returns ids 1:1 with input order (= selectedWireIds insertion
-    // order: existing first, then the two newly checked).
+  it("auto-enrolls only newly-added chat models — skips embeddings, never re-enables existing", async () => {
+    mockGetProvider.mockReturnValue(anthropicCatalogMetadata);
+    mockListProviderModels.mockResolvedValue({
+      ok: true,
+      modelIds: ["claude-haiku", "voyage-embed"],
+    });
     mockBulkSet.mockResolvedValue(["cm1", "cm2", "cm-haiku", "cm-embed"]);
     const onClose = jest.fn();
     render(<ConfigureProviderForm state={{ mode: "edit", providerId: "p1" }} onClose={onClose} />);
-
-    selectModel("claude-haiku"); // new chat model
-    selectModel("voyage-embed"); // new embedding model
-    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-
+    // Wait for the fetched rows to appear, then check them.
+    await waitFor(() => expect(screen.getByTestId("model-row-claude-haiku")).toBeTruthy());
+    fireEvent.click(rowCheckbox("claude-haiku"));
+    fireEvent.click(rowCheckbox("voyage-embed"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
-
-    // The new chat model is enrolled into every default backend.
     for (const backend of ["chat", "opencode"]) {
       expect(mockEnableModel).toHaveBeenCalledWith(backend, "cm-haiku");
     }
-    // The new embedding model is never enrolled (would fail in chat pickers).
     expect(mockEnableModel).not.toHaveBeenCalledWith(expect.anything(), "cm-embed");
-    // Previously-configured models are never (re-)enrolled — a model the user
-    // disabled on a backend must stay disabled across an edit-save.
     expect(mockEnableModel).not.toHaveBeenCalledWith(expect.anything(), "cm1");
     expect(mockEnableModel).not.toHaveBeenCalledWith(expect.anything(), "cm2");
   });
 
-  it("Test verifies the edited base URL, not the persisted one", async () => {
-    mockGetProvider.mockReturnValue(editCatalog);
-    mockVerifyCredentials.mockResolvedValue({ ok: true, checkedAt: 1 });
+  it("Mount fetch uses the saved key (catalog-less edit row)", async () => {
+    mockGetApiKey.mockResolvedValue("saved-secret");
+    mockListProviderModels.mockResolvedValue({ ok: true, modelIds: ["gpt-x"] });
+    render(
+      <ConfigureProviderForm state={{ mode: "edit", providerId: "p-custom" }} onClose={jest.fn()} />
+    );
+    await waitFor(() => expect(mockListProviderModels).toHaveBeenCalled());
+    expect(mockListProviderModels).toHaveBeenCalledWith(
+      "openai-compatible",
+      "https://proxy.example/v1",
+      expect.objectContaining({ apiKey: "saved-secret" })
+    );
+  });
+
+  it("X button hidden on saved catalog models but visible on saved-custom rows", async () => {
+    // Catalog known → claude-sonnet (in metadata) is discovered; claude-opus
+    // (not in metadata, not in current fetch) is custom-added.
+    mockGetProvider.mockReturnValue({
+      ...anthropicCatalogMetadata,
+      models: { "claude-sonnet": anthropicCatalogMetadata.models["claude-sonnet"] },
+    });
+    mockListProviderModels.mockResolvedValue({ ok: true, modelIds: ["claude-sonnet"] });
     render(
       <ConfigureProviderForm state={{ mode: "edit", providerId: "p1" }} onClose={jest.fn()} />
     );
+    await waitFor(() => expect(screen.getByTestId("model-row-claude-sonnet")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("model-row-claude-opus")).toBeTruthy());
+    // Discovered → no X.
+    expect(screen.queryByTestId("model-row-remove-claude-sonnet")).toBeNull();
+    // Catalog-unknown + not in live fetch → custom → X visible.
+    expect(screen.getByTestId("model-row-remove-claude-opus")).toBeTruthy();
+  });
 
-    const baseUrlInput = screen.getByPlaceholderText("https://api.anthropic.com");
-    fireEvent.change(baseUrlInput, { target: { value: "https://proxy.example.com" } });
-    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+  it("clicking X on a saved-custom row hides it and persists removal on save", async () => {
+    // Catalog-less provider → both saved rows are custom (not in catalog,
+    // not in live fetch).
+    mockGetProvider.mockReturnValue(undefined);
+    mockListProviderModels.mockResolvedValue({ ok: true, modelIds: [] });
+    mockBulkSet.mockResolvedValue(["cm1"]);
+    const onClose = jest.fn();
+    render(<ConfigureProviderForm state={{ mode: "edit", providerId: "p1" }} onClose={onClose} />);
+    await waitFor(() => expect(screen.getByTestId("model-row-remove-claude-opus")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("model-row-remove-claude-opus"));
+    // Row is gone from the candidate pool.
+    expect(screen.queryByTestId("model-row-claude-opus")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    // Save removes the removed-existing id from backend refs and bulkSets
+    // only the remaining (still-selected) infos.
+    await waitFor(() => expect(mockRemoveRefs).toHaveBeenCalledWith(["cm2"]));
+    expect(mockBulkSet).toHaveBeenCalledWith("p1", [
+      expect.objectContaining({ id: "claude-sonnet" }),
+    ]);
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
 
-    await waitFor(() => expect(mockVerifyCredentials).toHaveBeenCalled());
-    const [providerType, ctx] = mockVerifyCredentials.mock.calls[0];
-    expect(providerType).toBe("anthropic");
-    expect((ctx as { provider: { baseUrl?: string } }).provider.baseUrl).toBe(
-      "https://proxy.example.com"
+  it("Clear button wipes the saved API key and closes the dialog", async () => {
+    mockGetApiKey.mockResolvedValue("saved-secret");
+    const onClose = jest.fn();
+    render(<ConfigureProviderForm state={{ mode: "edit", providerId: "p1" }} onClose={onClose} />);
+    const clear = await screen.findByTestId("api-key-clear");
+    fireEvent.click(clear);
+    await waitFor(() => expect(mockClearApiKey).toHaveBeenCalledWith("p1"));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+});
+
+describe("ConfigureProviderForm (re-fetch curation)", () => {
+  it("re-fetching never toggles selection — discovered ids are candidates only", async () => {
+    // 1st fetch returns "a","b" — both appear as unchecked candidates.
+    mockListProviderModels.mockResolvedValueOnce({ ok: true, modelIds: ["a", "b"] });
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: ollamaSource }} onClose={jest.fn()} />
     );
+    await waitFor(() => expect(screen.getByTestId("model-row-a")).toBeTruthy());
+    expect(rowCheckbox("a").getAttribute("aria-checked")).toBe("false");
+    expect(rowCheckbox("b").getAttribute("aria-checked")).toBe("false");
+
+    // User explicitly ticks "a".
+    fireEvent.click(rowCheckbox("a"));
+    expect(rowCheckbox("a").getAttribute("aria-checked")).toBe("true");
+
+    // A subsequent Test success triggers a refetch returning the same ids;
+    // the user's selection state must be preserved verbatim — "a" stays
+    // ticked, "b" stays unchecked, no row duplication.
+    mockVerifyCredentials.mockResolvedValue({ ok: true, checkedAt: 1 });
+    mockListProviderModels.mockResolvedValueOnce({ ok: true, modelIds: ["a", "b"] });
+    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(mockListProviderModels).toHaveBeenCalledTimes(2));
+    expect(rowCheckbox("a").getAttribute("aria-checked")).toBe("true");
+    expect(rowCheckbox("b").getAttribute("aria-checked")).toBe("false");
+  });
+});
+
+describe("ConfigureProviderForm (hydration gate)", () => {
+  it("holds back the stateful body until the provider row resolves", () => {
+    // Unknown providerId → `provider` never resolves from the atom, so the
+    // gate must render its placeholder and never mount the body (whose
+    // useState initializers would otherwise seed from blank values and let
+    // the user Save them).
+    render(
+      <ConfigureProviderForm state={{ mode: "edit", providerId: "missing" }} onClose={jest.fn()} />
+    );
+    expect(screen.queryByTestId("model-checklist-manual-input")).toBeNull();
+    expect(screen.queryByText(/^Configure/)).toBeNull();
+    // No fetch fires while gated.
+    expect(mockListProviderModels).not.toHaveBeenCalled();
+  });
+});
+
+// Use the customSource definition somewhere so it isn't flagged as unused;
+// covers the dialog's behavior for a catalog-less custom source.
+describe("ConfigureProviderForm (custom-openai source)", () => {
+  it("shows the default 'Add a model id' / source-supplied hint in the manual input", () => {
+    render(
+      <ConfigureProviderForm state={{ mode: "new", source: customSource }} onClose={jest.fn()} />
+    );
+    expect(screen.getByPlaceholderText("e.g. gpt-5.5")).toBeTruthy();
   });
 });

@@ -94,6 +94,7 @@ export const OpencodeBackendDescriptor: BackendDescriptor = {
   skillsProjectDir: ".opencode/skills",
   crossDiscoveredAgents: ["claude", "codex"],
   restartOnManagedSkillsChange: true,
+  restartOnProviderConfigChange: true,
   wire: opencodeWire,
 
   getEnabledBaseModelIds(settings: CopilotSettings): ReadonlySet<string> {
