@@ -8,6 +8,7 @@ if (typeof window.structuredClone === "undefined") {
 
 import { DEFAULT_SETTINGS } from "@/constants";
 import type { CustomModel } from "@/aiParams";
+import { CURRENT_SETTINGS_VERSION } from "@/settings/migrations/version";
 import type { CopilotSettings } from "@/settings/model";
 
 /** Match the production secret-key heuristic without importing the real module. */
@@ -168,6 +169,11 @@ describe("loadSettingsWithKeychain", () => {
     const loaded = await mod.loadSettingsWithKeychain(null, saveData);
 
     expect((loaded as unknown as Record<string, unknown>)._keychainOnly).toBe(true);
+    // Fresh installs are stamped at the current schema version so the one-time
+    // migrations never run for them.
+    expect((loaded as unknown as Record<string, unknown>).settingsVersion).toBe(
+      CURRENT_SETTINGS_VERSION
+    );
     // Reason: even on fresh install, hydrateFromKeychain still runs so
     // tombstones / pre-existing keychain entries are honored.
     expect(keychain.hydrateFromKeychain).toHaveBeenCalled();

@@ -6,7 +6,7 @@ in `logancyang/obsidian-copilot-preview`, replacing each migrated TODO line
 with a link to its issue.
 
 The orchestrator does **not** write issues itself. It triages, then spawns a
-pair of subagents per chunk — an *author* that drafts, and a *reviewer* that
+pair of subagents per chunk — an _author_ that drafts, and a _reviewer_ that
 re-verifies, revises, and pushes. The orchestrator owns the source-file
 write to avoid races.
 
@@ -76,9 +76,10 @@ a chunk record.
 **Record the triage** in `.context/issue-migration-plan.md` as a table:
 
 ```md
-| chunk-id | parent line | priority | folded sub-lines | split-out sub-lines | source-line-range |
-|----------|-------------|----------|------------------|---------------------|-------------------|
-| windows-test | 7 | P0 | 8 | — | 7-8 |
+| chunk-id     | parent line | priority | folded sub-lines | split-out sub-lines | source-line-range |
+| ------------ | ----------- | -------- | ---------------- | ------------------- | ----------------- |
+| windows-test | 7           | P0       | 8                | —                   | 7-8               |
+
 | ...
 ```
 

@@ -32,11 +32,11 @@ The caller passes (free-form for ad-hoc use, structured for subagent use):
 
 - **TODO text** — the line(s) describing the work.
 - **Priority** — `P0` / `P1` / `P2` / `P3`.
-- **Folded sub-items** *(optional)* — secondary bullets that should appear as a
+- **Folded sub-items** _(optional)_ — secondary bullets that should appear as a
   checklist in the issue body.
-- **Source file + line range** *(optional)* — file path and 1-based line range
+- **Source file + line range** _(optional)_ — file path and 1-based line range
   whose lines should be replaced with a link to the new issue after the push.
-- **`chunk-id`** *(optional)* — string used to name the draft artifact file.
+- **`chunk-id`** _(optional)_ — string used to name the draft artifact file.
   Required when `stage=draft` or when running under a reviewer flow.
 - **`stage`** — one of:
   - `stage=draft` — investigate + write draft to
@@ -44,9 +44,9 @@ The caller passes (free-form for ad-hoc use, structured for subagent use):
   - `stage=review-and-push` — load the draft, independently verify, revise if
     needed, push via `gh`, edit the source file (or return the replacement
     line).
-  - `stage=all` *(default for ad-hoc use)* — do both back-to-back in the same
+  - `stage=all` _(default for ad-hoc use)_ — do both back-to-back in the same
     context. Used when no reviewer step is required.
-- **`source-edit`** *(optional, only with `review-and-push` / `all`)* —
+- **`source-edit`** _(optional, only with `review-and-push` / `all`)_ —
   `apply` (default; skill edits the file) or `return-only` (skill reports the
   proposed replacement line and does not touch the file).
 
@@ -73,6 +73,7 @@ Before drafting:
    (e.g. `designdocs/SKILLS_DISCOVERY_REDESIGN.md` is referenced today but
    not yet written), flag this in the issue's Open questions section and
    proceed with the TODO text alone.
+
 3. **Note the current behavior in one or two sentences.** This anchors the
    `## Context` section. The sentence must reference at least one real file
    path or symbol the investigator just read.
@@ -80,7 +81,7 @@ Before drafting:
    anchors `## Proposed behavior` and `## Success criteria`.
 5. **Look for "design needed" markers** in the TODO sub-bullets. When
    present, the issue body should call this out in `## Open questions /
-   Risks` and `## Proposed behavior` should remain intentionally open-ended
+Risks` and `## Proposed behavior` should remain intentionally open-ended
    ("design a UI that …" rather than prescribing pixels).
 
 ## Title standard
@@ -155,7 +156,7 @@ missing label via `gh label create --repo logancyang/obsidian-copilot-preview
 <name> --color <hex>`. Palette:
 
 | Label        | Color     |
-|--------------|-----------|
+| ------------ | --------- |
 | `agent-mode` | `#5319e7` |
 | `P0`         | `#b60205` |
 | `P1`         | `#d93f0b` |
@@ -183,15 +184,19 @@ investigated:
 ---
 
 ## Context
+
 ...
 
 ## Proposed behavior
+
 ...
 
 ## Success criteria
+
 ...
 
 ## Open questions / Risks
+
 ...
 ```
 
@@ -243,7 +248,7 @@ After all rubric items pass:
    `/tmp/create-agent-issue-<chunk-id>.md`) — passing a body file is more
    robust than `--body` for multi-line markdown.
 3. `gh issue create --repo logancyang/obsidian-copilot-preview --title "<title>"
-   --label "<comma-separated labels>" --body-file <tmpfile>`. Capture the
+--label "<comma-separated labels>" --body-file <tmpfile>`. Capture the
    returned URL.
 4. Parse the issue number from the URL.
 
@@ -281,11 +286,11 @@ If no source file is passed, skip this step entirely.
 Return a structured summary the caller can parse:
 
 - `Created #<N>: <title> → <url>`
-- `Source edit: <path>:<lines>` *or* `Source edit: returned <line>` *or*
+- `Source edit: <path>:<lines>` _or_ `Source edit: returned <line>` _or_
   `Source edit: none`
-- `Revision passes: <N>` *(only in `stage=review-and-push` / `stage=all`)*
-- `Rubric: pass` *or* `Rubric: abort — <reason>` *(only in
-  `stage=review-and-push` / `stage=all`)*
+- `Revision passes: <N>` _(only in `stage=review-and-push` / `stage=all`)_
+- `Rubric: pass` _or_ `Rubric: abort — <reason>` _(only in
+  `stage=review-and-push` / `stage=all`)_
 
 If `Rubric: abort`, no issue was created and no source edit was made.
 

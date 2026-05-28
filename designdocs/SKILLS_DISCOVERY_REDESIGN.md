@@ -38,10 +38,10 @@ This doc references [`SKILLS_MANAGEMENT.md`](./SKILLS_MANAGEMENT.md) as the foun
 
 A managed skill is in exactly one of three states based on where its `SKILL.md` lives:
 
-| State | Where SKILL.md lives | Enabled-agents source of truth | Notes |
-|---|---|---|---|
-| **Canonical** | `<vault>/copilot/skills/<name>/SKILL.md` | `metadata.copilot-enabled-agents` in frontmatter | Today's only state. Agent folders hold symlinks. |
-| **Project (single)** | `<vault>/.<agent>/skills/<name>/SKILL.md` for exactly one agent | Inferred from the folder path | The skill belongs to one agent; no canonical copy, no symlinks. |
+| State                  | Where SKILL.md lives                                                                  | Enabled-agents source of truth                               | Notes                                                                                       |
+| ---------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| **Canonical**          | `<vault>/copilot/skills/<name>/SKILL.md`                                              | `metadata.copilot-enabled-agents` in frontmatter             | Today's only state. Agent folders hold symlinks.                                            |
+| **Project (single)**   | `<vault>/.<agent>/skills/<name>/SKILL.md` for exactly one agent                       | Inferred from the folder path                                | The skill belongs to one agent; no canonical copy, no symlinks.                             |
 | **Project (mirrored)** | Identical `SKILL.md` directory trees in two or more `<vault>/.<agent>/skills/<name>/` | Inferred from which agent folders contain the identical copy | Common after a user manually copied a skill between agents; collapses to one row in the UI. |
 
 Identity rule: skills are identified by name. Two skills with the same name and identical directory contents (full recursive content hash, SKILL.md plus every support file) merge. Same name with **different** contents do not merge; see §10 (Edge cases).
@@ -75,21 +75,19 @@ After all four walks, results are merged by `(name, dirContentHash)`:
 Extend the existing `Skill` interface (`src/agentMode/skills/types.ts`) with a `location` discriminator:
 
 ```ts
-export type SkillLocation =
-  | { kind: "canonical" }
-  | { kind: "project"; agentDirs: BackendId[] };
+export type SkillLocation = { kind: "canonical" } | { kind: "project"; agentDirs: BackendId[] };
 
 export interface Skill {
   name: string;
   description: string;
-  filePath: string;        // absolute path to the SKILL.md actually used for display/open
-  dirPath: string;         // absolute path to the directory holding that SKILL.md
+  filePath: string; // absolute path to the SKILL.md actually used for display/open
+  dirPath: string; // absolute path to the directory holding that SKILL.md
   body: string;
   // ...existing optional spec fields unchanged
   enabledAgents: BackendId[]; // For canonical skills: parsed from frontmatter.
-                              // For project skills: equals location.agentDirs.
+  // For project skills: equals location.agentDirs.
   location: SkillLocation;
-  contentHash?: string;    // present for project skills; used to detect mirrored duplicates
+  contentHash?: string; // present for project skills; used to detect mirrored duplicates
 }
 ```
 
@@ -99,17 +97,17 @@ For project-mirrored skills the chosen `filePath` / `dirPath` is the alphabetica
 
 The per-row agent toggle has three flavors based on current `Skill.location`:
 
-| Current location | Toggle action | Effect | Confirmation? |
-|---|---|---|---|
-| Canonical | Toggle ON any agent | Update frontmatter; create symlink in `.<agent>/skills/`. | No (today's behavior). |
-| Canonical | Toggle OFF any agent | Update frontmatter; remove symlink. SKILL.md stays in canonical. | No (today's behavior). |
-| Project (single, agent A) | Toggle ON agent A | No-op (already enabled). | No. |
-| **Project (single, agent A)** | **Toggle ON agent B** | **Migrate to canonical; create symlinks at A and B.** | **Yes** (unless suppressed). |
-| **Project (single, agent A)** | **Toggle OFF agent A** | **Migrate to canonical with 0 enabled agents; SKILL.md is preserved under `copilot/skills/`; no symlinks.** | **Yes** (unless suppressed) — the dialog explains the file would otherwise have nowhere to live. |
-| Project (mirrored, A+B) | Toggle ON A or B | No-op (already enabled). | No. |
-| **Project (mirrored, A+B)** | **Toggle ON agent C** | **Migrate to canonical; delete the duplicate project folders; create symlinks at A, B, C.** | **Yes** (unless suppressed). |
-| Project (mirrored, A+B) | Toggle OFF agent A (with B still enabled) | Delete `.A/skills/<name>/`. The skill remains a project row, now single-agent B. | No. Show a brief `Notice` (`Removed foo from Claude project folder; still active in Codex.`). |
-| **Project (mirrored, A+B)** | **Toggle OFF the last remaining agent** | **Migrate the surviving copy to canonical with 0 enabled agents; delete the source project folder.** | **Yes** (unless suppressed) — same dialog as the project-single off case, body lists the one surviving copy. |
+| Current location              | Toggle action                             | Effect                                                                                                      | Confirmation?                                                                                                |
+| ----------------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Canonical                     | Toggle ON any agent                       | Update frontmatter; create symlink in `.<agent>/skills/`.                                                   | No (today's behavior).                                                                                       |
+| Canonical                     | Toggle OFF any agent                      | Update frontmatter; remove symlink. SKILL.md stays in canonical.                                            | No (today's behavior).                                                                                       |
+| Project (single, agent A)     | Toggle ON agent A                         | No-op (already enabled).                                                                                    | No.                                                                                                          |
+| **Project (single, agent A)** | **Toggle ON agent B**                     | **Migrate to canonical; create symlinks at A and B.**                                                       | **Yes** (unless suppressed).                                                                                 |
+| **Project (single, agent A)** | **Toggle OFF agent A**                    | **Migrate to canonical with 0 enabled agents; SKILL.md is preserved under `copilot/skills/`; no symlinks.** | **Yes** (unless suppressed) — the dialog explains the file would otherwise have nowhere to live.             |
+| Project (mirrored, A+B)       | Toggle ON A or B                          | No-op (already enabled).                                                                                    | No.                                                                                                          |
+| **Project (mirrored, A+B)**   | **Toggle ON agent C**                     | **Migrate to canonical; delete the duplicate project folders; create symlinks at A, B, C.**                 | **Yes** (unless suppressed).                                                                                 |
+| Project (mirrored, A+B)       | Toggle OFF agent A (with B still enabled) | Delete `.A/skills/<name>/`. The skill remains a project row, now single-agent B.                            | No. Show a brief `Notice` (`Removed foo from Claude project folder; still active in Codex.`).                |
+| **Project (mirrored, A+B)**   | **Toggle OFF the last remaining agent**   | **Migrate the surviving copy to canonical with 0 enabled agents; delete the source project folder.**        | **Yes** (unless suppressed) — same dialog as the project-single off case, body lists the one surviving copy. |
 
 Migration always lands the SKILL.md in `<vault>/<configured-skills-folder>/<name>/`. Name collisions with an existing canonical skill use today's suffix-on-collision helper (`foo`, `foo-2`, `foo-3`, …) and the resulting name is shown in the confirmation before commit.
 
@@ -245,14 +243,15 @@ External edit propagation: if the user edits `.claude/skills/foo/SKILL.md` direc
 
 **User opens the overflow menu on a project-mirrored skill — lockdown.** The mirrored state is fragile: modifying one copy diverges it from the others, breaking the merge silently. To prevent that, the overflow menu collapses to a single actionable entry when `skill.location.kind === "project"` and `skill.location.agentDirs.length >= 2`:
 
-- The four normal entries — *Edit SKILL.md*, *Edit properties*, *Rename*, *Delete* — render in their muted/disabled state (greyed text, no hover affordance, `aria-disabled="true"`). Clicking them does nothing.
+- The four normal entries — _Edit SKILL.md_, _Edit properties_, _Rename_, _Delete_ — render in their muted/disabled state (greyed text, no hover affordance, `aria-disabled="true"`). Clicking them does nothing.
 - A single new entry, **Migrate to shared folder**, renders at the top of the menu in its enabled state. Clicking it opens the proactive-consolidate variant of `MigrateSkillConfirmModal` described in §8.
 - Hovering anywhere on the menu (or specifically on any muted entry) reveals a tooltip with the verbatim copy:
 
   > This skill is duplicated in {N} agent folders. Editing one copy would silently diverge from the others. Migrate it to your shared folder first to enable edits.
 
   ({N} is the live count, e.g. `2 agent folders`.)
-- *Reveal in vault* is the one read-only action that stays enabled. It opens whichever copy `Skill.dirPath` resolved to (alphabetically-first agent dir, deterministic).
+
+- _Reveal in vault_ is the one read-only action that stays enabled. It opens whichever copy `Skill.dirPath` resolved to (alphabetically-first agent dir, deterministic).
 
 Once migration completes, the skill is canonical and the overflow menu returns to its normal full state on the next render. No menu state needs to be remembered across renders — the lockdown is a pure function of `Skill.location`.
 
@@ -417,7 +416,7 @@ Reference paths the design doc points at:
 - **"Don't ask again" is a single global flag.** Per-source-agent or per-pair variants were considered but rejected: the dialog body is the same shape regardless of which agent the source is, and the user's mental model is "I trust Copilot to do migrations" or "I want to be asked each time." More granular suppression complicates the settings surface without adding clarity.
 - **The migration dialog is a confirmation, not a wizard.** No source-selection UI; the rows that need migration are already disambiguated by the discovery merge.
 - **Project-managed skills are not part of reconciliation.** Reconciliation is about keeping agent symlinks in sync with canonical frontmatter. A project-managed skill has no canonical SKILL.md to disagree with.
-- **Project-mirrored skills lock down their overflow menu to a single Migrate action.** Alternative: apply the user's edit/rename/delete to every copy atomically. Rejected because it hides the duplicate-state from the user (the next external edit to one copy still diverges them silently, and there is no UI signal that they were ever in a fragile state). The lockdown teaches the user that the duplicates need to be resolved before edits, and the Migrate entry is one click away. The tooltip explains *why* on hover so the lockdown does not feel arbitrary.
+- **Project-mirrored skills lock down their overflow menu to a single Migrate action.** Alternative: apply the user's edit/rename/delete to every copy atomically. Rejected because it hides the duplicate-state from the user (the next external edit to one copy still diverges them silently, and there is no UI signal that they were ever in a fragile state). The lockdown teaches the user that the duplicates need to be resolved before edits, and the Migrate entry is one click away. The tooltip explains _why_ on hover so the lockdown does not feel arbitrary.
 - **The spawn-time skill-creation directive is removed entirely** (see §11b). With unified discovery, an agent writing to its own native skills directory (`.claude/skills/`, `.agents/skills/`, `.opencode/skills/`) is the desired behavior — discovery will pick the new skill up as project-managed. Telling each agent to override its native convention and write into `copilot/skills/` was a workaround for the canonical-only discovery model and serves no purpose under the new model.
 
 ## 17. References

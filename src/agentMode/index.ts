@@ -29,6 +29,7 @@ export type { EnrolledModelRef } from "./session/agentDefaultEnable";
 export { partitionOpencodeOnlyWireIds } from "./backends/opencode/opencodeProbePartition";
 export { mapProviderToOpencodeId } from "./backends/opencode/opencodeModelResolve";
 export type { OpencodeProviderMapping } from "./backends/opencode/opencodeModelResolve";
+export { installBadge, InstallBadge, InstallStatusLine } from "./backends/shared/installStatus";
 export type {
   BackendState,
   CopilotMode,
