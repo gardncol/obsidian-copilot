@@ -9,6 +9,21 @@ import type { CatalogProvider, ModelInfo, ProviderType } from "@/modelManagement
 import { isPlainObject, type WireModel, type WireProvider } from "./modelsDevWire";
 
 /**
+ * Heuristic shared by the catalog transform and the catalog-less BYOK
+ * template flow: an id whose token set contains `embed` / `embedding` is
+ * an embedding model. Token-bounded so `embedded-*` chat models (the
+ * `embed` substring not in an embedding context) don't get mis-flagged
+ * out of chat backends. It's the only signal available for hand-typed
+ * / `GET /models`-fetched ids, which carry no capability metadata on
+ * the wire.
+ */
+const EMBEDDING_TOKEN = /(^|[-_/.\s])embed(ding)?($|[-_/.\s])/i;
+
+export function looksLikeEmbeddingModel(idOrHaystack: string): boolean {
+  return EMBEDDING_TOKEN.test(idOrHaystack);
+}
+
+/**
  * Maps the `models.dev` `npm` field to the closed `ProviderType` union.
  */
 function mapNpmToProviderType(npm: string | undefined): ProviderType {
@@ -53,11 +68,9 @@ function transformModel(wire: WireModel): ModelInfo | null {
 
   if (typeof wire.reasoning === "boolean") info.reasoning = wire.reasoning;
   if (typeof wire.tool_call === "boolean") info.toolCall = wire.tool_call;
-  // Embedding models are named consistently in the id (`*-embedding-*`,
-  // `*-embed-*`) but the `family` field is unreliable — it's often the
-  // base family (`gemini`, `qwen`) or absent. Match either source.
-  const embedHaystack = `${wire.id} ${typeof wire.family === "string" ? wire.family : ""}`;
-  if (embedHaystack.toLowerCase().includes("embed")) {
+  // The `family` field is unreliable — it's often the base family
+  // (`gemini`, `qwen`) or absent — so match the id too.
+  if (looksLikeEmbeddingModel(`${wire.id} ${typeof wire.family === "string" ? wire.family : ""}`)) {
     info.isEmbedding = true;
   }
   if (typeof wire.release_date === "string") info.releaseDate = wire.release_date;

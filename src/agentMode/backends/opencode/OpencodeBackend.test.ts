@@ -7,6 +7,7 @@ import type {
   Provider,
   ProviderOrigin,
   ProviderRegistry,
+  ProviderType,
 } from "@/modelManagement";
 import type { Skill } from "@/agentMode/skills";
 import {
@@ -67,14 +68,32 @@ function seedSkills(skills: Skill[]): void {
 // `providerRegistry.getApiKey(providerId)`.
 // ---------------------------------------------------------------------------
 
-function makeProvider(providerId: string, origin: ProviderOrigin): Provider {
+function makeProvider(
+  providerId: string,
+  origin: ProviderOrigin,
+  overrides: Partial<Pick<Provider, "providerType" | "baseUrl" | "displayName">> = {}
+): Provider {
   return {
     providerId,
-    providerType: "anthropic",
-    displayName: providerId,
+    providerType: overrides.providerType ?? "anthropic",
+    displayName: overrides.displayName ?? providerId,
+    baseUrl: overrides.baseUrl,
     origin,
     addedAt: 0,
   };
+}
+
+/** A self-hosted OpenAI-compatible BYOK provider (Ollama / LM Studio / custom). */
+function makeOpenAICompatibleProvider(
+  providerId: string,
+  baseUrl: string | undefined,
+  displayName = providerId
+): Provider {
+  return makeProvider(
+    providerId,
+    { kind: "byok" },
+    { providerType: "openai-compatible" as ProviderType, baseUrl, displayName }
+  );
 }
 
 function makeModel(providerId: string, wireId: string): ConfiguredModel {
@@ -226,8 +245,8 @@ describe("buildOpencodeConfig — provider/model injection", () => {
     expect(cfg.provider).toEqual({});
   });
 
-  it("skips unroutable providers (BYOK without a catalog id, e.g. azure/bedrock/custom)", async () => {
-    const provider = makeProvider("p-azure", { kind: "byok" });
+  it("skips unroutable providers (BYOK without a catalog id, e.g. azure/bedrock)", async () => {
+    const provider = makeProvider("p-azure", { kind: "byok" }, { providerType: "azure" });
     const deps = makeDeps({
       resolved: [okEntry(provider, makeModel("p-azure", "my-azure-deploy"))],
       keys: { "p-azure": "azure-key" },
@@ -238,8 +257,147 @@ describe("buildOpencodeConfig — provider/model injection", () => {
     expect(cfg.provider).toEqual({});
   });
 
-  it("registers Copilot Plus as a custom openai-compatible provider", async () => {
-    const provider = makeProvider("p-plus", { kind: "copilot-plus" });
+  it("registers a key-less OpenAI-compatible BYOK provider (Ollama) under its providerId", async () => {
+    const provider = makeOpenAICompatibleProvider(
+      "p-ollama",
+      "http://localhost:11434/v1",
+      "Ollama"
+    );
+    const deps = makeDeps({
+      resolved: [okEntry(provider, makeModel("p-ollama", "llama3.2"))],
+      keys: { "p-ollama": null },
+    });
+    const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
+      provider: Record<
+        string,
+        {
+          npm?: string;
+          name?: string;
+          options?: { baseURL?: string; apiKey?: string };
+          models?: Record<string, unknown>;
+        }
+      >;
+    };
+    const entry = cfg.provider["p-ollama"];
+    expect(entry.npm).toBe("@ai-sdk/openai-compatible");
+    expect(entry.name).toBe("Ollama");
+    expect(entry.options?.baseURL).toBe("http://localhost:11434/v1");
+    // Key-less: apiKey must be absent, not an empty string.
+    expect(entry.options?.apiKey).toBeUndefined();
+    expect(entry.models).toEqual({ "llama3.2": {} });
+  });
+
+  it("includes apiKey for an OpenAI-compatible BYOK provider that has one", async () => {
+    const provider = makeOpenAICompatibleProvider("p-custom", "https://my-endpoint/v1", "Custom");
+    const deps = makeDeps({
+      resolved: [okEntry(provider, makeModel("p-custom", "gpt-5.5"))],
+      keys: { "p-custom": "secret-key" },
+    });
+    const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
+      provider: Record<string, { options?: { apiKey?: string } }>;
+    };
+    expect(cfg.provider["p-custom"].options?.apiKey).toBe("secret-key");
+  });
+
+  it("skips an OpenAI-compatible BYOK provider with no baseUrl", async () => {
+    const provider = makeOpenAICompatibleProvider("p-nobase", undefined);
+    const deps = makeDeps({
+      resolved: [okEntry(provider, makeModel("p-nobase", "some-model"))],
+    });
+    const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
+      provider: Record<string, unknown>;
+    };
+    expect(cfg.provider).toEqual({});
+  });
+
+  it("drops a key-less OpenAI-compatible BYOK provider on a public host", async () => {
+    // Key tolerance keys off the baseUrl host, not catalog membership: a public
+    // endpoint with no key is dropped (its template requires one).
+    const provider = makeOpenAICompatibleProvider("p-public", "https://my-proxy.example.com/v1");
+    const deps = makeDeps({
+      resolved: [okEntry(provider, makeModel("p-public", "gpt-5.5"))],
+      keys: { "p-public": null },
+    });
+    const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
+      provider: Record<string, unknown>;
+    };
+    expect(cfg.provider).toEqual({});
+  });
+
+  it("keeps a key-less self-hosted provider even when it carries a catalog id", async () => {
+    // Guards the catalog-growth scenario: if a local runner like Ollama ever
+    // gains a models.dev entry, its localhost baseUrl still tolerates a missing
+    // key, so it must not be dropped.
+    const provider = makeProvider(
+      "p-ollama-catalog",
+      { kind: "byok", catalogProviderId: "ollama" },
+      { providerType: "openai-compatible", baseUrl: "http://localhost:11434/v1" }
+    );
+    const deps = makeDeps({
+      resolved: [okEntry(provider, makeModel("p-ollama-catalog", "llama3.2"))],
+      keys: { "p-ollama-catalog": null },
+    });
+    const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
+      provider: Record<string, { models?: Record<string, unknown> }>;
+    };
+    expect(cfg.provider.ollama?.models).toEqual({ "llama3.2": {} });
+  });
+
+  it("omits apiKey entirely when a catalog self-hosted provider has an empty-string keychain entry", async () => {
+    // Regression: `apiKey ?? undefined` would preserve `""` and leak
+    // `Authorization: Bearer ` downstream — assert the field is absent.
+    const provider = makeProvider(
+      "p-ollama-catalog",
+      { kind: "byok", catalogProviderId: "ollama" },
+      { providerType: "openai-compatible", baseUrl: "http://localhost:11434/v1" }
+    );
+    const deps = makeDeps({
+      resolved: [okEntry(provider, makeModel("p-ollama-catalog", "llama3.2"))],
+      keys: { "p-ollama-catalog": "" },
+    });
+    const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
+      provider: Record<string, { options?: Record<string, unknown> }>;
+    };
+    const opts = cfg.provider.ollama?.options ?? {};
+    expect(opts).not.toHaveProperty("apiKey");
+  });
+
+  it("passes a baseUrl override through for a catalog provider (no npm — opencode resolves the SDK natively)", async () => {
+    // A catalog provider keeps native resolution (no npm), but when the user
+    // overrides its baseUrl we must forward it so opencode routes to the proxy
+    // instead of the registry default — matching the chat backend's behavior.
+    const provider = makeProvider(
+      "p-openai",
+      { kind: "byok", catalogProviderId: "openai" },
+      { providerType: "openai-compatible", baseUrl: "https://my-proxy.example.com/v1" }
+    );
+    const deps = makeDeps({
+      resolved: [okEntry(provider, makeModel("p-openai", "gpt-5"))],
+      keys: { "p-openai": "oai-456" },
+    });
+    const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
+      provider: Record<string, { npm?: string; options?: { baseURL?: string; apiKey?: string } }>;
+    };
+    const entry = cfg.provider.openai;
+    expect(entry.npm).toBeUndefined();
+    expect(entry.options).toEqual({
+      apiKey: "oai-456",
+      baseURL: "https://my-proxy.example.com/v1",
+    });
+  });
+
+  it("registers Copilot Plus as a custom openai-compatible provider from its own fields", async () => {
+    // Plus has no catalog identity, so it's registered like a custom endpoint —
+    // npm/name/baseURL all read off the provider row (seeded by CopilotPlusSetupApi).
+    const provider = makeProvider(
+      "p-plus",
+      { kind: "copilot-plus" },
+      {
+        providerType: "openai-compatible",
+        displayName: "Copilot Plus",
+        baseUrl: "https://models.brevilabs.com/v1",
+      }
+    );
     const deps = makeDeps({
       resolved: [okEntry(provider, makeModel("p-plus", "copilot-plus-flash"))],
       keys: { "p-plus": "plus-token-123" },

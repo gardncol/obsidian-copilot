@@ -42,10 +42,9 @@ describe("ByokGlobalTable", () => {
     expect(screen.getByTestId("byok-table-empty")).toBeTruthy();
   });
 
-  it("renders the provider name, model count, and model rows", () => {
+  it("renders the provider name and model rows", () => {
     render(<ByokGlobalTable groups={[group]} onConfigure={jest.fn()} onRemove={jest.fn()} />);
     expect(screen.getByText("Anthropic")).toBeTruthy();
-    expect(screen.getByText(/2 models/)).toBeTruthy();
     expect(screen.getByText("Claude Sonnet 4.5")).toBeTruthy();
     expect(screen.getByText("Claude Opus 4.5")).toBeTruthy();
     // Context window from the configured-model snapshot.

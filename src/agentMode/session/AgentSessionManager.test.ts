@@ -552,6 +552,42 @@ describe("AgentSessionManager.restartBackend", () => {
     expect(mgr.getActiveSession()).not.toBe(first);
     expect(mgr.getActiveSession()?.backendId).toBe("opencode");
   });
+
+  it("queues a second concurrent restart so the latest settings are not lost", async () => {
+    // Repro: a single BYOK save fires many provider/model events that each
+    // call restartBackend. Without queueing, only the first restart's
+    // buildOpencodeConfig snapshot wins and later writes are silently
+    // dropped. We model the work by stalling proc.shutdown until both
+    // restartBackend calls have started, then asserting that the backend
+    // is torn down twice (so the second restart actually ran with the
+    // post-second-write snapshot).
+    const mgr = buildManager();
+    await mgr.createSession();
+
+    // Block the first shutdown so both restart calls overlap. The second
+    // call hits restartingBackends.has() === true and must enqueue.
+    let releaseShutdown!: () => void;
+    const shutdownStarted = new Promise<void>((resolveStarted) => {
+      mockBackendShutdown.mockImplementationOnce(
+        () =>
+          new Promise<undefined>((resolve) => {
+            resolveStarted();
+            releaseShutdown = () => resolve(undefined);
+          })
+      );
+    });
+
+    const first = mgr.restartBackend("opencode", "byok save #1");
+    await shutdownStarted;
+    const second = mgr.restartBackend("opencode", "byok save #2");
+    releaseShutdown();
+    await Promise.all([first, second]);
+    // The queued re-run schedules itself in a finally; flush it.
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    // First call's shutdown + the queued re-run's shutdown = 2.
+    expect(mockBackendShutdown).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("AgentSessionManager attention tracking", () => {

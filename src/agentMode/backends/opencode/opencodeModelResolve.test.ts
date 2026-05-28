@@ -1,12 +1,16 @@
 import type { CopilotSettings } from "@/settings/model";
-import type { ConfiguredModel, Provider, ProviderOrigin } from "@/modelManagement";
+import type { ConfiguredModel, Provider, ProviderOrigin, ProviderType } from "@/modelManagement";
 import { mapProviderToOpencodeId, opencodeEnabledWireIds } from "./opencodeModelResolve";
 
 /** Build a minimal `Provider` row for a given origin + type. */
-function makeProvider(providerId: string, origin: ProviderOrigin): Provider {
+function makeProvider(
+  providerId: string,
+  origin: ProviderOrigin,
+  providerType: ProviderType = "anthropic"
+): Provider {
   return {
     providerId,
-    providerType: "anthropic",
+    providerType,
     displayName: providerId,
     origin,
     addedAt: 0,
@@ -35,9 +39,7 @@ function makeSettings(args: {
 }): CopilotSettings {
   return {
     backends:
-      args.enabledModels === undefined
-        ? {}
-        : { opencode: { enabledModels: args.enabledModels, defaultModel: null } },
+      args.enabledModels === undefined ? {} : { opencode: { enabledModels: args.enabledModels } },
     configuredModels: args.configuredModels ?? [],
     providers: args.providers ?? {},
   } as unknown as CopilotSettings;
@@ -54,9 +56,19 @@ describe("mapProviderToOpencodeId", () => {
     expect(mapProviderToOpencodeId(provider)).toEqual({ id: "openrouter", native: false });
   });
 
-  it("returns null for a BYOK provider without a catalog id (custom endpoint)", () => {
+  it("returns null for a non-OpenAI-compatible BYOK provider without a catalog id", () => {
     const provider = makeProvider("p1", { kind: "byok" });
     expect(mapProviderToOpencodeId(provider)).toBeNull();
+  });
+
+  it("maps an OpenAI-compatible BYOK provider without a catalog id to its providerId", () => {
+    const provider = makeProvider("p1", { kind: "byok" }, "openai-compatible");
+    expect(mapProviderToOpencodeId(provider)).toEqual({ id: "p1", native: false });
+  });
+
+  it("returns null for azure / bedrock BYOK providers without a catalog id", () => {
+    expect(mapProviderToOpencodeId(makeProvider("p1", { kind: "byok" }, "azure"))).toBeNull();
+    expect(mapProviderToOpencodeId(makeProvider("p2", { kind: "byok" }, "bedrock"))).toBeNull();
   });
 
   it("maps copilot-plus origin to the reserved copilot-plus id, non-native", () => {
@@ -138,10 +150,19 @@ describe("opencodeEnabledWireIds", () => {
   it("skips models on unroutable providers (BYOK without catalog id)", () => {
     const settings = makeSettings({
       enabledModels: ["cm1"],
-      providers: { p1: makeProvider("p1", { kind: "byok" }) },
+      providers: { p1: makeProvider("p1", { kind: "byok" }, "azure") },
       configuredModels: [makeModel("cm1", "p1", "some-azure-model")],
     });
     expect(opencodeEnabledWireIds(settings).size).toBe(0);
+  });
+
+  it("builds `<providerId>/<model>` wire ids for OpenAI-compatible BYOK models", () => {
+    const settings = makeSettings({
+      enabledModels: ["cm1"],
+      providers: { p1: makeProvider("p1", { kind: "byok" }, "openai-compatible") },
+      configuredModels: [makeModel("cm1", "p1", "llama3.2")],
+    });
+    expect([...opencodeEnabledWireIds(settings)]).toEqual(["p1/llama3.2"]);
   });
 
   it("mixes BYOK and agent-origin models with the correct wire shapes", () => {

@@ -19,7 +19,7 @@ export type {
 export type {
   BuiltChatModel,
   EnabledBackendEntry,
-  ProviderTemplate,
+  ProviderDefinition,
   RefreshResult,
   VerificationResult,
 } from "./types/runtime";
@@ -30,9 +30,9 @@ export type {
 
 export { CatalogDownloadService } from "./catalog/CatalogDownloadService";
 export type { CatalogDownloadDeps, CatalogRefreshResult } from "./catalog/CatalogDownloadService";
-export { BUILTIN_PROVIDER_TEMPLATES } from "./catalog/builtinTemplates";
 
 export { ProviderRegistry } from "./providers/ProviderRegistry";
+export { isSelfHostedProvider, isSelfHostedUrl } from "./providers/isSelfHostedProvider";
 export { ConfiguredModelRegistry } from "./models/ConfiguredModelRegistry";
 export { BackendConfigRegistry } from "./backends/BackendConfigRegistry";
 export { ChatModelFactory } from "./chatModel/ChatModelFactory";
@@ -56,12 +56,7 @@ export type {
 // ---------------------------------------------------------------------------
 
 export { ByokSetupApi, BYOK_DEFAULT_AUTO_ENROLL } from "./setup/ByokSetupApi";
-export type {
-  AddCatalogProviderInput,
-  AddModelsInput,
-  AddTemplateProviderInput,
-  ByokSetupResult,
-} from "./setup/ByokSetupApi";
+export type { AddModelsInput, ByokSetupResult, SetupProviderInput } from "./setup/ByokSetupApi";
 
 export { AgentSetupApi } from "./setup/AgentSetupApi";
 export type {

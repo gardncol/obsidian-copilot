@@ -1,30 +1,26 @@
 /**
- * BYOK setup workflow. The user-facing wizard ("Add Provider" → pick
- * catalog or template → enter key → select models → Verify & save)
- * calls into this class. Bundles the "create Provider row + create N
- * ConfiguredModel rows + auto-enroll in default backends" recipe so
- * the wizard doesn't have to know the order or invariants.
+ * BYOK setup workflow. The user-facing wizard ("Add Provider" → pick a
+ * provider definition → enter key → select models → save) calls
+ * `setupProvider`. Bundles the "create Provider row + create N
+ * ConfiguredModel rows + auto-enroll in default backends" recipe so the
+ * wizard doesn't have to know the order or invariants.
  *
- * Two flows:
- *   - `addCatalogProvider`  — user picked a `models.dev` entry.
- *                              Catalog supplies `ModelInfo` snapshots.
- *   - `addTemplateProvider` — user picked a built-in template
- *                              (Ollama, LMStudio, custom OpenAI-compat,
- *                              Azure, Bedrock) and hand-typed model
- *                              ids. Only `id` + `displayName`
- *                              populated on each `ModelInfo`.
- *
- * Both produce identical `Provider` + `ConfiguredModel` shapes; the
- * difference is only in how `ModelInfo` was sourced.
+ * `models.dev` is treated as a metadata enhancer, not a source of
+ * truth: the caller supplies fully-formed `ModelInfo`s for whichever
+ * model ids the live endpoint returned (catalog-enriched when possible,
+ * synthesized otherwise). The optional `catalogProviderId` on the input
+ * just records the catalog link on the Provider's `origin` for future
+ * metadata lookups.
  *
  * Default auto-enrollment is `BYOK_DEFAULT_AUTO_ENROLL`
- * = `["chat", "opencode"]` so BYOK models surface in both Simple
- * Chat and the OpenCode agent picker out of the box.
+ * = `["chat", "opencode"]` so BYOK models surface in both Simple Chat
+ * and the OpenCode agent picker out of the box.
  */
 
-import type { CatalogProvider, ModelInfo } from "@/modelManagement/types/catalog";
+import { logError } from "@/logger";
+import { looksLikeEmbeddingModel } from "@/modelManagement/catalog/catalogTransform";
+import type { ModelInfo, ProviderType } from "@/modelManagement/types/catalog";
 import type { BackendType } from "@/modelManagement/types/persisted";
-import type { ProviderTemplate } from "@/modelManagement/types/runtime";
 import type { BackendConfigRegistry } from "@/modelManagement/backends/BackendConfigRegistry";
 import type { ConfiguredModelRegistry } from "@/modelManagement/models/ConfiguredModelRegistry";
 import type { ProviderRegistry } from "@/modelManagement/providers/ProviderRegistry";
@@ -36,44 +32,36 @@ import type { ProviderRegistry } from "@/modelManagement/providers/ProviderRegis
  */
 export const BYOK_DEFAULT_AUTO_ENROLL: readonly BackendType[] = ["chat", "opencode"];
 
-export interface AddCatalogProviderInput {
-  /** From `ModelCatalogService.getProvider(id)`. */
-  template: CatalogProvider;
-  displayName: string;
-  /** Overrides `template.defaultBaseUrl`. */
-  baseUrl?: string;
-  /** Set for providers that need an API key. Stored in the keychain. */
-  apiKey?: string;
-  /** Per-providerType payload (Azure deployment, Bedrock region,
-   *  OpenAI org id, …). Validated by the adapter's `extrasSchema`
-   *  at `ChatModelFactory.build()` time. */
-  extras?: Record<string, unknown>;
-  /** Subset of `template.models` keys the user checked. */
-  selectedWireModelIds: readonly string[];
-  /** Defaults to `BYOK_DEFAULT_AUTO_ENROLL`. Pass `[]` to skip
-   *  auto-enrollment entirely (user will enable models manually
-   *  through Configure Provider). */
-  autoEnrollIn?: readonly BackendType[];
-}
-
-export interface AddTemplateProviderInput {
-  /** From `ModelCatalogService.listBuiltinTemplates()`. */
-  template: ProviderTemplate;
-  displayName: string;
-  baseUrl?: string;
-  apiKey?: string;
-  extras?: Record<string, unknown>;
-  /** User-typed models — `id` is the wire form, `displayName` is
-   *  whatever the user labelled it. Other `ModelInfo` fields stay
-   *  empty until the user edits the row. */
-  selectedModels: readonly Pick<ModelInfo, "id" | "displayName">[];
-  autoEnrollIn?: readonly BackendType[];
-}
-
 export interface AddModelsInput {
   providerId: string;
   /** Catalog-snapshotted or hand-typed `ModelInfo`s — same shape
    *  either way. */
+  models: readonly ModelInfo[];
+  autoEnrollIn?: readonly BackendType[];
+}
+
+/**
+ * Unified input for `setupProvider`. Replaces the catalog / template
+ * split — the caller hands over fully-formed `ModelInfo`s (enriched
+ * with catalog metadata when available) and an optional
+ * `catalogProviderId` link.
+ */
+export interface SetupProviderInput {
+  /** Catalog provider id when the picker resolved against a catalog
+   *  entry; omit for built-in templates (Ollama, custom, …). */
+  catalogProviderId?: string;
+  providerType: ProviderType;
+  displayName: string;
+  /** Overrides the provider definition's `defaultBaseUrl`. */
+  baseUrl?: string;
+  /** Stored in the keychain. */
+  apiKey?: string;
+  /** Per-providerType payload (Azure deployment, Bedrock region,
+   *  OpenAI org id, …). */
+  extras?: Record<string, unknown>;
+  /** Full `ModelInfo` snapshots for every model the user selected.
+   *  The caller is responsible for catalog enrichment so the API can
+   *  stay catalog-agnostic. */
   models: readonly ModelInfo[];
   autoEnrollIn?: readonly BackendType[];
 }
@@ -99,72 +87,123 @@ export class ByokSetupApi {
   }
 
   /**
-   * Catalog-driven flow. Creates the Provider (with
-   * `origin: { kind: "byok" }`), creates N ConfiguredModels from the
-   * catalog snapshots, stores the API key in the keychain, and
-   * enrolls the new models into `autoEnrollIn ?? BYOK_DEFAULT_AUTO_ENROLL`.
+   * Unified BYOK setup. Creates the Provider (with `origin.kind = "byok"`
+   * and an optional `catalogProviderId` link), stores the API key,
+   * creates `ConfiguredModel` rows from the supplied `models`
+   * snapshots, and enrolls non-embedding models into
+   * `autoEnrollIn ?? BYOK_DEFAULT_AUTO_ENROLL`. Replaces the
+   * catalog / template split — the caller pre-enriches `ModelInfo`s.
    *
-   * Order: provider row → API key → models → backend enrollment. If a
-   * later step fails, earlier writes stay in place. The caller is
-   * responsible for surfacing the error to the user; cleanup of a
-   * partial setup happens through `coordinator.removeProvider`.
+   * Order: provider row → API key → models → backend enrollment. If any
+   * later step throws, the provider row is rolled back so a half-built
+   * provider doesn't surface in `byokProvidersAtom`.
    */
-  async addCatalogProvider(input: AddCatalogProviderInput): Promise<ByokSetupResult> {
+  async setupProvider(input: SetupProviderInput): Promise<ByokSetupResult> {
     const providerId = await this.#providers.add({
-      providerType: input.template.providerType,
+      providerType: input.providerType,
       displayName: input.displayName,
-      baseUrl: input.baseUrl ?? input.template.defaultBaseUrl,
-      origin: { kind: "byok", catalogProviderId: input.template.id },
+      baseUrl: input.baseUrl,
+      origin: {
+        kind: "byok",
+        ...(input.catalogProviderId ? { catalogProviderId: input.catalogProviderId } : {}),
+      },
       extras: input.extras,
     });
 
-    if (input.apiKey) {
-      await this.#providers.setApiKey(providerId, input.apiKey);
-    }
-
-    const infos = input.selectedWireModelIds
-      .map((wireId) => input.template.models[wireId])
-      .filter((info): info is NonNullable<typeof info> => info !== undefined);
-    const configuredModelIds = await this.#models.bulkSet(providerId, infos);
-
-    // `infos` carries no duplicate `info.id` (catalog keys are ids and
-    // `selectedWireModelIds` is a set), so `bulkSet` returns ids 1:1 in
-    // input order — `configuredModelIds[i]` pairs with `infos[i]`.
-    const enrollIn = input.autoEnrollIn ?? BYOK_DEFAULT_AUTO_ENROLL;
-    for (const backend of enrollIn) {
-      for (let i = 0; i < configuredModelIds.length; i++) {
-        // Embedding models aren't chat models — auto-enrolling them into
-        // chat/agent backends would surface them in completion pickers
-        // where they fail at inference time.
-        if (infos[i]?.isEmbedding) continue;
-        await this.#backends.enableModel(backend, configuredModelIds[i]);
+    try {
+      if (input.apiKey) {
+        await this.#providers.setApiKey(providerId, input.apiKey);
       }
+
+      const configuredModelIds = await this.#models.bulkSet(providerId, input.models);
+
+      // `models` carries no duplicate `info.id` (selection is a set), so
+      // `bulkSet` returns ids 1:1 in input order — `configuredModelIds[i]`
+      // pairs with `models[i]`. Embeddings aren't chat models, so we keep
+      // them out of the chat/agent backends.
+      const newChatIds = configuredModelIds.filter((_, i) => !input.models[i]?.isEmbedding);
+      await this.#enrollInBackends(input.autoEnrollIn ?? BYOK_DEFAULT_AUTO_ENROLL, newChatIds);
+
+      return { providerId, configuredModelIds };
+    } catch (err) {
+      await this.#rollbackProvider(providerId);
+      throw err;
     }
-
-    return { providerId, configuredModelIds };
-  }
-
-  /**
-   * Template-driven flow. Same shape as catalog flow, but model
-   * metadata is whatever the user typed in (no catalog snapshot).
-   *
-   * TODO(byok): implemented in the template-flow PR. See
-   * `designdocs/BYOK_UI_SPEC.md` for the surrounding UI.
-   */
-  addTemplateProvider(input: AddTemplateProviderInput): Promise<ByokSetupResult> {
-    throw new Error("[modelManagement] ByokSetupApi.addTemplateProvider not implemented yet");
   }
 
   /**
    * Add more configured models to an existing BYOK provider without
    * touching the Provider row. Skips models that already exist on
-   * the provider (uniqueness invariant). Returns the resulting
-   * `configuredModelId`s in input order.
-   *
-   * TODO(byok): implemented in the template-flow PR (custom-model
-   * add for existing providers).
+   * the provider (the `(providerId, info.id)` uniqueness invariant),
+   * reusing their existing `configuredModelId`. Newly-added models are
+   * enrolled into `autoEnrollIn ?? BYOK_DEFAULT_AUTO_ENROLL`. Returns
+   * the resulting `configuredModelId`s in input order.
    */
-  addModels(input: AddModelsInput): Promise<string[]> {
-    throw new Error("[modelManagement] ByokSetupApi.addModels not implemented yet");
+  async addModels(input: AddModelsInput): Promise<string[]> {
+    const resultIds: string[] = [];
+    // Track only freshly-added non-embedding ids so we don't re-enroll
+    // already-configured models and don't enroll embeddings into chat
+    // backends (mirrors `setupProvider`).
+    const newChatIds: string[] = [];
+    for (const info of input.models) {
+      const existing = this.#models.getByWireId(input.providerId, info.id);
+      if (existing) {
+        resultIds.push(existing.configuredModelId);
+        continue;
+      }
+      const configuredModelId = await this.#models.add({ providerId: input.providerId, info });
+      resultIds.push(configuredModelId);
+      // The caller may pass bare `ModelInfo` (id + displayName) for
+      // hand-typed self-hosted models; fall back to the id heuristic
+      // when `isEmbedding` is unset.
+      const isEmbedding = info.isEmbedding ?? looksLikeEmbeddingModel(info.id);
+      if (!isEmbedding) {
+        newChatIds.push(configuredModelId);
+      }
+    }
+    await this.#enrollInBackends(input.autoEnrollIn ?? BYOK_DEFAULT_AUTO_ENROLL, newChatIds);
+    return resultIds;
+  }
+
+  /**
+   * Batch-enroll `newChatIds` into each backend with a single
+   * `setEnabledModels` call instead of N×M `enableModel` awaits. Reads
+   * the current `enabledModels` so we preserve ids contributed by
+   * other providers, and dedupes in case `newChatIds` overlaps the
+   * existing set.
+   */
+  async #enrollInBackends(
+    enrollIn: readonly BackendType[],
+    newChatIds: readonly string[]
+  ): Promise<void> {
+    if (newChatIds.length === 0) return;
+    for (const backend of enrollIn) {
+      const current = this.#backends.get(backend).enabledModels;
+      const merged = [...current];
+      for (const id of newChatIds) {
+        if (!merged.includes(id)) merged.push(id);
+      }
+      await this.#backends.setEnabledModels(backend, merged);
+    }
+  }
+
+  /**
+   * Best-effort rollback after a partial setup. Cascades through the same
+   * order the coordinator's removal path uses: drop backend refs to any
+   * `ConfiguredModel`s `bulkSet` already wrote, then drop the rows, then
+   * drop the Provider row. Failure at any step is logged and swallowed —
+   * we're already unwinding from an upstream throw the caller cares about.
+   */
+  async #rollbackProvider(providerId: string): Promise<void> {
+    try {
+      const modelIds = this.#models.listByProvider(providerId).map((m) => m.configuredModelId);
+      if (modelIds.length > 0) {
+        await this.#backends.removeRefs(modelIds);
+        await this.#models.removeByProvider(providerId);
+      }
+      await this.#providers.remove(providerId);
+    } catch (err) {
+      logError(`[modelManagement] ByokSetupApi rollback failed for ${providerId}`, err);
+    }
   }
 }

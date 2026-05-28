@@ -132,6 +132,7 @@ export const ClaudeBackendDescriptor: BackendDescriptor = {
   skillsProjectDir: ".claude/skills",
   crossDiscoveredAgents: [],
   restartOnManagedSkillsChange: false,
+  restartOnProviderConfigChange: false,
   wire: claudeWire,
   showModelDescriptions: true,
 

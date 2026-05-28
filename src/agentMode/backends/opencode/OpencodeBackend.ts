@@ -1,7 +1,8 @@
-import { BREVILABS_MODELS_BASE_URL, ChatModelProviders } from "@/constants";
+import { ChatModelProviders } from "@/constants";
 import { logInfo } from "@/logger";
 import { getSettings } from "@/settings/model";
 import type { CopilotSettings } from "@/settings/model";
+import { isSelfHostedProvider } from "@/modelManagement";
 import type { BackendConfigRegistry, ProviderRegistry } from "@/modelManagement";
 import { AcpBackend, AcpSpawnDescriptor } from "@/agentMode/acp/types";
 import type { CopilotMode } from "@/agentMode/session/types";
@@ -14,7 +15,7 @@ import {
   SkillManager,
 } from "@/agentMode/skills";
 import { OpencodeBackendDescriptor } from "./descriptor";
-import { COPILOT_PLUS_OPENCODE_PROVIDER_ID, mapProviderToOpencodeId } from "./opencodeModelResolve";
+import { mapProviderToOpencodeId } from "./opencodeModelResolve";
 import { selectCopilotPrompt } from "./prompts";
 
 /**
@@ -137,26 +138,52 @@ export async function buildOpencodeConfig(
     // opencode hosts native (agent-origin) providers itself, so never register them.
     if (mapping.native) continue;
 
+    // opencode resolves catalog providers (those with a models.dev
+    // `catalogProviderId`) natively — it knows their npm SDK and default base
+    // URL, so we hand it only the apiKey (plus a baseURL when the user
+    // overrode one). Everything else reaching here — custom OpenAI-compatible
+    // endpoints (Ollama, LM Studio, proxies) and Copilot Plus — has no catalog
+    // identity and must be registered explicitly as `@ai-sdk/openai-compatible`
+    // pointed at its own baseURL.
+    const origin = entry.provider.origin;
+    const hasCatalogIdentity = origin.kind === "byok" && !!origin.catalogProviderId;
+    // Whether a missing key should drop the provider is a separate question:
+    // self-hosted endpoints commonly run key-less. Detect that from the baseUrl
+    // host so it stays correct even if a local runner gains a catalog id.
+    const isSelfHosted = isSelfHostedProvider(entry.provider);
+
     let providerConfig = provider[mapping.id];
     if (!providerConfig) {
       const apiKey = await providerRegistry.getApiKey(entry.provider.providerId);
-      if (!apiKey) {
+      // Catalog BYOK / Plus providers are useless without a key; self-hosted
+      // endpoints commonly run key-less, so don't drop them for a missing key.
+      if (!apiKey && !isSelfHosted) {
         logInfo(
           `[AgentMode] skipping ${mapping.id}/${entry.configuredModel.info.id}: no API key in keychain`
         );
         continue;
       }
-      if (mapping.id === COPILOT_PLUS_OPENCODE_PROVIDER_ID) {
-        // Copilot Plus speaks OpenAI's wire format but isn't a built-in opencode
-        // provider, so register it as a custom `@ai-sdk/openai-compatible` entry.
-        providerConfig = {
-          npm: "@ai-sdk/openai-compatible",
-          name: "Copilot Plus",
-          options: { baseURL: BREVILABS_MODELS_BASE_URL, apiKey },
-        };
-      } else {
-        providerConfig = { options: { apiKey } };
+      const baseURL = entry.provider.baseUrl;
+      // A non-catalog provider with no baseURL is unroutable — opencode has no
+      // registry default to fall back on.
+      if (!hasCatalogIdentity && !baseURL) {
+        logInfo(
+          `[AgentMode] skipping ${mapping.id}/${entry.configuredModel.info.id}: ${origin.kind} provider has no baseUrl`
+        );
+        continue;
       }
+      // Omit apiKey/baseURL when falsy: an empty-string key reaches
+      // `@ai-sdk/openai-compatible` as `Authorization: Bearer ` (silent 401),
+      // and an empty baseURL would clobber opencode's registry default.
+      providerConfig = {
+        ...(hasCatalogIdentity
+          ? {}
+          : { npm: "@ai-sdk/openai-compatible", name: entry.provider.displayName }),
+        options: {
+          ...(apiKey ? { apiKey } : {}),
+          ...(baseURL ? { baseURL } : {}),
+        },
+      };
       provider[mapping.id] = providerConfig;
     }
 

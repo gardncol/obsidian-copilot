@@ -125,6 +125,28 @@ export function createAgentSessionManager(app: App, plugin: CopilotPlugin): Agen
         logError(`[Skills] Failed to refresh backend after skill change: ${backendId}`, error)
       );
   });
+  // Provider rows, API keys, and per-backend enabled-models lists are baked
+  // into subprocess backends' spawn config (e.g. opencode's
+  // `OPENCODE_CONFIG_CONTENT`). Restart any descriptor that opts in so a
+  // new spawn picks them up. Without this, a key entered after the
+  // subprocess started never reaches it — opencode keeps making un-
+  // authenticated requests and surfaces them as silent zero-token turns.
+  const restartProviderAffected = (reason: string): void => {
+    for (const descriptor of listBackendDescriptors()) {
+      if (!descriptor.restartOnProviderConfigChange) continue;
+      void manager
+        .restartBackend(descriptor.id, reason)
+        .catch((error) =>
+          logError(`[AgentMode] restart after ${reason} failed: ${descriptor.id}`, error)
+        );
+    }
+  };
+  plugin.modelManagement.providerRegistry.subscribe(() =>
+    restartProviderAffected("provider config changed")
+  );
+  plugin.modelManagement.backendConfigRegistry.subscribe(() =>
+    restartProviderAffected("backend enabled models changed")
+  );
   void skillManager.refresh().catch((error) => {
     logError("[Skills] Initial discovery pass failed", error);
   });

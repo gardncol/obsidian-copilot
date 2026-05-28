@@ -12,6 +12,10 @@ import { Button } from "@/components/ui/button";
 import { SearchBar } from "@/components/ui/SearchBar";
 import { useApp } from "@/context";
 import { logError } from "@/logger";
+import {
+  CUSTOM_OPENAI_DEFINITION,
+  LOCAL_PROVIDER_DEFINITIONS,
+} from "@/modelManagement/catalog/builtinDefinitions";
 import { byokProvidersAtom, configuredModelsAtom } from "@/modelManagement/state/atoms";
 import type { CatalogProvider } from "@/modelManagement/types/catalog";
 import type { ConfiguredModel } from "@/modelManagement/types/persisted";
@@ -97,8 +101,10 @@ export const ByokPanel: React.FC = () => {
   const handleAddProvider = (): void => {
     new AddProviderModal(app, {
       catalogProviders,
-      onPick: (catalog) =>
-        new ConfigureProviderModal(app, { state: { mode: "new", catalog }, api }).open(),
+      localTemplates: LOCAL_PROVIDER_DEFINITIONS,
+      customTemplate: CUSTOM_OPENAI_DEFINITION,
+      onPick: (source) =>
+        new ConfigureProviderModal(app, { state: { mode: "new", source }, api }).open(),
     }).open();
   };
 
