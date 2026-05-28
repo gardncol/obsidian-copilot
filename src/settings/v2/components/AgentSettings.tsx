@@ -1,9 +1,11 @@
 import {
+  InstallBadge,
   listBackendDescriptors,
   McpServersPanel,
   type BackendDescriptor,
   type BackendId,
 } from "@/agentMode";
+import { Button } from "@/components/ui/button";
 import { SettingItem } from "@/components/ui/setting-item";
 import { usePlugin } from "@/contexts/PluginContext";
 import { logError } from "@/logger";
@@ -108,13 +110,28 @@ const BackendSection: React.FC<{
       .catch((e) => logError(`[AgentMode] preload ${descriptor.id} failed`, e));
   }, [manager, descriptor.id, installState.kind]);
 
+  const Icon = descriptor.Icon;
+
   return (
     <div className="tw-space-y-3 tw-rounded-md tw-border tw-border-solid tw-border-border tw-p-3">
-      <div className="tw-text-base tw-font-semibold">{descriptor.displayName}</div>
-
-      {Panel && <Panel plugin={plugin} app={plugin.app} />}
+      <div className="tw-flex tw-items-center tw-justify-between tw-gap-2">
+        <div className="tw-flex tw-items-center tw-gap-2">
+          <Icon className="tw-size-4" />
+          <span className="tw-text-base tw-font-semibold">{descriptor.displayName}</span>
+          <InstallBadge state={installState} />
+        </div>
+        <Button
+          size="default"
+          variant={installState.kind === "ready" ? "secondary" : "default"}
+          onClick={() => descriptor.openInstallUI(plugin)}
+        >
+          Configure
+        </Button>
+      </div>
 
       {installState.kind === "ready" && <ConfiguredModelEnableList descriptor={descriptor} />}
+
+      {Panel && <Panel plugin={plugin} app={plugin.app} />}
     </div>
   );
 };
