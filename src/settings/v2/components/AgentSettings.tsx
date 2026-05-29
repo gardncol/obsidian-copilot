@@ -7,6 +7,7 @@ import {
 } from "@/agentMode";
 import { Button } from "@/components/ui/button";
 import { SettingItem } from "@/components/ui/setting-item";
+import { TruncatedText } from "@/components/TruncatedText";
 import { usePlugin } from "@/contexts/PluginContext";
 import { logError } from "@/logger";
 import { setSettings, useSettingsValue } from "@/settings/model";
@@ -85,6 +86,7 @@ const BackendSection: React.FC<{
   const manager = plugin.agentSessionManager;
 
   const installState = descriptor.getInstallState(settings);
+  const resolvedPath = descriptor.getResolvedBinaryPath?.(settings) ?? null;
 
   // Probe when ready but uncached — the load-time preload may have skipped this
   // backend (binary installed after plugin start).
@@ -102,12 +104,22 @@ const BackendSection: React.FC<{
   return (
     <div className="tw-space-y-3 tw-rounded-md tw-border tw-border-solid tw-border-border tw-p-3">
       <div className="tw-flex tw-items-center tw-justify-between tw-gap-2">
-        <div className="tw-flex tw-items-center tw-gap-2">
-          <Icon className="tw-size-4" />
-          <span className="tw-text-base tw-font-semibold">{descriptor.displayName}</span>
-          <InstallBadge state={installState} />
+        <div className="tw-flex tw-min-w-0 tw-items-center tw-gap-2">
+          <Icon className="tw-size-4 tw-shrink-0" />
+          <div className="tw-flex tw-min-w-0 tw-flex-col">
+            <div className="tw-flex tw-items-center tw-gap-2">
+              <span className="tw-text-base tw-font-semibold">{descriptor.displayName}</span>
+              <InstallBadge state={installState} />
+            </div>
+            {resolvedPath && (
+              <TruncatedText className="tw-max-w-[90%] tw-font-mono tw-text-xs tw-text-muted">
+                {resolvedPath}
+              </TruncatedText>
+            )}
+          </div>
         </div>
         <Button
+          className="tw-shrink-0"
           size="default"
           variant={installState.kind === "ready" ? "secondary" : "default"}
           onClick={() => descriptor.openInstallUI(plugin)}
