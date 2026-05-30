@@ -21,7 +21,7 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { Document } from "@langchain/core/documents";
 import { MemoryVariables } from "@langchain/core/memory";
 import { DateTime } from "luxon";
-import { MarkdownView, Notice, TFile, Vault, normalizePath, requestUrl } from "obsidian";
+import { App, MarkdownView, Notice, TFile, Vault, normalizePath, requestUrl } from "obsidian";
 import { CustomModel } from "./aiParams";
 import { getApiKeyForProvider } from "@/utils/modelUtils";
 export { err2String } from "@/errorFormat";
@@ -879,11 +879,31 @@ export function cleanMessageForCopy(message: string): string {
 }
 
 /**
+ * Inserts text at the cursor of the most recent markdown editor, replacing the
+ * current selection when there is one. Resolves the target leaf via the passed
+ * `app` (no global `app`) and threads that same `app` into `insertIntoEditor`
+ * so selection detection and insertion always target the same editor — even in
+ * a popout window where the global `app` would resolve a different leaf.
+ */
+export async function insertAtCursor(app: App, text: string) {
+  let leaf = app.workspace.getMostRecentLeaf();
+  if (!leaf || !(leaf.view instanceof MarkdownView)) {
+    leaf = app.workspace.getLeaf(false);
+    if (!leaf || !(leaf.view instanceof MarkdownView)) return;
+  }
+  const hasSelection = leaf.view.editor.getSelection().length > 0;
+  await insertIntoEditor(app, text, hasSelection);
+}
+
+/**
  * Inserts a message into the active markdown editor, optionally replacing the current selection.
  * Uses a single CM6 transaction to avoid undo stack splitting.
  * Ensures the inserted/replaced range is selected after the operation.
+ *
+ * Resolves the target leaf from the passed `app` (not the global) so the write
+ * lands in the caller's window — critical for popout-window chats.
  */
-export async function insertIntoEditor(message: string, replace: boolean = false) {
+export async function insertIntoEditor(app: App, message: string, replace: boolean = false) {
   let leaf = app.workspace.getMostRecentLeaf();
   if (!leaf) {
     new Notice("No active leaf found.");
