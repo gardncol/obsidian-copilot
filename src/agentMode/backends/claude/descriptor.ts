@@ -13,6 +13,7 @@ import {
 import type { AgentSession } from "@/agentMode/session/AgentSession";
 import { MethodUnsupportedError } from "@/agentMode/session/errors";
 import { resolveClaudeBinary } from "./claudeBinaryResolver";
+import { getClaudeAuthStatus, signInToClaude } from "./claudeAuth";
 import { agentOriginEnabledModelEntries } from "@/agentMode/backends/shared/agentEnabledModels";
 import { ClaudeSdkBackendProcess } from "@/agentMode/sdk/ClaudeSdkBackendProcess";
 import { getCachedSdkCatalog, synthesizeEffortConfigOption } from "@/agentMode/sdk/effortOption";
@@ -72,6 +73,18 @@ function claudeResolverEnv(): Omit<Parameters<typeof resolveClaudeBinary>[0], "o
       readdirSync: (p) => fs.readdirSync(p),
     },
   };
+}
+
+/**
+ * Environment for spawning the `claude` CLI for auth checks: `process.env`
+ * plus the user's Claude env overrides. Mirrors how `prompt()` composes env so
+ * `claude auth status` resolves the same credentials the SDK turn would.
+ */
+function claudeChildEnv(settings: CopilotSettings): NodeJS.ProcessEnv {
+  const overrides = settings.agentMode?.backends?.claude?.envOverrides;
+  return overrides && Object.keys(overrides).length > 0
+    ? { ...process.env, ...overrides }
+    : process.env;
 }
 
 /**
@@ -164,6 +177,21 @@ export const ClaudeBackendDescriptor: BackendDescriptor = {
     new ClaudeInstallModal(plugin.app).open();
   },
 
+  auth: {
+    async getStatus(settings) {
+      const claudePath = resolveClaudeCliPath(settings);
+      if (!claudePath) return { signedIn: false };
+      const status = await getClaudeAuthStatus(claudePath, claudeChildEnv(settings));
+      return { signedIn: status.loggedIn, label: status.label };
+    },
+    async signIn(settings, handlers) {
+      const claudePath = resolveClaudeCliPath(settings);
+      if (!claudePath) return { signedIn: false };
+      const status = await signInToClaude(claudePath, claudeChildEnv(settings), handlers).done;
+      return { signedIn: status.loggedIn, label: status.label };
+    },
+  },
+
   isPlanModePlanFilePath(absolutePath: string): boolean {
     return isClaudePlanModePlanFilePath(absolutePath);
   },
@@ -202,6 +230,8 @@ export const ClaudeBackendDescriptor: BackendDescriptor = {
       descriptor: args.descriptor,
       getEnableThinking: () => Boolean(getSettings().agentMode?.backends?.claude?.enableThinking),
       getEnvOverrides: () => getSettings().agentMode?.backends?.claude?.envOverrides,
+      checkAuth: async () =>
+        (await getClaudeAuthStatus(claudePath, claudeChildEnv(getSettings()))).loggedIn,
       isPlanModePlanFilePath: isClaudePlanModePlanFilePath,
       getDefaultModelId: () => getSettings().agentMode?.backends?.claude?.defaultModel?.baseModelId,
       // Forward the shared composed system prompt — the Copilot base framing
