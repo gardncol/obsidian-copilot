@@ -13,6 +13,7 @@ import type {
   SessionUpdate,
   ToolCallContent,
 } from "@/agentMode/session/types";
+import { resolveToolName } from "@/agentMode/session/toolName";
 import { deriveToolKind, deriveToolTitle, vendorMetaFields } from "./toolMeta";
 
 /**
@@ -25,6 +26,7 @@ export interface TranslatorState {
     {
       id: string;
       name: string;
+      mcpServer?: string;
       inputJsonAcc: string;
       lastParsedInput: unknown;
       emittedToolCall: boolean;
@@ -109,19 +111,25 @@ function translateStreamEvent(
     case "content_block_start": {
       const block = sdkEvent.content_block;
       if (block.type === "tool_use") {
-        const name = normalizeToolName(block.name);
+        const { tool: name, mcpServer } = resolveToolName(block.name);
         state.toolUseBlocks.set(sdkEvent.index, {
           id: block.id,
           name,
+          mcpServer,
           inputJsonAcc: "",
           lastParsedInput: block.input ?? {},
           emittedToolCall: true,
         });
         state.emittedToolUseIds.add(block.id);
         const out: SessionEvent[] = [
-          event(sessionId, makeToolCallUpdate(block.id, name, block.input ?? {}, parentToolUseId)),
+          event(
+            sessionId,
+            makeToolCallUpdate(block.id, block.name, block.input ?? {}, parentToolUseId)
+          ),
         ];
-        if (name === "EnterPlanMode") {
+        // Native plan tool only — an MCP tool sharing the bare name must not
+        // flip the UI into plan mode.
+        if (!mcpServer && name === "EnterPlanMode") {
           out.push(
             event(sessionId, {
               sessionUpdate: "current_mode_update",
@@ -169,7 +177,7 @@ function translateStreamEvent(
             sessionUpdate: "tool_call_update",
             toolCallId: block.id,
             rawInput: parsed.value,
-            ...vendorMetaFields(block.name, parentToolUseId),
+            ...vendorMetaFields(block.name, parentToolUseId, block.mcpServer),
           }),
         ];
       }
@@ -187,7 +195,7 @@ function translateStreamEvent(
           toolCallId: block.id,
           rawInput: finalInput,
           status: "in_progress" as AgentToolStatus,
-          ...vendorMetaFields(block.name, parentToolUseId),
+          ...vendorMetaFields(block.name, parentToolUseId, block.mcpServer),
         }),
       ];
     }
@@ -249,29 +257,21 @@ function translateUserMessage(
 
 function makeToolCallUpdate(
   toolCallId: string,
-  normalizedName: string,
+  rawName: string,
   rawInput: unknown,
   parentToolUseId?: string
 ): SessionUpdate {
+  const { tool: name, mcpServer } = resolveToolName(rawName);
   return {
     sessionUpdate: "tool_call",
     toolCallId,
-    title: deriveToolTitle(normalizedName, rawInput),
-    kind: deriveToolKind(normalizedName),
+    title: deriveToolTitle(name, rawInput),
+    kind: deriveToolKind(name, mcpServer),
     status: "in_progress" as AgentToolStatus,
     rawInput,
-    ...vendorMetaFields(normalizedName, parentToolUseId),
+    mcpServer,
+    ...vendorMetaFields(name, parentToolUseId, mcpServer),
   };
-}
-
-/**
- * Strip the SDK's `mcp__<server>__` prefix on MCP tool names so downstream UI
- * mapping (kind / title / vendorToolName) sees the bare tool name. The
- * non-greedy middle segment tolerates server names containing underscores.
- */
-function normalizeToolName(name: string): string {
-  const m = /^mcp__.+?__(.+)$/.exec(name);
-  return m ? m[1] : name;
 }
 
 function toolResultContent(content: unknown): ToolCallContent[] | undefined {
