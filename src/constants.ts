@@ -8,6 +8,14 @@ export const BREVILABS_API_BASE_URL = "https://api.brevilabs.com/v1";
 export const BREVILABS_MODELS_BASE_URL = "https://models.brevilabs.com/v1";
 export const CHAT_VIEWTYPE = "copilot-chat-view";
 export const CHAT_AGENT_VIEWTYPE = "copilot-agent-chat-view";
+
+// Custom Obsidian icon for Agent Mode surfaces (view tab, ribbon, commands).
+// The v4 monochrome brand mark, normalized from its source viewBox "4 4 152 127"
+// into Obsidian's 0 0 100 100 icon space; currentColor lets it track the theme
+// and the active/hover tab state instead of a fixed fill. Register via addIcon().
+export const COPILOT_AGENT_ICON_ID = "copilot-agent";
+export const COPILOT_AGENT_ICON_SVG = `<g transform="translate(0 8.2) scale(0.6579) translate(-4 -4)"><path fill="currentColor" d="M75.9 6.9c-6.8 1.4-12.5 6-35.5 29.3-33.5 33.8-33.5 33.9-34.2 62.2-0.3 12.4 0 20.2 0.7 22.7 2.4 7.8 10.8 11.2 17.6 7.1 1.7-1.1 14.9-14.1 29.5-29.1 14.5-14.9 26.7-27 27-26.9 0.3 0.2 12.4 12.4 27 27.3 14.6 14.8 27.6 27.8 29 28.7 5.1 3.6 13.6 1.4 16.5-4.2 1.2-2.3 1.5-6.9 1.5-22.3 0-22.9-1.2-28.6-8.3-37.9-7.6-10.2-50-52.3-54.9-54.6-5.1-2.4-10.9-3.2-15.9-2.3z"/></g>`;
+
 export const USER_SENDER = "user";
 export const AI_SENDER = "ai";
 
@@ -849,11 +857,11 @@ export type CommandId = (typeof COMMAND_IDS)[keyof typeof COMMAND_IDS];
  */
 export const COMMAND_ICONS: Partial<Record<CommandId, string>> = {
   [COMMAND_IDS.NEW_CHAT]: "message-square-plus",
-  [COMMAND_IDS.NEW_AGENT_CHAT]: "bot",
+  [COMMAND_IDS.NEW_AGENT_CHAT]: COPILOT_AGENT_ICON_ID,
   [COMMAND_IDS.OPEN_COPILOT_CHAT_WINDOW]: "message-square",
-  [COMMAND_IDS.OPEN_AGENT_CHAT_WINDOW]: "bot",
+  [COMMAND_IDS.OPEN_AGENT_CHAT_WINDOW]: COPILOT_AGENT_ICON_ID,
   [COMMAND_IDS.TOGGLE_COPILOT_CHAT_WINDOW]: "message-square",
-  [COMMAND_IDS.TOGGLE_AGENT_CHAT_WINDOW]: "bot",
+  [COMMAND_IDS.TOGGLE_AGENT_CHAT_WINDOW]: COPILOT_AGENT_ICON_ID,
   [COMMAND_IDS.LOAD_COPILOT_CHAT_CONVERSATION]: "history",
   [COMMAND_IDS.TRIGGER_QUICK_COMMAND]: "terminal-square",
   [COMMAND_IDS.TRIGGER_QUICK_ASK]: "sparkles",

@@ -39,6 +39,8 @@ import {
   ABORT_REASON,
   CHAT_AGENT_VIEWTYPE,
   CHAT_VIEWTYPE,
+  COPILOT_AGENT_ICON_ID,
+  COPILOT_AGENT_ICON_SVG,
   DEFAULT_OPEN_AREA,
   EVENT_NAMES,
 } from "@/constants";
@@ -89,6 +91,7 @@ import {
   SelectionHighlight,
 } from "@/editor";
 import {
+  addIcon,
   Editor,
   FileSystemAdapter,
   MarkdownView,
@@ -291,6 +294,9 @@ export default class CopilotPlugin extends Plugin {
       this.registerEvent(layoutRef);
     }
 
+    // Register the custom Agent Mode icon before any view/ribbon/command references it.
+    addIcon(COPILOT_AGENT_ICON_ID, COPILOT_AGENT_ICON_SVG);
+
     this.safeRegisterView(CHAT_VIEWTYPE, (leaf: WorkspaceLeaf) => new CopilotView(leaf, this));
     this.safeRegisterView(APPLY_VIEW_TYPE, (leaf: WorkspaceLeaf) => new ApplyView(leaf));
     if (!Platform.isMobile) {
@@ -308,7 +314,7 @@ export default class CopilotPlugin extends Plugin {
 
     const agentReady = this.canUseAgentView();
     this.ribbonIconEl = this.addRibbonIcon(
-      agentReady ? "bot" : "message-square",
+      agentReady ? COPILOT_AGENT_ICON_ID : "message-square",
       agentReady ? "Open Copilot Agent Chat" : "Open Copilot Chat",
       () => (this.canUseAgentView() ? this.activateAgentView() : this.activateView())
     );
