@@ -367,6 +367,24 @@ function chunkContentByLines(file: TFile, content: string): NoteChunk[] {
   return chunks;
 }
 
+// Models occasionally send numeric tool args as strings, so the schema accepts a string and
+// we coerce here rather than in the schema: a schema-level transform/preprocess cannot be
+// represented in JSON Schema, which breaks bindTools() -> toJSONSchema() for the autonomous
+// agent. Validation that the old `z.number().int().min(0)` schema performed now lives here:
+// an omitted value defaults to the first chunk (0); anything that is not a non-negative
+// integer returns null so the caller can surface a validation error instead of indexing the
+// chunk array out of bounds.
+const coerceChunkIndex = (value: number | string | undefined): number | null => {
+  if (value === undefined) {
+    return 0;
+  }
+  const parsed = typeof value === "string" ? Number(value.trim()) : value;
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return null;
+  }
+  return parsed;
+};
+
 const readNoteSchema = z.object({
   notePath: z
     .string()
@@ -375,17 +393,7 @@ const readNoteSchema = z.object({
       "Full path to the note (relative to the vault root) that needs to be read, such as 'Projects/plan.md'."
     ),
   chunkIndex: z
-    .preprocess((value) => {
-      if (typeof value === "string") {
-        const trimmed = value.trim();
-        if (trimmed.length === 0) {
-          return undefined;
-        }
-        const parsed = Number(trimmed);
-        return Number.isFinite(parsed) ? parsed : value;
-      }
-      return value;
-    }, z.number().int().min(0))
+    .union([z.number().int().min(0), z.string()])
     .optional()
     .describe("0-based chunk index to read. Omit to read the first chunk."),
 });
@@ -396,7 +404,8 @@ const createReadNoteTool = (app: App) =>
     description:
       "Read a single note in search v3 sized chunks. Use only when you already know the exact note path and need its contents.",
     schema: readNoteSchema,
-    func: async ({ notePath, chunkIndex = 0 }) => {
+    func: async ({ notePath, chunkIndex: rawChunkIndex }) => {
+      const chunkIndex = coerceChunkIndex(rawChunkIndex);
       const sanitizedPath = notePath.trim();
 
       if (sanitizedPath.startsWith("/")) {
@@ -404,6 +413,15 @@ const createReadNoteTool = (app: App) =>
           notePath: sanitizedPath,
           status: "invalid_path",
           message: "Provide the note path relative to the vault root without a leading slash.",
+        };
+      }
+
+      if (chunkIndex === null) {
+        return {
+          notePath: sanitizedPath,
+          status: "invalid_chunk_index",
+          message:
+            "chunkIndex must be a non-negative integer (0-based). Omit it to read the first chunk.",
         };
       }
 
