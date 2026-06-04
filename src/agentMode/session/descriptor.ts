@@ -7,11 +7,14 @@ import type {
   BackendConfigOption,
   BackendId,
   BackendProcess,
+  EffortOption,
   EnabledModelEntry,
   ModelSelection,
+  ModelState,
   ModelWireCodec,
   ModeMapping,
   RawModeState,
+  SessionId,
 } from "./types";
 
 /** UI-facing install/setup state for a backend. */
@@ -19,6 +22,18 @@ export type InstallState =
   | { kind: "absent" }
   | { kind: "ready"; source: "managed" | "custom" }
   | { kind: "error"; message: string };
+
+/**
+ * Reported by `getUpgradeInfo` when the installed binary is too old for the
+ * plugin to drive (e.g. opencode < 1.15.13 lacks the config-option model API).
+ * Generic UI renders an upgrade CTA from this; `source` selects the mechanism
+ * (`upgrade` reinstalls managed binaries, runs `<cli> upgrade` for custom ones).
+ */
+export interface BackendUpgradeInfo {
+  currentVersion: string;
+  minVersion: string;
+  source: "managed" | "custom";
+}
 
 /** Sign-in state for backends that authenticate via a CLI / external account. */
 export interface BackendAuthStatus {
@@ -145,6 +160,22 @@ export interface BackendDescriptor {
 
   /** Open backend-specific install/setup modal. */
   openInstallUI(plugin: CopilotPlugin): void;
+
+  /**
+   * Optional: report that the installed binary is too old for the plugin, so
+   * generic UI can surface an upgrade CTA. Returns `null` when current,
+   * unknown, not installed, or not applicable (claude/codex don't implement it).
+   */
+  getUpgradeInfo?(settings: CopilotSettings): BackendUpgradeInfo | null;
+
+  /**
+   * Optional: upgrade the installed binary in place (managed reinstall, or the
+   * CLI's own `upgrade`). Resolves when done. Changing the persisted version
+   * restarts the backend via the `subscribeInstallState` subscription, so the
+   * next session boots on the new binary. Throws with a readable message on
+   * failure; callers surface progress/errors.
+   */
+  upgrade?(plugin: CopilotPlugin): Promise<void>;
 
   /**
    * Optional: sign-in capability for backends gated on an external account
@@ -284,4 +315,23 @@ export interface BackendDescriptor {
    * `resumeSession` or `loadSession`. Only called by `AgentModelPreloader`.
    */
   persistProbeSessionId?(sessionId: string, plugin: CopilotPlugin): Promise<void>;
+
+  /**
+   * Optional: eagerly discover each enabled model's effort options right after
+   * the initial catalog probe. opencode only reports a model's effort as a
+   * `category:"thought_level"` config option once that model is the *active*
+   * model, so the catalog carries no per-model effort and the only way to learn
+   * a non-active model's effort is to switch to it. Runs on the existing probe
+   * `sessionId` (cheap: a switch is ~ms, a new session is ~1s) and MUST restore
+   * `modelState.current` before returning so the session the manager adopts is
+   * never left on a probed model. Returns baseModelId → effortOptions for models
+   * that expose effort. Best-effort; `AgentModelPreloader` swallows failures.
+   */
+  prefetchEffortCatalog?(args: {
+    proc: BackendProcess;
+    sessionId: SessionId;
+    modelState: ModelState;
+    enabledModels: ReadonlyArray<EnabledModelEntry>;
+    isAborted: () => boolean;
+  }): Promise<Record<string, EffortOption[]>>;
 }
