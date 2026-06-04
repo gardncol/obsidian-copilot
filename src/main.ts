@@ -26,6 +26,7 @@ import {
 import { NoteSelectedTextContext, SelectedTextContext } from "@/types/message";
 import { registerCommands } from "@/commands";
 import CopilotView from "@/components/CopilotView";
+import RelevantNotesView from "@/components/RelevantNotesView";
 import { APPLY_VIEW_TYPE, ApplyView } from "@/components/composer/ApplyView";
 import { LoadChatHistoryModal } from "@/components/modals/LoadChatHistoryModal";
 
@@ -43,6 +44,7 @@ import {
   COPILOT_AGENT_ICON_SVG,
   DEFAULT_OPEN_AREA,
   EVENT_NAMES,
+  RELEVANT_NOTES_VIEWTYPE,
 } from "@/constants";
 import { ChatManager } from "@/core/ChatManager";
 import { MessageRepository } from "@/core/MessageRepository";
@@ -306,6 +308,10 @@ export default class CopilotPlugin extends Plugin {
 
     this.safeRegisterView(CHAT_VIEWTYPE, (leaf: WorkspaceLeaf) => new CopilotView(leaf, this));
     this.safeRegisterView(APPLY_VIEW_TYPE, (leaf: WorkspaceLeaf) => new ApplyView(leaf));
+    this.safeRegisterView(
+      RELEVANT_NOTES_VIEWTYPE,
+      (leaf: WorkspaceLeaf) => new RelevantNotesView(leaf, this)
+    );
     if (!Platform.isMobile) {
       this.safeRegisterView(
         CHAT_AGENT_VIEWTYPE,
@@ -790,13 +796,12 @@ export default class CopilotPlugin extends Plugin {
   }
 
   /**
-   * The "add … to chat context" commands write into a shared atom that both chat
-   * views render, so this only picks which chat to bring into focus:
-   *   - both chat views open → the one focused most recently
+   * Which chat view "add … to chat" actions should target:
+   *   - both chat views open → the one focused most recently (`lastActiveChatViewType`)
    *   - exactly one open      → that one
-   *   - none open             → the agent chat when available, else the legacy chat
+   *   - none open             → the agent chat when usable, else the legacy chat
    */
-  async activateChatViewForContext(): Promise<void> {
+  private pickContextChatViewType(): typeof CHAT_VIEWTYPE | typeof CHAT_AGENT_VIEWTYPE {
     const agentUsable = this.canUseAgentView();
     const agentOpen =
       agentUsable && this.app.workspace.getLeavesOfType(CHAT_AGENT_VIEWTYPE).length > 0;
@@ -810,8 +815,16 @@ export default class CopilotPlugin extends Plugin {
     } else {
       useAgent = agentUsable;
     }
+    return useAgent ? CHAT_AGENT_VIEWTYPE : CHAT_VIEWTYPE;
+  }
 
-    if (useAgent) {
+  /**
+   * The "add … to chat context" commands write into a shared atom that both chat
+   * views render, so this only picks which chat to bring into focus (see
+   * `pickContextChatViewType`).
+   */
+  async activateChatViewForContext(): Promise<void> {
+    if (this.pickContextChatViewType() === CHAT_AGENT_VIEWTYPE) {
       await this.activateAgentView();
     } else {
       await this.activateView();
@@ -839,6 +852,38 @@ export default class CopilotPlugin extends Plugin {
 
   async deactivateAgentView() {
     this.app.workspace.detachLeavesOfType(CHAT_AGENT_VIEWTYPE);
+  }
+
+  async activateRelevantNotesView(): Promise<WorkspaceLeaf | null> {
+    return this.openOrRevealView(RELEVANT_NOTES_VIEWTYPE);
+  }
+
+  /**
+   * Insert text (a `[[wikilink]]` from the Relevant Notes pane) into the chat view
+   * the user last focused (see `pickContextChatViewType`), opening that view if none
+   * is open. Routes via the target view's `eventTarget`, the same seam
+   * `processText`/`emitChatIsVisible` use, so the standalone pane never needs the
+   * chat's Lexical editor directly.
+   */
+  async insertTextIntoActiveChat(text: string): Promise<void> {
+    const viewType = this.pickContextChatViewType();
+    let leaf = this.app.workspace.getLeavesOfType(viewType)[0] ?? null;
+    if (!leaf) {
+      if (viewType === CHAT_AGENT_VIEWTYPE) {
+        await this.activateAgentView();
+      } else {
+        await this.activateView();
+      }
+      leaf = this.app.workspace.getLeavesOfType(viewType)[0] ?? null;
+    }
+    if (!leaf) return;
+
+    this.app.workspace.revealLeaf(leaf);
+    const view = leaf.view as CopilotView | CopilotAgentView;
+    // The bus latches the text if the view's React tree hasn't mounted its
+    // listener yet, so a freshly-opened view drains it on mount — delivery no
+    // longer depends on guessing how long mounting takes.
+    view.eventTarget.queueInsertText(text);
   }
 
   async newAgentChat(): Promise<void> {
