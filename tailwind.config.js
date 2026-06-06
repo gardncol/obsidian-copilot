@@ -49,6 +49,16 @@ module.exports = {
         orange: "var(--color-orange)",
         purple: "var(--color-purple)",
       },
+      // Per-project accent hues (Agent Home project tiles). Theme-aware via
+      // Obsidian's named color vars; paired with the matching `bg.project` tints.
+      project: {
+        red: "var(--color-red)",
+        orange: "var(--color-orange)",
+        yellow: "var(--color-yellow)",
+        green: "var(--color-green)",
+        blue: "var(--color-blue)",
+        purple: "var(--color-purple)",
+      },
     },
     backgroundColor: {
       inherit: colors.inherit,
@@ -60,6 +70,16 @@ module.exports = {
       "secondary-alt": "var(--background-secondary-alt)",
       success: "rgba(var(--color-green-rgb),0.2)",
       error: "rgba(var(--color-red-rgb),0.2)",
+      // Soft tints behind Agent Home project tiles; deeper `text.project` hue
+      // sits on top. Same six hues, kept in sync with `textColor.project`.
+      project: {
+        red: "rgba(var(--color-red-rgb),0.16)",
+        orange: "rgba(var(--color-orange-rgb),0.16)",
+        yellow: "rgba(var(--color-yellow-rgb),0.16)",
+        green: "rgba(var(--color-green-rgb),0.16)",
+        blue: "rgba(var(--color-blue-rgb),0.16)",
+        purple: "rgba(var(--color-purple-rgb),0.16)",
+      },
       modifier: {
         hover: "var(--background-modifier-hover)",
         "active-hover": "var(--background-modifier-active-hover)",
@@ -218,7 +238,13 @@ module.exports = {
         "ui-smaller": "var(--font-ui-smaller)", // 12px
         "ui-small": "var(--font-ui-small)", // 13px
         "ui-medium": "var(--font-ui-medium)", // 15px
-        "ui-larger": "var(--font-ui-larger)", // 20px
+        // Obsidian's stock 20px UI token is `--font-ui-larger` (per the
+        // Typography docs), but some themes (e.g. Primary) ship `--font-ui-large`
+        // instead and omit the stock one. Chain both so the size resolves under
+        // either, falling back to a literal 20px if a theme defines neither
+        // (otherwise the font-size is invalid and the text drops to inherited).
+        "ui-larger": "var(--font-ui-large, var(--font-ui-larger, 20px))", // 20px
+        "ui-title": "var(--font-ui-large, var(--font-ui-larger, 20px))", // ~20px
       },
       strokeWidth: {
         icon: "var(--icon-stroke)", // 1.75px

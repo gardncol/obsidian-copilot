@@ -1,9 +1,10 @@
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SearchBar } from "@/components/ui/SearchBar";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatCompactRelativeTime } from "@/utils/formatRelativeTime";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Plus } from "lucide-react";
 import React, {
   memo,
   useCallback,
@@ -15,10 +16,12 @@ import React, {
 } from "react";
 
 /**
- * Shared building blocks for the Agent Home landing sections (Projects, Recent
- * Chats). Both render the same shape — a titled section, a few inline rows, and
- * a "View all" popover with search — so the structure lives here once and each
- * section supplies only its icon, data, and row click behavior.
+ * Shared building blocks for the Agent Home landing section bodies (Projects,
+ * Recent Chats): a few inline rows plus a "View all" popover with search. That
+ * structure lives here once so each section supplies only its data and row click
+ * behavior. The section title/count/collapse now live in the shelf chip above
+ * the panel (see {@link AgentHomeShelf}); this file is just the row and view-all
+ * primitives.
  */
 
 /** Rows shown inline before the rest collapse behind the "View all" popover. */
@@ -31,36 +34,34 @@ export const INLINE_LIMIT = 3;
  */
 const VIEW_ALL_PAGE_SIZE = 50;
 
-interface AgentHomeSectionProps {
-  /** Leading section icon (lucide element, sized by the caller). */
-  icon: React.ReactNode;
-  title: string;
-  count: number;
-  /** Optional trailing header control (e.g. a create button). */
-  action?: React.ReactNode;
-  children: React.ReactNode;
-  className?: string;
+interface AgentHomeCreateRowProps {
+  label: string;
+  onClick: () => void;
 }
 
-/** Titled section header (icon + title + count + optional action) plus body. */
-export const AgentHomeSection = memo(function AgentHomeSection({
-  icon,
-  title,
-  count,
-  action,
-  children,
-  className,
-}: AgentHomeSectionProps): React.ReactElement {
+/**
+ * Leading "create" action shared by the section bodies (New project / New chat).
+ * An accent tile + accent label, shaped like the colored item tiles below so
+ * both panels open with a same-height first row (keeps the tabbed shelf from
+ * jumping when you switch between Projects and Recent Chats).
+ */
+export const AgentHomeCreateRow = memo(function AgentHomeCreateRow({
+  label,
+  onClick,
+}: AgentHomeCreateRowProps): React.ReactElement {
   return (
-    <div className={cn("tw-flex tw-flex-col tw-gap-1", className)}>
-      <div className="tw-flex tw-items-center tw-gap-2 tw-py-1">
-        {icon}
-        <span className="tw-text-ui-small tw-font-semibold tw-text-normal">{title}</span>
-        <span className="tw-text-xs tw-font-normal tw-text-muted">({count})</span>
-        {action && <div className="tw-ml-auto tw-flex tw-items-center">{action}</div>}
-      </div>
-      {children}
-    </div>
+    <Button
+      type="button"
+      variant="ghost2"
+      onClick={onClick}
+      aria-label={label}
+      className="tw-h-auto tw-min-h-9 tw-w-full tw-justify-start tw-gap-2 tw-rounded-md tw-px-2 tw-py-1.5 hover:tw-bg-modifier-hover"
+    >
+      <span className="tw-flex tw-size-6 tw-shrink-0 tw-items-center tw-justify-center tw-rounded-md tw-bg-interactive-accent-hsl/10">
+        <Plus className="tw-size-4 tw-text-accent" />
+      </span>
+      <span className="tw-text-ui-small tw-font-medium tw-text-accent">{label}</span>
+    </Button>
   );
 });
 
@@ -70,26 +71,30 @@ interface AgentHomeListRowProps {
   timeMs: number;
   onClick: () => void;
   /**
-   * Indent the label to line up under the section title's text (past its icon).
-   * On for inline rows that sit below a titled section; off inside the View-all
-   * popover where there's no section icon to align against. Ignored when `icon`
-   * is set (the icon itself fills the leading slot).
+   * Indent the label by one leading-slot width so an icon-less row still lines
+   * up under sibling rows that carry a leading icon/tile. Ignored when `icon` or
+   * `leading` is set (that element already fills the leading slot).
    */
   indent?: boolean;
   /**
-   * Optional leading icon. Unlike the section's type icon (which would just
-   * repeat per row), this is informational — e.g. the backend brand a chat ran
-   * on. Projects don't pass one; the section header already conveys their type.
+   * Optional leading icon — informational, e.g. the backend brand a chat ran on.
+   * Rows that need a richer marker than a single glyph use `leading` instead.
    */
   icon?: React.ComponentType<{ className?: string }>;
+  /**
+   * Custom leading element, rendered in place of `icon` when set. Lets a row
+   * supply a richer marker than a single monochrome glyph — e.g. the project
+   * tile (tinted square + colored folder). Takes precedence over `icon`.
+   */
+  leading?: React.ReactNode;
 }
 
 /**
- * Generic clickable list row: optional leading icon + truncated label + relative
- * time. Rows usually omit the icon — the section header carries the type icon,
- * so repeating it only adds noise. An icon is passed only when it's
- * informational (e.g. a chat's backend brand). Icon-less inline rows indent
- * (`tw-pl-6` ≈ icon width + gap) so their text still aligns under the title.
+ * Generic clickable list row: optional leading icon/element + truncated label +
+ * relative time. The leading slot is filled by `leading` (a rich marker like the
+ * project tile) or `icon` (a single glyph, e.g. a chat's backend brand). A row
+ * with neither can `indent` so its text still aligns under siblings that do
+ * (`tw-pl-6` ≈ icon width + gap).
  */
 export const AgentHomeListRow = memo(function AgentHomeListRow({
   label,
@@ -97,13 +102,14 @@ export const AgentHomeListRow = memo(function AgentHomeListRow({
   onClick,
   indent = false,
   icon: Icon,
+  leading,
 }: AgentHomeListRowProps): React.ReactElement {
   return (
     <div
       role="button"
       tabIndex={0}
       className={cn(
-        "tw-flex tw-w-full tw-cursor-pointer tw-items-center tw-gap-2 tw-rounded-md tw-px-2 tw-py-1.5",
+        "tw-flex tw-min-h-9 tw-w-full tw-cursor-pointer tw-items-center tw-gap-2 tw-rounded-md tw-px-2 tw-py-1.5",
         "tw-text-left tw-transition-colors hover:tw-bg-modifier-hover"
       )}
       onClick={onClick}
@@ -114,11 +120,11 @@ export const AgentHomeListRow = memo(function AgentHomeListRow({
         }
       }}
     >
-      {Icon && <Icon className="tw-size-4 tw-shrink-0 tw-text-muted" />}
+      {leading ?? (Icon && <Icon className="tw-size-4 tw-shrink-0 tw-text-muted" />)}
       <span
         className={cn(
           "tw-min-w-0 tw-flex-1 tw-truncate tw-text-ui-small tw-text-normal",
-          indent && !Icon && "tw-pl-6"
+          indent && !Icon && !leading && "tw-pl-6"
         )}
         title={label}
       >
@@ -230,7 +236,7 @@ export function AgentHomeViewAll<TItem>({
           tabIndex={0}
           className={cn(
             "tw-flex tw-cursor-pointer tw-items-center tw-justify-between tw-rounded-md tw-px-2 tw-py-1.5",
-            "tw-text-xs tw-text-muted tw-transition-colors hover:tw-bg-modifier-hover hover:tw-text-normal"
+            "tw-text-xs tw-text-accent tw-transition-colors hover:tw-bg-modifier-hover hover:tw-text-accent-hover"
           )}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
@@ -239,10 +245,9 @@ export function AgentHomeViewAll<TItem>({
             }
           }}
         >
-          {/* pl-6 keeps the trigger text aligned with the inline rows above. */}
-          <span className="tw-pl-6">
-            View all {label} ({total})
-          </span>
+          {/* Left-aligned to the leading-tile column (no indent), matching the
+              create row. The count is omitted — the tab already shows it. */}
+          <span>View all {label}</span>
           <ChevronRight className="tw-size-3 tw-shrink-0" />
         </div>
       </PopoverTrigger>

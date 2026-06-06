@@ -3,6 +3,8 @@ import { AgentChatControls } from "@/agentMode/ui/AgentChatControls";
 import { AgentChatInput } from "@/agentMode/ui/AgentChatInput";
 import { AgentModeStatus } from "@/agentMode/ui/AgentModeStatus";
 import { AgentTabStrip } from "@/agentMode/ui/AgentTabStrip";
+import { CopilotBrandIcon } from "@/agentMode/ui/CopilotBrandIcon";
+import { AgentHomeShelf, type AgentHomeShelfSection } from "@/agentMode/ui/AgentHomeShelf";
 import { GlobalRecentChatsSection } from "@/agentMode/ui/GlobalRecentChatsSection";
 import { ProjectPickerList } from "@/agentMode/ui/ProjectPickerList";
 import { useAgentChatRuntimeState } from "@/agentMode/ui/hooks/useAgentChatRuntimeState";
@@ -12,6 +14,7 @@ import { useChatInputAutoFocus } from "@/agentMode/ui/hooks/useChatInputAutoFocu
 import { useAgentModelPicker } from "@/agentMode/ui/useAgentModelPicker";
 import { useAgentModePicker } from "@/agentMode/ui/useAgentModePicker";
 import { useSessionBackendDescriptor } from "@/agentMode/ui/useBackendDescriptor";
+import { pickRandomGreeting } from "@/agentMode/ui/landingGreetings";
 import type { AgentChatBackend } from "@/agentMode/session/AgentChatBackend";
 import type { AgentSessionManager } from "@/agentMode/session/AgentSessionManager";
 import { EVENT_NAMES } from "@/constants";
@@ -22,6 +25,7 @@ import { logError } from "@/logger";
 import type CopilotPlugin from "@/main";
 import { useProjects } from "@/projects/state";
 import { useSettingsValue } from "@/settings/model";
+import { Folder, MessageSquare } from "lucide-react";
 import { Notice } from "obsidian";
 import React, { useCallback, useContext, useEffect, useMemo, useRef } from "react";
 
@@ -167,6 +171,19 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     new Notice("Projects are coming soon.");
   }, []);
 
+  // Landing "New chat": spin up a fresh session in a new tab, the same path the
+  // tab strip's "+" uses. Guard on getIsStarting() like handleNewChat above and
+  // AgentTabStrip's "+" — createSession() sets the starting flag synchronously
+  // (before its first await), so a second click while a create is in flight is
+  // a no-op instead of spawning a duplicate session/tab.
+  const handleCreateChat = useCallback(() => {
+    if (manager.getIsStarting()) return;
+    manager.createSession().catch((e) => {
+      logError("[AgentMode] createSession failed", e);
+      new Notice("Failed to start a new chat. Please try again.");
+    });
+  }, [manager]);
+
   const modelPickerOverride = useAgentModelPicker(manager);
   const modePickerOverride = useAgentModePicker(manager);
 
@@ -216,20 +233,67 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
   // surface flips from the centered landing to the conversation layout.
   const isGlobalLanding = !manager.getActiveSession()?.hasUserVisibleMessages();
 
-  // Landing subtitle: backend display name, with the active mode when one is
-  // surfaced (e.g. "Claude · Plan").
-  const modeLabel = modePickerOverride?.options.find(
-    (o) => o.value === modePickerOverride.value
-  )?.label;
-  const sessionSubtitle = modeLabel
-    ? `${descriptor.displayName} · ${modeLabel}`
-    : descriptor.displayName;
+  // Rotating landing greeting: re-rolled per session id (so each fresh chat /
+  // landing open gets a new line) but stable across the stream re-renders within
+  // a session, so it doesn't flicker as tokens arrive. sessionId is the
+  // intentional re-roll trigger — not read inside the factory, so exhaustive-deps
+  // flags it; the dep is deliberate (same as the liveSessionIds memo above).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const greeting = useMemo(() => pickRandomGreeting(), [sessionId]);
 
   // Populate the Recent Chats list whenever the landing is shown (the
   // conversation-state history popover loads on open via the same handler).
   useEffect(() => {
     if (isGlobalLanding) void handleLoadChatHistory();
   }, [isGlobalLanding, handleLoadChatHistory]);
+
+  // Chip-shelf sections for the landing. Each body renders lazily (only the open
+  // section is mounted), so these render closures are cheap to recreate.
+  const landingSections = useMemo<AgentHomeShelfSection[]>(
+    () => [
+      {
+        id: "projects",
+        icon: <Folder className="tw-size-4" />,
+        title: "Projects",
+        count: projects.length,
+        renderBody: () => (
+          <ProjectPickerList
+            projects={projects}
+            onSelect={handleProjectComingSoon}
+            onCreate={handleProjectComingSoon}
+          />
+        ),
+      },
+      {
+        id: "chats",
+        icon: <MessageSquare className="tw-size-4" />,
+        title: "Recent Chats",
+        count: chatHistoryItems.length,
+        renderBody: () => (
+          <GlobalRecentChatsSection
+            items={chatHistoryItems}
+            onLoadChat={handleLoadChat}
+            onUpdateTitle={handleUpdateChatTitle}
+            onDeleteChat={handleDeleteChat}
+            onOpenSourceFile={handleOpenSourceFile}
+            onLoadHistory={handleLoadChatHistory}
+            onCreate={handleCreateChat}
+          />
+        ),
+      },
+    ],
+    [
+      projects,
+      chatHistoryItems,
+      handleProjectComingSoon,
+      handleCreateChat,
+      handleLoadChat,
+      handleUpdateChatTitle,
+      handleDeleteChat,
+      handleOpenSourceFile,
+      handleLoadChatHistory,
+    ]
+  );
 
   return (
     <div className="tw-flex tw-size-full tw-flex-col tw-overflow-hidden">
@@ -257,6 +321,12 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                   extra horizontal padding of their own. */}
               <div
                 className={
+                  // Landing: overflow-y-auto, not hidden. With room, the flex
+                  // spacers fill the column exactly so no scrollbar shows; on a
+                  // pane too short to fit the status/title/composer stack the
+                  // column scrolls instead of clipping them out of reach (small
+                  // Obsidian splits / popouts). Conversation: the transcript owns
+                  // its own scroll, so this stays hidden.
                   isGlobalLanding
                     ? "tw-flex tw-size-full tw-flex-col tw-overflow-y-auto tw-px-2"
                     : "tw-flex tw-size-full tw-flex-col tw-overflow-hidden"
@@ -266,19 +336,29 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                 <AgentModeStatus manager={manager} plugin={plugin} onInstallClick={handleInstall} />
                 {isGlobalLanding ? (
                   <>
-                    {/* Top spacer biases the composer into the lower portion of
-                        the pane when there's free space (3:1 against the bottom
-                        spacer). No min-height on purpose: it must collapse to 0
-                        under overflow so the column packs to the top and scrolls
-                        only on genuine overflow — a min-height would wedge a
-                        permanent gap that coexists with a scrollbar. */}
-                    <div className="tw-flex-[3]" />
-                    <div className="tw-shrink-0 tw-pb-3">
-                      <div className="tw-text-center tw-text-ui-larger tw-font-semibold tw-text-normal">
-                        What can I help with?
-                      </div>
-                      <div className="tw-mt-1 tw-text-center tw-text-ui-smaller tw-text-muted">
-                        {sessionSubtitle}
+                    {/* Top spacer at a FIXED fraction of the column height
+                        (h-1/4), not a flex grow. This top-anchors the composer:
+                        the spacer is a percentage of the (constant) column
+                        height, so it stays put when the composer's own height
+                        changes — e.g. removing the active-note context chip. A
+                        flex spacer would instead re-divide the freed space and
+                        push the greeting + composer down (the "top drops" we want
+                        to avoid). The lower shelf region (flex-1) absorbs the
+                        change instead, so the composer's lower half and the shelf
+                        collapse upward while the greeting stays fixed. */}
+                    <div className="tw-h-1/4 tw-shrink-0" />
+                    <div className="tw-shrink-0 tw-pb-7">
+                      <div className="tw-flex tw-items-center tw-justify-center tw-gap-3">
+                        <CopilotBrandIcon className="tw-size-4 tw-text-normal" />
+                        {/* font-[330]: deliberate hero weight, a hair lighter than
+                            `font-normal` (400) for the airy greeting. The project's
+                            named weight tokens have no slot between light and normal,
+                            so this is an intentional one-off. (The "no arbitrary
+                            values" rule targets font sizes, not weights.) Promote to a
+                            named token if another weight like this appears. */}
+                        <span className="tw-text-ui-title tw-font-[330] tw-text-normal">
+                          {greeting}
+                        </span>
                       </div>
                     </div>
                   </>
@@ -320,31 +400,20 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                   />
                 </div>
                 {isGlobalLanding ? (
-                  <>
-                    {/* Read-only landing below the composer. shrink-0 keeps the
-                        section titles at full height — they're never squeezed,
-                        the whole column scrolls instead. No extra horizontal
-                        padding so the section edges line up with the composer's
-                        border above. */}
-                    <div className="tw-flex tw-shrink-0 tw-flex-col tw-gap-4 tw-pt-4">
-                      <ProjectPickerList
-                        projects={projects}
-                        onSelect={handleProjectComingSoon}
-                        onCreate={handleProjectComingSoon}
-                      />
-                      <GlobalRecentChatsSection
-                        items={chatHistoryItems}
-                        onLoadChat={handleLoadChat}
-                        onUpdateTitle={handleUpdateChatTitle}
-                        onDeleteChat={handleDeleteChat}
-                        onOpenSourceFile={handleOpenSourceFile}
-                        onLoadHistory={handleLoadChatHistory}
-                      />
-                    </div>
-                    {/* Smaller bottom spacer balances the larger top one; also
-                        collapses to 0 under overflow (no min-height). */}
-                    <div className="tw-flex-1" />
-                  </>
+                  /* Lower region below the composer holds the tabbed shelf
+                     (Projects / Recent Chats). flex-1 so it absorbs every change
+                     in the composer's height: when the composer shrinks (e.g. the
+                     context chip is removed) this region grows and its top-aligned
+                     card moves up — the composer above stays top-anchored. The
+                     shelf is a persistent card that sizes to its content and sits
+                     at the top of this region. This region owns no scroll of its
+                     own — on a pane too short to fit the card, the card caps to the
+                     region height (min-h-0 chain) and scrolls its list internally,
+                     keeping the tab bar in reach. No extra horizontal padding so
+                     the card lines up with the composer's border. */
+                  <div className="tw-flex tw-min-h-0 tw-flex-1 tw-flex-col tw-pt-6">
+                    <AgentHomeShelf sections={landingSections} />
+                  </div>
                 ) : null}
               </div>
             </div>
