@@ -2,15 +2,15 @@ import { ChainType } from "@/chainType";
 import { Button } from "@/components/ui/button";
 import { HelpTooltip } from "@/components/ui/help-tooltip";
 import { Input } from "@/components/ui/input";
-import { getModelDisplayWithIcons } from "@/components/ui/model-display";
 import { SettingItem } from "@/components/ui/setting-item";
 import { DEFAULT_OPEN_AREA, PLUS_UTM_MEDIUMS, SEND_SHORTCUT } from "@/constants";
 import { cn } from "@/lib/utils";
 import { createPlusPageUrl } from "@/plusUtils";
-import { getModelKeyFromModel, updateSetting, useSettingsValue } from "@/settings/model";
+import { updateSetting, useSettingsValue } from "@/settings/model";
 import { PlusSettings } from "@/settings/v2/components/PlusSettings";
-import { checkModelApiKey, formatDateTime } from "@/utils";
+import { formatDateTime } from "@/utils";
 import { isSortStrategy } from "@/utils/recentUsageManager";
+import { useChatBackendModelOptions } from "@/hooks/useChatBackendModelOptions";
 import { Loader2 } from "lucide-react";
 import { Notice } from "obsidian";
 import React, { useState } from "react";
@@ -79,15 +79,11 @@ export const BasicSettings: React.FC = () => {
     }
   };
 
-  const defaultModelActivated = !!settings.activeModels.find(
-    (m) => m.enabled && getModelKeyFromModel(m) === settings.defaultModelKey
-  );
-  const enableActivatedModels = settings.activeModels
-    .filter((m) => m.enabled)
-    .map((model) => ({
-      label: getModelDisplayWithIcons(model),
-      value: getModelKeyFromModel(model),
-    }));
+  // Default chat model now comes from the model-management "chat" backend
+  // (the Quick Chat list under Agents), keyed by configuredModelId.
+  const { options: chatModelOptions, resolveSelectionId } = useChatBackendModelOptions();
+  const resolvedDefaultModelId = resolveSelectionId(settings.defaultModelKey);
+  const defaultModelActivated = resolvedDefaultModelId !== undefined;
 
   return (
     <div className="tw-space-y-4">
@@ -106,35 +102,24 @@ export const BasicSettings: React.FC = () => {
                 <HelpTooltip
                   content={
                     <div className="tw-flex tw-max-w-96 tw-flex-col tw-gap-2 tw-py-4">
-                      <div className="tw-text-sm tw-font-medium tw-text-accent">
-                        Default model is OpenRouter Gemini 2.5 Flash
-                      </div>
                       <div className="tw-text-xs tw-text-muted">
-                        Set your OpenRouter API key in &apos;API keys&apos; to use this model, or
-                        select a different model from another provider.
+                        Chat models are curated in the Quick Chat list under the Agents tab. Add
+                        providers on the Models (BYOK) tab to populate it.
                       </div>
                     </div>
                   }
                 />
               </div>
             }
-            value={defaultModelActivated ? settings.defaultModelKey : "Select Model"}
+            value={resolvedDefaultModelId ?? "Select Model"}
             onChange={(value) => {
-              const selectedModel = settings.activeModels.find(
-                (m) => m.enabled && getModelKeyFromModel(m) === value
-              );
-              if (!selectedModel) return;
-
-              const { hasApiKey, errorNotice } = checkModelApiKey(selectedModel, settings);
-              if (!hasApiKey && errorNotice) {
-                // Keep selection allowed; error will surface in chat on send
-              }
+              if (value === "Select Model") return;
               updateSetting("defaultModelKey", value);
             }}
             options={
               defaultModelActivated
-                ? enableActivatedModels
-                : [{ label: "Select Model", value: "Select Model" }, ...enableActivatedModels]
+                ? chatModelOptions
+                : [{ label: "Select Model", value: "Select Model" }, ...chatModelOptions]
             }
             placeholder="Model"
           />

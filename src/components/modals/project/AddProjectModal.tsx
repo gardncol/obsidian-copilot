@@ -9,7 +9,6 @@ import { Button } from "@/components/ui/button";
 import { FormField } from "@/components/ui/form-field";
 import { HelpTooltip } from "@/components/ui/help-tooltip";
 import { Input } from "@/components/ui/input";
-import { getModelDisplayWithIcons } from "@/components/ui/model-display";
 import { ObsidianNativeSelect } from "@/components/ui/obsidian-native-select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { SettingSlider } from "@/components/ui/setting-slider";
@@ -18,12 +17,12 @@ import { UrlTagInput } from "@/components/ui/url-tag-input";
 import { SystemPromptSyntaxInstruction } from "@/components/SystemPromptSyntaxInstruction";
 import { DEFAULT_MODEL_SETTING } from "@/constants";
 import { ProjectContextBadgeList } from "@/components/project/ProjectContextBadgeList";
-import { getModelKeyFromModel, useSettingsValue } from "@/settings/model";
-import { checkModelApiKey, err2String, randomUUID } from "@/utils";
+import { err2String, randomUUID } from "@/utils";
 import { Settings } from "lucide-react";
 import { type UrlItem, parseProjectUrls, serializeProjectUrls } from "@/utils/urlTagUtils";
 import type CopilotPlugin from "@/main";
 import { createPluginRoot } from "@/utils/react/createPluginRoot";
+import { useChatBackendModelOptions } from "@/hooks/useChatBackendModelOptions";
 import { App, Modal, Notice } from "obsidian";
 import React, { useMemo, useState } from "react";
 import { Root } from "react-dom/client";
@@ -42,7 +41,9 @@ function AddProjectModalContent({
   plugin,
 }: AddProjectModalContentProps) {
   const app = useApp();
-  const settings = useSettingsValue();
+  // Project model options come from the model-management "chat" backend
+  // (same enabled set as Quick Chat), keyed by configuredModelId.
+  const { options: chatModelOptions, resolveSelectionId } = useChatBackendModelOptions();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [touched, setTouched] = useState({
     name: false,
@@ -51,27 +52,32 @@ function AddProjectModalContent({
     inclusions: false,
   });
 
-  const [formData, setFormData] = useState<ProjectConfig>(
-    () =>
-      initialProject || {
-        id: randomUUID(),
-        name: "",
-        description: "",
-        systemPrompt: "",
-        projectModelKey: "",
-        modelConfigs: {
-          temperature: DEFAULT_MODEL_SETTING.TEMPERATURE,
-          maxTokens: DEFAULT_MODEL_SETTING.MAX_TOKENS,
-        },
-        contextSource: {
-          inclusions: "",
-          exclusions: "",
-          webUrls: "",
-          youtubeUrls: "",
-        },
-        created: Date.now(),
-        UsageTimestamps: Date.now(),
-      }
+  const [formData, setFormData] = useState<ProjectConfig>(() =>
+    initialProject
+      ? {
+          ...initialProject,
+          projectModelKey:
+            resolveSelectionId(initialProject.projectModelKey) || initialProject.projectModelKey,
+        }
+      : {
+          id: randomUUID(),
+          name: "",
+          description: "",
+          systemPrompt: "",
+          projectModelKey: "",
+          modelConfigs: {
+            temperature: DEFAULT_MODEL_SETTING.TEMPERATURE,
+            maxTokens: DEFAULT_MODEL_SETTING.MAX_TOKENS,
+          },
+          contextSource: {
+            inclusions: "",
+            exclusions: "",
+            webUrls: "",
+            youtubeUrls: "",
+          },
+          created: Date.now(),
+          UsageTimestamps: Date.now(),
+        }
   );
 
   // URL items derived from formData for UrlTagInput
@@ -310,27 +316,10 @@ function AddProjectModalContent({
               >
                 <ObsidianNativeSelect
                   value={formData.projectModelKey}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    const selectedModel = settings.activeModels.find(
-                      (m) => m.enabled && getModelKeyFromModel(m) === value
-                    );
-                    if (!selectedModel) return;
-
-                    const { hasApiKey, errorNotice } = checkModelApiKey(selectedModel, settings);
-                    if (!hasApiKey && errorNotice) {
-                      // Keep selection allowed; error will surface in chat on send
-                    }
-                    handleInputChange("projectModelKey", value);
-                  }}
+                  onChange={(e) => handleInputChange("projectModelKey", e.target.value)}
                   onBlur={() => setTouched((prev) => ({ ...prev, projectModelKey: true }))}
                   placeholder="Select a model"
-                  options={settings.activeModels
-                    .filter((m) => m.enabled && m.projectEnabled)
-                    .map((model) => ({
-                      label: getModelDisplayWithIcons(model),
-                      value: getModelKeyFromModel(model),
-                    }))}
+                  options={chatModelOptions}
                 />
               </FormField>
 
