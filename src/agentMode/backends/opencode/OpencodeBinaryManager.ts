@@ -13,6 +13,7 @@ import * as fs from "node:fs";
 import * as https from "node:https";
 import { IncomingMessage } from "node:http";
 import { FileSystemAdapter, requestUrl } from "obsidian";
+import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import { renameWithRetry } from "@/agentMode/skills/renameWithRetry";
@@ -156,9 +157,26 @@ function clearOpencodeBinary(): void {
 }
 
 /**
+ * Per-user, OS-local directory the managed opencode binary installs into,
+ * OUTSIDE the Obsidian vault. Mirrors how companion tools install their CLIs
+ * under the home dir (e.g. Miyo's `~/.miyo/bin`).
+ *
+ * Why not the plugin data dir (`<vault>/.obsidian/plugins/copilot/data/...`):
+ * that lives inside the vault, so sync services (Obsidian Sync, iCloud,
+ * Dropbox, Syncthing) replicate the ~100MB binary across devices — but the
+ * binary is per-OS and per-arch, so a synced copy is useless (or broken) on
+ * another machine. Keeping it under the home dir takes it out of every sync
+ * scope while staying per-user.
+ */
+export function opencodeManagedDataDir(homeDir: string): string {
+  return path.join(homeDir, ".obsidian-copilot", "opencode");
+}
+
+/**
  * Manages the lifecycle of the opencode binary on disk: platform-aware
- * download from GitHub releases, extraction into the plugin data dir, and
- * persistence of the install location into `settings.agentMode`. Desktop-only.
+ * download from GitHub releases, extraction into a per-user OS-local dir
+ * (outside the vault, see {@link opencodeManagedDataDir}), and persistence of
+ * the install location into `settings.agentMode`. Desktop-only.
  */
 export class OpencodeBinaryManager {
   constructor(private readonly plugin: CopilotPlugin) {}
@@ -186,15 +204,17 @@ export class OpencodeBinaryManager {
     clearOpencodeBinary();
   }
 
-  /** Absolute path to `<vault>/.obsidian/plugins/<id>/data/opencode`. */
+  /**
+   * Absolute path to the per-user, OS-local opencode install root, OUTSIDE the
+   * vault (`~/.obsidian-copilot/opencode`). See {@link opencodeManagedDataDir}
+   * for why this is not under the synced plugin data dir.
+   */
   getDataDir(): string {
     const adapter = this.plugin.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) {
       throw new Error("Agent Mode requires desktop Obsidian (FileSystemAdapter).");
     }
-    const base = adapter.getBasePath();
-    const id = this.plugin.manifest.id;
-    return path.join(base, this.plugin.app.vault.configDir, "plugins", id, "data", "opencode");
+    return opencodeManagedDataDir(os.homedir());
   }
 
   getPinnedVersion(): string {
