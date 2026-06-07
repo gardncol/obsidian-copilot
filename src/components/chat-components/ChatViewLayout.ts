@@ -12,6 +12,8 @@ const CSS_CHANGE_DEBOUNCE_MS = 600;
 export class ChatViewLayout {
   private debounceTimer: number | null = null;
   private cssChangeRef: ReturnType<Workspace["on"]> | null = null;
+  private statusBarResizeObserver: ResizeObserver | null = null;
+  private observedStatusBar: HTMLElement | null = null;
 
   constructor(
     private containerEl: HTMLElement,
@@ -32,6 +34,9 @@ export class ChatViewLayout {
       this.workspace.offref(this.cssChangeRef);
       this.cssChangeRef = null;
     }
+    this.statusBarResizeObserver?.disconnect();
+    this.statusBarResizeObserver = null;
+    this.observedStatusBar = null;
   }
 
   /**
@@ -43,6 +48,14 @@ export class ChatViewLayout {
    * reflow so nothing flickers. Themes that already position content above
    * the status bar (no overlap) get 0 clearance automatically. Auto-hide
    * themes (opacity: 0) also get 0 since the bar is transparent.
+   *
+   * The desktop status bar lives in the bottom-right and hosts core and
+   * plugin items (update-available notice, sync status, word count, ...).
+   * When one of those appears or grows -- making the bar taller, e.g. items
+   * wrap to a second line -- the overlap changes without a `css-change`
+   * event, so a ResizeObserver on the bar keeps the clearance in sync and
+   * the chat input from being covered. Measuring the bar's geometry stays
+   * generalizable: no specific banner or plugin is hardcoded.
    */
   private setupStatusBarClearance(): void {
     if (Platform.isMobile) return;
@@ -52,6 +65,8 @@ export class ChatViewLayout {
       const statusBar = this.containerEl.doc.querySelector<HTMLElement>(".status-bar");
       const viewContent = this.containerEl.querySelector<HTMLElement>(".view-content");
       if (!statusBar || !viewContent) return;
+
+      this.observeStatusBar(statusBar, syncClearance);
 
       // Zero out clearance and force reflow to measure natural overlap.
       // Remove any inline override left from a prior run so the CSS default
@@ -80,5 +95,18 @@ export class ChatViewLayout {
       if (this.debounceTimer) window.clearTimeout(this.debounceTimer);
       this.debounceTimer = window.setTimeout(syncClearance, CSS_CHANGE_DEBOUNCE_MS);
     });
+  }
+
+  /**
+   * Keep a single ResizeObserver pointed at the current status bar element so
+   * runtime size changes re-trigger a measurement. Rebinds when the element is
+   * replaced (e.g. after a theme reload swaps the DOM); a no-op otherwise.
+   */
+  private observeStatusBar(statusBar: HTMLElement, onResize: () => void): void {
+    if (this.observedStatusBar === statusBar) return;
+    this.statusBarResizeObserver?.disconnect();
+    this.statusBarResizeObserver = new ResizeObserver(() => onResize());
+    this.statusBarResizeObserver.observe(statusBar);
+    this.observedStatusBar = statusBar;
   }
 }
