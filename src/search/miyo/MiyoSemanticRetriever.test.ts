@@ -1,4 +1,4 @@
-import type { App } from "obsidian";
+import { type App, TFile } from "obsidian";
 import { getMiyoFolderName } from "@/miyo/miyoUtils";
 import { MiyoSemanticRetriever } from "@/search/miyo/MiyoSemanticRetriever";
 import { getSettings } from "@/settings/model";
@@ -111,8 +111,11 @@ describe("MiyoSemanticRetriever", () => {
 
     const startTime = 1700000000000;
     const endTime = 1700600000000;
+    // Time-range queries are issued with returnAll enabled by callers, so the
+    // retriever over-fetches the full candidate pool.
     const retriever = createRetriever({
       timeRange: { startTime, endTime },
+      returnAll: true,
     });
 
     await retriever.getRelevantDocuments("show notes from this week");
@@ -121,7 +124,7 @@ describe("MiyoSemanticRetriever", () => {
       "http://miyo.local",
       "/vault",
       "show notes from this week",
-      10,
+      RETURN_ALL_LIMIT,
       [{ field: "mtime", gte: startTime, lte: endTime }]
     );
     expect(mockGetDocumentsByPath).not.toHaveBeenCalled();
@@ -144,5 +147,104 @@ describe("MiyoSemanticRetriever", () => {
       RETURN_ALL_LIMIT,
       undefined
     );
+  });
+
+  it("over-fetches but caps returned chunks to the requested limit when a filter is active", async () => {
+    // An active inclusion/exclusion pattern can drop results, so the retriever
+    // over-fetches candidates to still fill the requested cap.
+    (getSettings as jest.Mock).mockReturnValue({
+      miyoServerUrl: "http://miyo.local",
+      debug: false,
+      qaExclusions: "private",
+    });
+    const app = {
+      vault: { getAbstractFileByPath: () => null },
+      metadataCache: {},
+    } as unknown as App;
+
+    mockSearch.mockResolvedValue({
+      results: Array.from({ length: 5 }, (_, i) => ({
+        id: `doc-${i}`,
+        score: 0.9 - i * 0.01,
+        path: `/vault/notes/${i}.md`,
+        chunk_index: 0,
+        chunk_text: `chunk ${i}`,
+      })),
+    });
+
+    const retriever = new MiyoSemanticRetriever(app, {
+      maxK: 2,
+      salientTerms: [],
+      minSimilarityScore: 0.2,
+    });
+    const documents = await retriever.getRelevantDocuments("query");
+
+    // Over-fetches the full candidate pool but returns only the top maxK.
+    expect(mockSearch).toHaveBeenCalledWith(
+      "http://miyo.local",
+      "/vault",
+      "query",
+      RETURN_ALL_LIMIT,
+      undefined
+    );
+    expect(documents).toHaveLength(2);
+    expect(documents.map((doc) => doc.metadata.path as string)).toEqual([
+      "notes/0.md",
+      "notes/1.md",
+    ]);
+  });
+
+  it("bounds the request to the requested limit when no filter is active", async () => {
+    // With no inclusion/exclusion pattern and returnAll off, over-fetching only
+    // wastes transfer/processing, so the request is bounded to the cap.
+    mockSearch.mockResolvedValue({ results: [] });
+
+    const retriever = createRetriever({ maxK: 3 });
+    await retriever.getRelevantDocuments("query");
+
+    expect(mockSearch).toHaveBeenCalledWith("http://miyo.local", "/vault", "query", 3, undefined);
+  });
+
+  it("filters chunks by Copilot inclusion/exclusion rules", async () => {
+    (getSettings as jest.Mock).mockReturnValue({
+      miyoServerUrl: "http://miyo.local",
+      debug: false,
+      qaExclusions: "private",
+    });
+
+    const TFileConstructor = TFile as unknown as new (filePath: string) => TFile;
+    const filesByPath = new Map<string, TFile>([
+      ["notes/keep.md", new TFileConstructor("notes/keep.md")],
+      ["private/secret.md", new TFileConstructor("private/secret.md")],
+    ]);
+    const app = {
+      vault: { getAbstractFileByPath: (path: string) => filesByPath.get(path) ?? null },
+      metadataCache: {},
+    } as unknown as App;
+
+    mockSearch.mockResolvedValue({
+      results: [
+        {
+          id: "keep",
+          score: 0.9,
+          path: "/vault/notes/keep.md",
+          chunk_index: 0,
+          chunk_text: "keep",
+        },
+        {
+          id: "secret",
+          score: 0.85,
+          path: "/vault/private/secret.md",
+          chunk_index: 0,
+          chunk_text: "secret",
+        },
+      ],
+    });
+
+    const retriever = new MiyoSemanticRetriever(app, { maxK: 10, salientTerms: [] });
+    const documents = await retriever.getRelevantDocuments("query");
+
+    expect(documents).toHaveLength(1);
+    expect(documents[0].metadata.path).toBe("notes/keep.md");
   });
 });

@@ -171,6 +171,42 @@ export function shouldIndexFile(
 }
 
 /**
+ * Build a predicate that decides whether a vault-relative path passes Copilot's
+ * QA inclusion/exclusion rules. The active patterns are resolved once so the
+ * predicate can be reused across many results. Paths that don't resolve to a
+ * vault {@link TFile} are kept, since the rules can't be evaluated for them.
+ *
+ * @param app - The Obsidian app instance.
+ * @returns Predicate returning true when the path should be kept.
+ */
+export function createCopilotPatternFilter(app: App): (path: string) => boolean {
+  const { inclusions, exclusions } = getMatchingPatterns();
+  if (!inclusions && !exclusions) {
+    return () => true;
+  }
+  return (path: string) => {
+    const file = app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      return true;
+    }
+    return shouldIndexFile(app, file, inclusions, exclusions);
+  };
+}
+
+/**
+ * Whether any QA inclusion/exclusion pattern is currently configured. Callers
+ * use this to decide whether {@link createCopilotPatternFilter} can actually
+ * remove results — when nothing is configured the filter is a no-op, so there
+ * is no point over-fetching candidates to compensate for it.
+ *
+ * @returns True when at least one inclusion or exclusion pattern is active.
+ */
+export function hasActiveCopilotPatterns(): boolean {
+  const { inclusions, exclusions } = getMatchingPatterns();
+  return Boolean(inclusions || exclusions);
+}
+
+/**
  * Break down the patterns into their respective categories.
  * @param patterns - The patterns to categorize.
  * @returns An object containing the categorized patterns.
