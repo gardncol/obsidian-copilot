@@ -23,7 +23,7 @@ import {
   createDefaultPermissionPrompter,
 } from "./ui/permissionPrompter";
 
-export { AGENT_CHAT_MODE } from "./session/AgentChatPersistenceManager";
+export { AGENT_CHAT_MODE } from "@/constants";
 export { AgentModeChat } from "./ui/AgentModeChat";
 export { default as CopilotAgentView } from "./ui/CopilotAgentView";
 export {
@@ -61,7 +61,7 @@ export { PlanPreviewView, PLAN_PREVIEW_VIEW_TYPE } from "./ui/PlanPreviewView";
 export type { PlanPreviewViewState } from "./ui/PlanPreviewView";
 export { getActiveBackendDescriptor, listBackendDescriptors } from "./backends/registry";
 export { frameSink as acpFrameSink, setFrameSinkVaultBasePath } from "./session/debugSink";
-export { SkillManager, SkillsSettings, useManagedSkills } from "./skills";
+export { getManagedSkills, SkillManager, SkillsSettings, useManagedSkills } from "./skills";
 export type { Skill } from "./skills";
 
 /**
