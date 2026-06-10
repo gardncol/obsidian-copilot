@@ -600,19 +600,21 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
    */
   private ensureModelCatalog(): Promise<ModelInfo[]> {
     if (this.cachedModels) return Promise.resolve(this.cachedModels);
-    const fromCache = getCachedSdkCatalog();
+    const envOverrides = this.opts.getEnvOverrides?.();
+    const fromCache = getCachedSdkCatalog(envOverrides);
     if (fromCache && fromCache.length > 0) {
       this.cachedModels = fromCache;
       return Promise.resolve(fromCache);
     }
     if (this.cachedModelsProbe) return this.cachedModelsProbe;
-    const probePromise = probeClaudeSdkCatalog(this.opts.pathToClaudeCodeExecutable).then(
-      (models) => {
-        if (models.length > 0) this.cachedModels = models;
-        else this.cachedModelsProbe = null;
-        return models;
-      }
-    );
+    const probePromise = probeClaudeSdkCatalog(
+      this.opts.pathToClaudeCodeExecutable,
+      envOverrides
+    ).then((models) => {
+      if (models.length > 0) this.cachedModels = models;
+      else this.cachedModelsProbe = null;
+      return models;
+    });
     this.cachedModelsProbe = probePromise;
     return probePromise;
   }

@@ -548,6 +548,43 @@ describe("ClaudeSdkBackendProcess.newSession dynamic catalog", () => {
   });
 });
 
+describe("ANTHROPIC_MODEL env override reaches the catalog probe", () => {
+  beforeEach(() => {
+    queryMock.mockReset();
+    createSdkMcpServerMock.mockClear();
+  });
+
+  it("threads the backend's env overrides into the probe on a cold cache", async () => {
+    // Cold module cache forces a real probe; the SDK reflects ANTHROPIC_MODEL
+    // into init.models itself, so the env just has to reach the probe.
+    (getCachedSdkCatalog as jest.Mock).mockReturnValue(undefined);
+    const initializationResult = jest.fn().mockResolvedValue({ models: FAKE_CATALOG });
+    queryMock.mockReturnValue({
+      initializationResult,
+      interrupt: jest.fn().mockResolvedValue(undefined),
+    });
+
+    const proc = new ClaudeSdkBackendProcess({
+      pathToClaudeCodeExecutable: "/usr/local/bin/claude",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      app: { vault: {} } as any,
+      clientVersion: "1.2.3",
+      descriptor: fakeDescriptor(),
+      getEnvOverrides: () => ({ ANTHROPIC_MODEL: "claude-fable-5" }),
+    });
+
+    await proc.newSession({ cwd: "/vault", mcpServers: [] });
+
+    const probeCall = queryMock.mock.calls[0][0] as {
+      options: { pathToClaudeCodeExecutable: string; env?: Record<string, string> };
+    };
+    expect(probeCall.options.pathToClaudeCodeExecutable).toBe("/usr/local/bin/claude");
+    expect(probeCall.options.env?.ANTHROPIC_MODEL).toBe("claude-fable-5");
+    // Child env is process.env plus the overrides, not a bare override map.
+    expect(probeCall.options.env?.PATH).toBe(process.env.PATH);
+  });
+});
+
 function errorResultMessage(errors: string[]): SDKMessage {
   return {
     type: "result",
