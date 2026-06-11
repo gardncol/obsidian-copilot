@@ -38,9 +38,10 @@ interface AgentSessionIndexFile {
 }
 
 /**
- * Minimal file-IO surface the index needs. Production passes the vault
- * `DataAdapter` (paths are vault-relative, so the file lands under
- * `.obsidian/plugins/<id>/`); tests pass an in-memory fake.
+ * Minimal file-IO surface the index needs. Production passes a Node-fs
+ * implementation rooted at the OS app-data dir (`~/.obsidian-copilot/`), so
+ * the index stays device-local and off vault sync; tests pass an in-memory
+ * fake. Paths are absolute for the Node-fs backing.
  */
 export interface AgentSessionIndexStorage {
   exists(path: string): Promise<boolean>;
