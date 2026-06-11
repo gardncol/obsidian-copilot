@@ -5,11 +5,19 @@ import { getSettings, setSettings } from "@/settings/model";
 import { err2String } from "@/utils";
 import type { ChatHistoryItem } from "@/components/chat-components/ChatHistoryPopover";
 import { fileToHistoryItem } from "@/utils/chatHistoryUtils";
+import { readFrontmatterViaAdapter } from "@/utils/vaultAdapterUtils";
 import { App, FileSystemAdapter, Notice, Platform, TFile } from "obsidian";
 import { v4 as uuidv4 } from "uuid";
-import { AgentSession, ATTENTION_TRIGGER_STATUSES } from "./AgentSession";
+import { AgentSession, ATTENTION_TRIGGER_STATUSES, DEFAULT_TITLE_PREFIX } from "./AgentSession";
 import type { AgentChatPersistenceManager } from "./AgentChatPersistenceManager";
 import type { AgentModelPreloader, WarmBackend } from "./AgentModelPreloader";
+import { parseNativeChatId } from "@/utils/nativeChatId";
+import type { AgentSessionIndex } from "./AgentSessionIndex";
+import {
+  deriveChatTitleFromMessages,
+  mergeChatHistoryItems,
+  type MarkdownChatEntry,
+} from "./chatHistoryMerge";
 import { MethodUnsupportedError } from "./errors";
 import { resolveMcpServers } from "./mcpResolver";
 import { replayPersistedMode } from "./replayPersistedMode";
@@ -30,6 +38,40 @@ import type {
 } from "./types";
 
 const AUTOSAVE_DEBOUNCE_MS = 500;
+/**
+ * Upper bound on the opportunistic `listSessions` sweep that enriches the
+ * recent-chats list from already-running backends. The session index answers
+ * the list on its own, so a slow agent must never hold the popover hostage.
+ */
+const LIST_SESSIONS_TIMEOUT_MS = 1_500;
+
+/** Resolve with `fallback` if `promise` hasn't settled within `ms`. */
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const timer = window.setTimeout(() => resolve(fallback), ms);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        window.clearTimeout(timer);
+        resolve(fallback);
+      }
+    );
+  });
+}
+
+/**
+ * Compare two cwd strings for "same directory" after stripping trailing
+ * separators. Agents echo back the cwd we handed them, so an exact
+ * normalized match is the right level of strictness — anything looser
+ * risks leaking another vault's sessions into this vault's history.
+ */
+function isSameCwd(a: string, b: string): boolean {
+  const norm = (p: string) => p.replace(/[/\\]+$/, "");
+  return norm(a) === norm(b);
+}
 
 export type PermissionPrompter = (req: PermissionPrompt) => Promise<PermissionDecision>;
 
@@ -62,6 +104,13 @@ export interface AgentSessionManagerOptions {
    * barrel in `agentMode/index.ts`.
    */
   persistenceManager?: AgentChatPersistenceManager;
+  /**
+   * Plugin-local index of resumable backend sessions, the markdown-free half
+   * of the recent-chats list. Optional only so legacy callers (tests) can
+   * omit it; production wiring always supplies one via the barrel in
+   * `agentMode/index.ts`.
+   */
+  sessionIndex?: AgentSessionIndex;
 }
 
 /**
@@ -106,6 +155,7 @@ export class AgentSessionManager {
   // "must be cleaned up when the session is detached":
   // - `path`: persisted file (set after first successful save)
   // - `timer`: pending debounce timer
+  // - `indexTimer`: pending session-index write-through debounce timer
   // - `unsub`: tear-down for the auto-save `session.subscribe()`
   // - `signature`: last serialized snapshot, for no-op skipping
   // - `modelCacheUnsub`: tear-down for the model-cache mirror subscription
@@ -115,6 +165,7 @@ export class AgentSessionManager {
     {
       path?: string;
       timer?: number;
+      indexTimer?: number;
       unsub?: () => void;
       signature?: string;
       modelCacheUnsub?: () => void;
@@ -143,30 +194,225 @@ export class AgentSessionManager {
   }
 
   /**
-   * List every persisted Agent Mode chat as a `ChatHistoryItem` ranked using
-   * the plugin's shared in-memory `lastAccessedAt` tracker. Returns `[]` when
-   * persistence isn't configured.
+   * List every known Agent Mode chat as a `ChatHistoryItem`: markdown-saved
+   * notes (ranked using the plugin's shared in-memory `lastAccessedAt`
+   * tracker) merged with the session index's native-store entries, de-duped
+   * on `backendId + sessionId`. Native entries exist independently of the
+   * `autosaveChat` setting, so the list survives autosave being off. Before
+   * merging, already-running backends are swept via `listSessions` (bounded
+   * by {@link LIST_SESSIONS_TIMEOUT_MS}) so chats created outside the plugin
+   * surface too — a backend is never spawned just to enumerate history.
    */
   async getChatHistoryItems(): Promise<ChatHistoryItem[]> {
     const persistence = this.opts.persistenceManager;
-    if (!persistence) return [];
-    const files = await persistence.getAgentChatHistoryFiles();
-    const tracker = this.plugin.getChatHistoryLastAccessedAtManager();
-    return files.map((file) => fileToHistoryItem(this.app, file, tracker));
+    const index = this.opts.sessionIndex;
+    if (!persistence && !index) return [];
+
+    let markdownEntries: MarkdownChatEntry[] = [];
+    if (persistence) {
+      const files = await persistence.getAgentChatHistoryFiles();
+      const tracker = this.plugin.getChatHistoryLastAccessedAtManager();
+      markdownEntries = await Promise.all(
+        files.map(async (file) => {
+          // readSessionRefFromFile falls back to an adapter read for files in
+          // hidden save folders, which the metadata cache never indexes — a
+          // cache-only read would leave those rows unmergeable and duplicate
+          // their native twins.
+          const ref = await this.readSessionRefFromFile(file.path);
+          return {
+            item: fileToHistoryItem(this.app, file, tracker),
+            backendId: ref?.backendId,
+            sessionId: ref?.sessionId,
+          };
+        })
+      );
+    }
+    if (!index) return markdownEntries.map((e) => e.item);
+
+    await this.refreshNativeSessionsFromBackends();
+    const nativeEntries = await index.getEntries();
+    return mergeChatHistoryItems(markdownEntries, nativeEntries);
   }
 
-  /** Update the user-visible title (frontmatter `topic`) of a saved chat. */
+  /**
+   * Update the user-visible title of a saved chat — frontmatter `topic` for
+   * markdown chats, the index entry (plus the live session's label, when the
+   * session is open) for native-store entries.
+   */
   async updateChatTitle(fileId: string, newTitle: string): Promise<void> {
+    const native = parseNativeChatId(fileId);
+    if (native) {
+      const index = this.opts.sessionIndex;
+      if (!index) throw new Error("Agent session index is not configured.");
+      await index.setTitle(native.backendId, native.sessionId, newTitle);
+      // Match the (backendId, sessionId) pair, not the id alone: on a
+      // cross-backend id collision, renaming by id could relabel the wrong
+      // backend's live tab (and its index entry via the label autosave).
+      this.findLiveSession(native.backendId, native.sessionId)?.setLabel(newTitle);
+      return;
+    }
     const persistence = this.opts.persistenceManager;
     if (!persistence) throw new Error("Agent chat persistence is not configured.");
     await persistence.updateTopic(fileId, newTitle);
   }
 
-  /** Delete a saved chat by file path. */
+  /**
+   * Delete a chat from history. Native-store entries are tombstoned in the
+   * index (the backend's own session store is left untouched — it's shared
+   * with the CLI outside Obsidian). Markdown chats are trashed AND their
+   * backend session is tombstoned, so the native twin doesn't reappear on
+   * the next merge.
+   */
   async deleteChatHistory(fileId: string): Promise<void> {
+    const index = this.opts.sessionIndex;
+    const native = parseNativeChatId(fileId);
+    if (native) {
+      if (!index) throw new Error("Agent session index is not configured.");
+      this.cancelPendingIndexTouch(native.backendId, native.sessionId);
+      await index.deleteSession(native.backendId, native.sessionId);
+      return;
+    }
     const persistence = this.opts.persistenceManager;
     if (!persistence) throw new Error("Agent chat persistence is not configured.");
+    if (index) {
+      const ref = await this.readSessionRefFromFile(fileId);
+      if (ref) {
+        this.cancelPendingIndexTouch(ref.backendId, ref.sessionId);
+        await index.deleteSession(ref.backendId, ref.sessionId);
+      }
+    }
     await persistence.deleteFile(fileId);
+  }
+
+  /**
+   * Drop any debounced index write-through still pending for a live session
+   * with this (backendId, sessionId). Without this, deleting a chat inside the
+   * ~500ms debounce window of a recent message/label change lets the already-
+   * queued `flushIndexTouch` fire after the tombstone is written — its
+   * `recordSession` clears the tombstone and re-adds the deleted chat to
+   * Recent Chats. Activity *after* the delete still re-indexes normally (a
+   * deliberate "the user is using it again" signal); only the pre-delete
+   * timer is cancelled.
+   */
+  private cancelPendingIndexTouch(backendId: BackendId, sessionId: string): void {
+    for (const session of this.sessions.values()) {
+      if (session.backendId !== backendId) continue;
+      if (session.getBackendSessionId() !== sessionId) continue;
+      const state = this.sessionState.get(session.internalId);
+      if (state?.indexTimer) {
+        window.clearTimeout(state.indexTimer);
+        state.indexTimer = undefined;
+      }
+    }
+  }
+
+  /**
+   * Read the backend session identity from a saved chat's frontmatter, via
+   * the metadata cache with an adapter fallback for hidden-directory files.
+   * Returns null when the file predates session-id persistence.
+   */
+  private async readSessionRefFromFile(
+    fileId: string
+  ): Promise<{ backendId: BackendId; sessionId: string } | null> {
+    let fm: Record<string, unknown> | undefined;
+    const file = this.app.vault.getAbstractFileByPath(fileId);
+    if (file instanceof TFile) {
+      fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    }
+    if (!fm) {
+      try {
+        fm = (await readFrontmatterViaAdapter(this.app, fileId)) ?? undefined;
+      } catch {
+        return null;
+      }
+    }
+    const backendId = typeof fm?.backendId === "string" ? fm.backendId.trim() : "";
+    const sessionId = typeof fm?.sessionId === "string" ? fm.sessionId.trim() : "";
+    if (!backendId || !sessionId) return null;
+    return { backendId, sessionId };
+  }
+
+  /**
+   * Sweep already-running backends' native session stores into the index.
+   * "Running" includes the preloader's warm probe subprocesses — they're
+   * spawned for every installed backend at plugin load, so sweeping them
+   * surfaces codex/opencode history on the very first Agent Home open,
+   * before any chat has started a manager-owned backend. Strictly
+   * opportunistic: never spawns a backend, swallows per-backend failures,
+   * and is capped by {@link LIST_SESSIONS_TIMEOUT_MS} so the history
+   * surface stays responsive when an agent is slow to answer.
+   */
+  private async refreshNativeSessionsFromBackends(): Promise<void> {
+    const index = this.opts.sessionIndex;
+    if (!index) return;
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) return;
+    const vaultBasePath = adapter.getBasePath();
+    // Manager-owned procs win over warm probes for the same backend id —
+    // they're the same subprocess lineage, but the manager's entry is the
+    // one whose lifecycle we control.
+    const procs = new Map<BackendId, BackendProcess>();
+    for (const { backendId, proc } of this.preloader.getWarmProcs()) {
+      if (proc.isRunning()) procs.set(backendId, proc);
+    }
+    for (const [backendId, proc] of this.backends) {
+      if (proc.isRunning()) procs.set(backendId, proc);
+    }
+    if (procs.size === 0) return;
+    const sweeps = Array.from(procs, ([backendId, proc]) =>
+      this.sweepNativeSessions(backendId, proc, vaultBasePath)
+    );
+    await withTimeout(
+      Promise.allSettled(sweeps).then(() => undefined),
+      LIST_SESSIONS_TIMEOUT_MS,
+      undefined
+    );
+  }
+
+  /**
+   * Merge one backend's `listSessions` result into the index. Filters to
+   * this vault's cwd (agent-side cwd filtering is not trusted — a stray
+   * session from another vault must never leak into this vault's history),
+   * skips the preloader's probe session, and requires a real title so the
+   * sweep can't surface empty placeholder sessions.
+   */
+  private async sweepNativeSessions(
+    backendId: BackendId,
+    proc: BackendProcess,
+    vaultBasePath: string
+  ): Promise<void> {
+    const index = this.opts.sessionIndex;
+    if (!index) return;
+    let sessions;
+    try {
+      ({ sessions } = await proc.listSessions({ cwd: vaultBasePath }));
+    } catch (err) {
+      if (!(err instanceof MethodUnsupportedError)) {
+        logWarn(`[AgentMode] listSessions sweep failed for ${backendId}`, err);
+      }
+      return;
+    }
+    const probeSessionId = this.opts
+      .resolveDescriptor(backendId)
+      ?.getProbeSessionId?.(getSettings());
+    const now = Date.now();
+    const discovered = [];
+    for (const s of sessions) {
+      if (!isSameCwd(s.cwd, vaultBasePath)) continue;
+      if (probeSessionId && s.sessionId === probeSessionId) continue;
+      const title = s.title?.trim();
+      if (!title || title.startsWith(DEFAULT_TITLE_PREFIX)) continue;
+      const updatedAtMs = s.updatedAt ? Date.parse(s.updatedAt) : NaN;
+      const timestamp = Number.isFinite(updatedAtMs) && updatedAtMs > 0 ? updatedAtMs : now;
+      discovered.push({
+        backendId,
+        sessionId: s.sessionId,
+        title,
+        createdAtMs: timestamp,
+        lastAccessedAtMs: timestamp,
+      });
+    }
+    if (discovered.length > 0) await index.mergeDiscoveredSessions(discovered);
   }
 
   /**
@@ -743,6 +989,23 @@ export class AgentSessionManager {
     return null;
   }
 
+  /**
+   * Live (non-closed) session matching BOTH `backendId` and the backend
+   * `sessionId`. Matching the full identity at once — rather than finding the
+   * first session by `sessionId` and checking the backend after — keeps an
+   * (effectively impossible, UUID) cross-backend id collision from hiding the
+   * correct already-open tab. Used by the native-history open/rename paths.
+   */
+  private findLiveSession(backendId: BackendId, sessionId: string): AgentSession | null {
+    for (const session of this.sessions.values()) {
+      if (session.backendId !== backendId) continue;
+      if (session.getBackendSessionId() !== sessionId) continue;
+      if (session.getStatus() === "closed") continue;
+      return session;
+    }
+    return null;
+  }
+
   getChatUIState(id: string): AgentChatUIState | null {
     return this.chatUIStates.get(id) ?? null;
   }
@@ -839,6 +1102,8 @@ export class AgentSessionManager {
     this.listeners.clear();
     this.preloadStatus.clear();
     this.preloader.shutdown();
+    // Push any debounced index write to disk before the plugin unloads.
+    await this.opts.sessionIndex?.flush();
   }
 
   /**
@@ -868,6 +1133,10 @@ export class AgentSessionManager {
       state.path = undefined;
     }
 
+    // Captured before we create the loaded session (which becomes active) so
+    // we can replace an empty landing tab in place instead of leaving it.
+    const previousActiveId = this.activeSessionId;
+
     const loaded = await this.opts.persistenceManager.loadFile(file);
 
     let session: AgentSession | null = null;
@@ -878,11 +1147,122 @@ export class AgentSessionManager {
       session = await this.createSession(loaded.backendId);
     }
 
-    session.store.loadMessages(loaded.messages);
+    session.loadDisplayMessages(loaded.messages);
     if (loaded.label) session.setLabel(loaded.label);
     this.getSessionState(session.internalId).path = file.path;
+    if (loaded.sessionId) {
+      // Keep the native twin's recency in step with the markdown side so the
+      // merged history ranks this chat correctly after a reopen.
+      void this.opts.sessionIndex?.touch(loaded.backendId, loaded.sessionId);
+    }
+    this.absorbIntoEmptyActiveTab(session, previousActiveId);
     this.notify();
     return session;
+  }
+
+  /**
+   * When a history item is opened while the active tab is an empty landing
+   * (no user-visible messages), give the loaded session that tab's strip
+   * position and close the empty one — so opening a chat doesn't leave a
+   * stray blank tab behind. A tab with a real conversation is never
+   * clobbered; the loaded chat opens as a new tab in that case.
+   */
+  private absorbIntoEmptyActiveTab(loaded: AgentSession, previousActiveId: string | null): void {
+    if (!previousActiveId || previousActiveId === loaded.internalId) return;
+    const previous = this.sessions.get(previousActiveId);
+    if (!previous || previous.hasUserVisibleMessages()) return;
+    const oldIdx = Array.from(this.sessions.keys()).indexOf(previousActiveId);
+    if (oldIdx >= 0) {
+      this.moveMapEntry(this.sessions, loaded.internalId, oldIdx);
+      this.moveMapEntry(this.chatUIStates, loaded.internalId, oldIdx);
+    }
+    // Background close: the loaded session is already active, so closing the
+    // empty one won't reassign the active pointer.
+    void this.closeSession(previousActiveId).catch((e) =>
+      logWarn(`[AgentMode] closing empty tab during history load failed`, e)
+    );
+  }
+
+  /**
+   * Open a chat that exists only in a backend's native session store (no
+   * markdown note). If a live session is already bound to that backend
+   * session id, focus it; otherwise resume through the same path markdown
+   * history uses. Unlike `loadSessionFromHistory` there is no fresh-session
+   * fallback — silently opening an empty chat would misread as data loss, so
+   * the failure surfaces to the caller instead.
+   *
+   * The transcript is not rebuilt from the backend store (the resume path
+   * restores agent-side context only), so the chat may open visually empty
+   * while the agent still remembers the conversation on the next turn.
+   */
+  async loadNativeSessionFromHistory(
+    backendId: BackendId,
+    sessionId: SessionId
+  ): Promise<AgentSession> {
+    if (this.disposed) {
+      throw new Error("AgentSessionManager has been shut down");
+    }
+    // Identity is the (backendId, sessionId) pair — searched together so an
+    // id collision across backends can't hide the correct already-open tab.
+    const existing = this.findLiveSession(backendId, sessionId);
+    if (existing) {
+      this.setActiveSession(existing.internalId);
+      return existing;
+    }
+    // Captured before the resumed session becomes active so we can replace an
+    // empty landing tab in place rather than spawning a new one.
+    const previousActiveId = this.activeSessionId;
+    const session = await this.tryResumeSessionFromHistory(backendId, sessionId);
+    if (!session) {
+      throw new Error(`Could not resume session ${sessionId} from the ${backendId} session store.`);
+    }
+    // Rebuild the visible transcript for backends that resume without
+    // replaying it (Claude SDK reads its on-disk session jsonl). ACP backends
+    // replay through `loadSession`, so they don't implement this and the
+    // session already has its messages. Best-effort: an empty result leaves
+    // the resumed-but-blank session as-is rather than failing the open.
+    await this.hydrateResumedTranscript(session, backendId, sessionId);
+    const index = this.opts.sessionIndex;
+    if (index) {
+      const entry = await index.getEntry(backendId, sessionId);
+      // Reapply with the recorded source: a user rename stays sticky, but an
+      // agent/derived title is agent-sourced so a resumed opencode/codex
+      // session can still refresh its title from later agent updates.
+      if (entry?.title) {
+        session.restoreLabel(entry.title, entry.titleSource === "user" ? "user" : "agent");
+      }
+      await index.touch(backendId, sessionId);
+    }
+    this.absorbIntoEmptyActiveTab(session, previousActiveId);
+    this.notify();
+    return session;
+  }
+
+  /**
+   * Load a resumed session's display transcript from the backend's on-disk
+   * store when the backend supports it and the session came back empty.
+   * No-op for backends that replay via `loadSession` (they have no
+   * `readPersistedTranscript`) or when the store can't be reached.
+   */
+  private async hydrateResumedTranscript(
+    session: AgentSession,
+    backendId: BackendId,
+    sessionId: SessionId
+  ): Promise<void> {
+    const proc = this.backends.get(backendId);
+    if (!proc?.readPersistedTranscript) return;
+    if (session.store.getDisplayMessages().length > 0) return;
+    const adapter = this.app.vault.adapter;
+    if (!(adapter instanceof FileSystemAdapter)) return;
+    try {
+      const transcript = await proc.readPersistedTranscript({
+        sessionId,
+        cwd: adapter.getBasePath(),
+      });
+      if (transcript.length > 0) session.loadDisplayMessages(transcript);
+    } catch (e) {
+      logWarn(`[AgentMode] could not hydrate transcript for ${sessionId}`, e);
+    }
   }
 
   /**
@@ -985,9 +1365,16 @@ export class AgentSessionManager {
 
   private attachAutoSave(session: AgentSession): void {
     const persistence = this.opts.persistenceManager;
-    if (!persistence) return;
+    const index = this.opts.sessionIndex;
+    if (!persistence && !index) return;
 
-    const trigger = () => this.scheduleAutoSave(session);
+    // The markdown auto-save is gated on `settings.autosaveChat` inside
+    // `scheduleAutoSave`; the index write-through is not — history must keep
+    // tracking the session even when the user opted out of markdown notes.
+    const trigger = () => {
+      this.scheduleAutoSave(session);
+      this.scheduleIndexTouch(session);
+    };
     const unsubscribe = session.subscribe({
       onMessagesChanged: trigger,
       onStatusChanged: () => {},
@@ -1006,6 +1393,54 @@ export class AgentSessionManager {
         logWarn(`[AgentMode] auto-save failed for ${session.internalId}`, e)
       );
     }, AUTOSAVE_DEBOUNCE_MS);
+  }
+
+  private scheduleIndexTouch(session: AgentSession): void {
+    if (!this.opts.sessionIndex) return;
+    const state = this.getSessionState(session.internalId);
+    if (state.indexTimer) window.clearTimeout(state.indexTimer);
+    state.indexTimer = window.setTimeout(() => {
+      state.indexTimer = undefined;
+      this.flushIndexTouch(session).catch((e) =>
+        logWarn(`[AgentMode] session-index update failed for ${session.internalId}`, e)
+      );
+    }, AUTOSAVE_DEBOUNCE_MS);
+  }
+
+  /**
+   * Record this session in the index so it appears in recent chats whether
+   * or not a markdown note exists. Skips sessions that haven't produced a
+   * user-visible message yet — a freshly-opened empty tab isn't history.
+   */
+  private async flushIndexTouch(session: AgentSession): Promise<void> {
+    const index = this.opts.sessionIndex;
+    if (!index) return;
+    if (!this.sessions.has(session.internalId)) return;
+    const sessionId = session.getBackendSessionId();
+    if (!sessionId) return;
+    const messages = session.store.getDisplayMessages();
+    if (messages.length === 0) return;
+    const now = Date.now();
+    // Prefer the agent/user label; fall back to a title derived from the
+    // first user message so chats that have no agent title (every Claude
+    // Code chat — its SDK has no title API) don't read "Untitled chat".
+    // The derived title is recorded agent-sourced, so an opencode/codex
+    // summarizer title still overrides it later, and a user rename always wins.
+    const label = session.getLabel();
+    const title = label ?? deriveChatTitleFromMessages(messages);
+    const titleSource: "user" | "agent" | undefined = !title
+      ? undefined
+      : label && session.getLabelSource() === "user"
+        ? "user"
+        : "agent";
+    await index.recordSession({
+      backendId: session.backendId,
+      sessionId,
+      title,
+      titleSource,
+      createdAtMs: messages[0]?.timestamp?.epoch ?? now,
+      lastAccessedAtMs: now,
+    });
   }
 
   /**
@@ -1069,6 +1504,15 @@ export class AgentSessionManager {
    */
   private async drainAutoSave(session: AgentSession): Promise<void> {
     const state = this.sessionState.get(session.internalId);
+    if (state?.indexTimer) {
+      window.clearTimeout(state.indexTimer);
+      state.indexTimer = undefined;
+      try {
+        await this.flushIndexTouch(session);
+      } catch (e) {
+        logWarn(`[AgentMode] drain session-index update failed for ${session.internalId}`, e);
+      }
+    }
     if (!state?.timer) return;
     window.clearTimeout(state.timer);
     state.timer = undefined;
@@ -1083,6 +1527,7 @@ export class AgentSessionManager {
     const state = this.sessionState.get(internalId);
     if (!state) return;
     if (state.timer) window.clearTimeout(state.timer);
+    if (state.indexTimer) window.clearTimeout(state.indexTimer);
     state.unsub?.();
     state.modelCacheUnsub?.();
     state.attentionUnsub?.();

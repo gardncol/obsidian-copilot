@@ -3,8 +3,10 @@
  * subprocess and the AgentSession factory are mocked so we can exercise
  * session-pool invariants without touching ACP or spawning a child process.
  */
-import { FileSystemAdapter, App } from "obsidian";
+import { FileSystemAdapter, App, TFile } from "obsidian";
 import { AgentSession } from "./AgentSession";
+import { buildNativeChatId } from "@/utils/nativeChatId";
+import { AgentSessionIndex } from "./AgentSessionIndex";
 import { AgentSessionManager } from "./AgentSessionManager";
 import { setSettings as mockedSetSettings } from "@/settings/model";
 import type { BackendDescriptor } from "./types";
@@ -158,6 +160,7 @@ function buildManager(): AgentSessionManager {
     setCached: jest.fn(),
     clearCached: jest.fn(),
     takeWarm: jest.fn(() => null),
+    getWarmProcs: jest.fn(() => []),
   };
   return new AgentSessionManager(
     buildApp(),
@@ -233,6 +236,7 @@ describe("AgentSessionManager.createSession", () => {
         cache.delete(id);
       }),
       takeWarm: jest.fn(() => null),
+      getWarmProcs: jest.fn(() => []),
     };
     const descriptor = buildDescriptor();
     const mgr = new AgentSessionManager(
@@ -559,6 +563,7 @@ describe("AgentSessionManager.restartBackend", () => {
       setCached: jest.fn(),
       clearCached: jest.fn(),
       takeWarm: jest.fn(() => null),
+      getWarmProcs: jest.fn(() => []),
     };
     const descriptor = {
       ...buildDescriptor(),
@@ -597,6 +602,7 @@ describe("AgentSessionManager.restartBackend", () => {
       setCached: jest.fn(),
       clearCached: jest.fn(),
       takeWarm: jest.fn(() => null),
+      getWarmProcs: jest.fn(() => []),
     };
     const descriptor = {
       ...buildDescriptor(),
@@ -633,6 +639,7 @@ describe("AgentSessionManager.restartBackend", () => {
       setCached: jest.fn(),
       clearCached: jest.fn(),
       takeWarm: jest.fn(() => null),
+      getWarmProcs: jest.fn(() => []),
     };
     const descriptor = {
       ...buildDescriptor(),
@@ -691,6 +698,7 @@ describe("AgentSessionManager.restartBackend", () => {
       setCached: jest.fn(),
       clearCached: jest.fn(),
       takeWarm: jest.fn(() => null),
+      getWarmProcs: jest.fn(() => []),
     };
     const descriptor = {
       ...buildDescriptor(),
@@ -1018,6 +1026,7 @@ describe("AgentSessionManager.applySelection", () => {
       setCached: jest.fn(),
       clearCached: jest.fn(),
       takeWarm: jest.fn(() => null),
+      getWarmProcs: jest.fn(() => []),
     };
     const mgr = new AgentSessionManager(
       buildApp(),
@@ -1109,6 +1118,7 @@ describe("AgentSessionManager.applySelection", () => {
       setCached: jest.fn(),
       clearCached: jest.fn(),
       takeWarm: jest.fn(() => null),
+      getWarmProcs: jest.fn(() => []),
     };
     const mgr = new AgentSessionManager(
       buildApp(),
@@ -1162,6 +1172,7 @@ describe("AgentSessionManager.onInstallStateChanged", () => {
       setCached: jest.fn(),
       clearCached: jest.fn(),
       takeWarm: jest.fn(() => null),
+      getWarmProcs: jest.fn(() => []),
     };
     const descriptor = {
       ...buildDescriptor(),
@@ -1262,3 +1273,336 @@ function readPersistedDefault(
   }
   return backends[backendId]?.defaultModel;
 }
+
+describe("AgentSessionManager chat history aggregation", () => {
+  // The mapped obsidian mock's TFile is a jest constructor taking a path;
+  // instances must come from the same constructor the production code
+  // `instanceof`-checks against, hence the import (not jest.requireMock).
+  const MockTFile = TFile as unknown as new (path: string) => TFile & {
+    stat: { ctime: number; mtime: number };
+  };
+
+  interface FakeFrontmatter {
+    epoch?: number;
+    topic?: string;
+    backendId?: string;
+    sessionId?: string;
+    lastAccessedAt?: number;
+  }
+
+  function makeIndexStorage() {
+    const files = new Map<string, string>();
+    return {
+      exists: async (p: string) => files.has(p),
+      read: async (p: string) => {
+        const content = files.get(p);
+        if (content === undefined) throw new Error(`ENOENT: ${p}`);
+        return content;
+      },
+      write: async (p: string, c: string) => {
+        files.set(p, c);
+      },
+    };
+  }
+
+  function buildHistoryHarness(opts?: {
+    files?: Record<string, FakeFrontmatter>;
+    /** Hidden-folder files: never in the metadata cache, read via adapter. */
+    hiddenFiles?: Record<string, string>;
+    listSessions?: jest.Mock;
+    /** When set, the preloader exposes a warm opencode probe proc with this listSessions. */
+    warmListSessions?: jest.Mock;
+    probeSessionId?: string;
+  }) {
+    const frontmatterByPath = opts?.files ?? {};
+    const hiddenByPath = opts?.hiddenFiles ?? {};
+    const tfiles = [...Object.keys(frontmatterByPath), ...Object.keys(hiddenByPath)].map((p) => {
+      const f = new MockTFile(p);
+      f.stat = { ctime: 1_000, mtime: 1_000, size: 0 };
+      return f;
+    });
+    const adapter = new (FileSystemAdapter as unknown as new (basePath: string) => unknown)(
+      "/vault"
+    ) as { read: jest.Mock };
+    adapter.read.mockImplementation(async (p: string) => {
+      const content = hiddenByPath[p];
+      if (content === undefined) throw new Error(`ENOENT: ${p}`);
+      return content;
+    });
+    const app = {
+      vault: {
+        adapter,
+        getAbstractFileByPath: (p: string) =>
+          tfiles.find((f: { path: string }) => f.path === p) ?? null,
+      },
+      metadataCache: {
+        getFileCache: (file: { path: string }) => {
+          const fm = frontmatterByPath[file.path];
+          return fm ? { frontmatter: fm } : null;
+        },
+      },
+    } as unknown as App;
+    const plugin = {
+      manifest: { version: "1.0.0" },
+      getChatHistoryLastAccessedAtManager: () => ({
+        getEffectiveLastUsedAt: (_path: string, fallback: number) => fallback,
+      }),
+    };
+    const persistence = {
+      getAgentChatHistoryFiles: jest.fn(async () => tfiles),
+      updateTopic: jest.fn(async () => undefined),
+      deleteFile: jest.fn(async () => undefined),
+    };
+    const index = new AgentSessionIndex(makeIndexStorage(), "plugins/copilot/index.json");
+    const descriptor = {
+      ...buildDescriptor(),
+      getProbeSessionId: jest.fn(() => opts?.probeSessionId),
+    } as unknown as BackendDescriptor;
+    if (opts?.listSessions) {
+      (descriptor as unknown as { createBackendProcess: jest.Mock }).createBackendProcess = jest.fn(
+        () => ({ ...makeMockBackendProcess(), listSessions: opts.listSessions })
+      );
+    }
+    const manager = new AgentSessionManager(
+      app,
+      plugin as unknown as ConstructorParameters<typeof AgentSessionManager>[1],
+      {
+        permissionPrompter: jest.fn(),
+        resolveDescriptor: (id) => (id === "opencode" ? descriptor : undefined),
+        modelPreloader: {
+          getCachedBackendState: jest.fn(() => null),
+          preload: jest.fn(async () => undefined),
+          refresh: jest.fn(() => null),
+          subscribe: jest.fn(() => () => {}),
+          shutdown: jest.fn(),
+          setCached: jest.fn(),
+          clearCached: jest.fn(),
+          takeWarm: jest.fn(() => null),
+          getWarmProcs: jest.fn(() =>
+            opts?.warmListSessions
+              ? [
+                  {
+                    backendId: "opencode",
+                    proc: { ...makeMockBackendProcess(), listSessions: opts.warmListSessions },
+                  },
+                ]
+              : []
+          ),
+        } as unknown as ConstructorParameters<typeof AgentSessionManager>[2]["modelPreloader"],
+        persistenceManager: persistence as unknown as ConstructorParameters<
+          typeof AgentSessionManager
+        >[2]["persistenceManager"],
+        sessionIndex: index,
+      }
+    );
+    return { manager, index, persistence };
+  }
+
+  it("merges markdown and native entries, de-duplicated on backend session id", async () => {
+    const { manager, index } = buildHistoryHarness({
+      files: {
+        "chats/agent__a.md": {
+          epoch: 1_000,
+          topic: "Saved chat",
+          backendId: "opencode",
+          sessionId: "s1",
+          lastAccessedAt: 2_000,
+        },
+      },
+    });
+    await index.recordSession({
+      backendId: "opencode",
+      sessionId: "s1",
+      title: "Saved chat",
+      createdAtMs: 1_000,
+      lastAccessedAtMs: 5_000,
+    });
+    await index.recordSession({
+      backendId: "opencode",
+      sessionId: "s2",
+      title: "Native only chat",
+      createdAtMs: 3_000,
+      lastAccessedAtMs: 4_000,
+    });
+
+    const items = await manager.getChatHistoryItems();
+    expect(items).toHaveLength(2);
+    const markdown = items.find((i) => i.id === "chats/agent__a.md");
+    expect(markdown).toBeDefined();
+    // De-dup lifted the markdown item's recency to the fresher native side.
+    expect(markdown?.lastAccessedAt.getTime()).toBe(5_000);
+    const native = items.find((i) => i.id !== "chats/agent__a.md");
+    expect(native?.id).toBe(buildNativeChatId("opencode", "s2"));
+    expect(native?.title).toBe("Native only chat");
+    expect(native?.backendId).toBe("opencode");
+  });
+
+  it("de-duplicates hidden-folder chats via the adapter frontmatter fallback", async () => {
+    // Hidden save folders (e.g. under the config dir) are never indexed by
+    // the metadata cache; the session ref must come from an adapter read or
+    // the markdown row can't merge with its native twin.
+    const { manager, index } = buildHistoryHarness({
+      hiddenFiles: {
+        ".copilot/chats/agent__hidden.md":
+          '---\nepoch: 1000\nmode: agent\nbackendId: opencode\nsessionId: "s1"\n---\n\n**user**: hi',
+      },
+    });
+    await index.recordSession({
+      backendId: "opencode",
+      sessionId: "s1",
+      title: "Hidden twin",
+      createdAtMs: 1_000,
+      lastAccessedAtMs: 2_000,
+    });
+    const items = await manager.getChatHistoryItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.id).toBe(".copilot/chats/agent__hidden.md");
+  });
+
+  it("lists native sessions when no markdown notes exist (autosave off)", async () => {
+    const { manager, index } = buildHistoryHarness();
+    await index.recordSession({
+      backendId: "codex",
+      sessionId: "s9",
+      title: "Codex chat",
+      createdAtMs: 1_000,
+      lastAccessedAtMs: 2_000,
+    });
+    const items = await manager.getChatHistoryItems();
+    expect(items).toHaveLength(1);
+    expect(items[0]?.id).toBe(buildNativeChatId("codex", "s9"));
+  });
+
+  it("deleting a native entry tombstones it without touching persistence", async () => {
+    const { manager, index, persistence } = buildHistoryHarness();
+    await index.recordSession({
+      backendId: "opencode",
+      sessionId: "s1",
+      title: "Doomed",
+      createdAtMs: 1_000,
+      lastAccessedAtMs: 2_000,
+    });
+    await manager.deleteChatHistory(buildNativeChatId("opencode", "s1"));
+    expect(await manager.getChatHistoryItems()).toHaveLength(0);
+    expect(await index.isTombstoned("opencode", "s1")).toBe(true);
+    expect(persistence.deleteFile).not.toHaveBeenCalled();
+  });
+
+  it("deleting a markdown chat also tombstones its native twin", async () => {
+    const { manager, index, persistence } = buildHistoryHarness({
+      files: {
+        "chats/agent__a.md": {
+          epoch: 1_000,
+          backendId: "opencode",
+          sessionId: "s1",
+        },
+      },
+    });
+    await index.recordSession({
+      backendId: "opencode",
+      sessionId: "s1",
+      title: "Twin",
+      createdAtMs: 1_000,
+      lastAccessedAtMs: 2_000,
+    });
+    await manager.deleteChatHistory("chats/agent__a.md");
+    expect(persistence.deleteFile).toHaveBeenCalledWith("chats/agent__a.md");
+    expect(await index.isTombstoned("opencode", "s1")).toBe(true);
+  });
+
+  it("renaming a native entry updates the index title", async () => {
+    const { manager, index } = buildHistoryHarness();
+    await index.recordSession({
+      backendId: "opencode",
+      sessionId: "s1",
+      title: "Old title",
+      createdAtMs: 1_000,
+      lastAccessedAtMs: 2_000,
+    });
+    await manager.updateChatTitle(buildNativeChatId("opencode", "s1"), "New title");
+    expect((await index.getEntry("opencode", "s1"))?.title).toBe("New title");
+  });
+
+  it("native rename matches the live session by backend, not session id alone", async () => {
+    const { manager, index } = buildHistoryHarness();
+    const live = await manager.createSession("opencode");
+    const liveId = live.getBackendSessionId()!;
+    await index.recordSession({
+      backendId: "codex",
+      sessionId: liveId,
+      title: "Codex entry",
+      createdAtMs: 1_000,
+      lastAccessedAtMs: 2_000,
+    });
+
+    // Renaming the codex native entry whose id collides with the live
+    // opencode session must NOT relabel the opencode tab.
+    await manager.updateChatTitle(buildNativeChatId("codex", liveId), "Codex renamed");
+    expect((await index.getEntry("codex", liveId))?.title).toBe("Codex renamed");
+    expect(live.setLabel).not.toHaveBeenCalled();
+  });
+
+  it("matches live sessions by the (backendId, sessionId) pair, not session id alone", async () => {
+    const { manager } = buildHistoryHarness();
+    const session = await manager.createSession("opencode");
+    const liveId = session.getBackendSessionId()!;
+
+    // Same backend + session id: focuses the existing tab.
+    await expect(manager.loadNativeSessionFromHistory("opencode", liveId)).resolves.toBe(session);
+
+    // Same session id on a DIFFERENT backend must not focus the opencode
+    // tab — it falls through to the resume path (which here fails on the
+    // unknown backend rather than silently hijacking the wrong session).
+    await expect(manager.loadNativeSessionFromHistory("codex", liveId)).rejects.toThrow();
+    expect(manager.getActiveSession()).toBe(session);
+  });
+
+  it("sweeps the preloader's warm probe procs before any chat starts a backend", async () => {
+    const warmListSessions = jest.fn(async () => ({
+      sessions: [
+        {
+          sessionId: "pre-existing",
+          cwd: "/vault",
+          title: "Chat from before this app session",
+          updatedAt: new Date(6_000).toISOString(),
+        },
+      ],
+    }));
+    const { manager } = buildHistoryHarness({ warmListSessions });
+    // No createSession call: the manager owns no backend, only the warm
+    // probe exists — the first Agent Home open must still surface history.
+    const items = await manager.getChatHistoryItems();
+    expect(warmListSessions).toHaveBeenCalledWith({ cwd: "/vault" });
+    expect(items).toHaveLength(1);
+    expect(items[0]?.id).toBe(buildNativeChatId("opencode", "pre-existing"));
+  });
+
+  it("sweeps running backends' listSessions into history, scoped to the vault cwd", async () => {
+    const listSessions = jest.fn(async () => ({
+      sessions: [
+        {
+          sessionId: "in-vault",
+          cwd: "/vault",
+          title: "Real chat",
+          updatedAt: new Date(7_000).toISOString(),
+        },
+        { sessionId: "other-vault", cwd: "/elsewhere", title: "Foreign chat", updatedAt: null },
+        { sessionId: "untitled", cwd: "/vault", title: null, updatedAt: null },
+        { sessionId: "placeholder", cwd: "/vault", title: "New session - 1", updatedAt: null },
+        { sessionId: "probe-1", cwd: "/vault", title: "Probe", updatedAt: null },
+      ],
+    }));
+    const { manager } = buildHistoryHarness({ listSessions, probeSessionId: "probe-1" });
+    // Spawning a session is what registers (and starts) the backend; the
+    // sweep only ever queries already-running backends.
+    await manager.createSession("opencode");
+
+    const items = await manager.getChatHistoryItems();
+    expect(listSessions).toHaveBeenCalledWith({ cwd: "/vault" });
+    const native = items.filter((i) => i.id.startsWith("copilot-agent-session://"));
+    expect(native).toHaveLength(1);
+    expect(native[0]?.id).toBe(buildNativeChatId("opencode", "in-vault"));
+    expect(native[0]?.title).toBe("Real chat");
+    expect(native[0]?.lastAccessedAt.getTime()).toBe(7_000);
+  });
+});

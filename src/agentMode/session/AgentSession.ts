@@ -2,6 +2,7 @@ import { AI_SENDER, USER_SENDER, WEB_SELECTED_TEXT_TAG } from "@/constants";
 import { logInfo, logWarn } from "@/logger";
 import { AgentMessageStore } from "@/agentMode/session/AgentMessageStore";
 import {
+  AgentChatMessage,
   AgentMessagePart,
   AgentQuestionAnswers,
   AgentToolCallOutput,
@@ -44,8 +45,10 @@ import { escapeXml } from "@/LLMProviders/chainRunner/utils/xmlParsing";
  * Prefix opencode uses for placeholder titles before its title-summarizer
  * agent runs. Treating these as "no title" prevents the tab from briefly
  * showing "New session - 2026-…" before the LLM-generated label arrives.
+ * Exported so the manager's `listSessions` history sweep applies the same
+ * "placeholder is not a real title" rule.
  */
-const DEFAULT_TITLE_PREFIX = "New session";
+export const DEFAULT_TITLE_PREFIX = "New session";
 /**
  * Memory backstop for tool output kept in long-lived React state — NOT a
  * display cap. At ~256KB it sits far above any realistic command/search/file
@@ -625,12 +628,35 @@ export class AgentSession {
   }
 
   /**
+   * Replace the display transcript from persisted history (a markdown note or
+   * a backend's on-disk session store) and notify subscribers so an already-
+   * open chat view re-renders immediately. `store.loadMessages` alone mutates
+   * state without firing `onMessagesChanged`, so a freshly-activated tab would
+   * otherwise render blank until the next backend-identity change (e.g. the
+   * user switching tabs and back).
+   */
+  loadDisplayMessages(messages: AgentChatMessage[]): void {
+    this.store.loadMessages(messages);
+    this.notifyMessages();
+  }
+
+  /**
    * User-supplied label for this session (shown in the tab strip). `null`
    * means "no label" — the UI falls back to a positional default like
    * "Session N".
    */
   getLabel(): string | null {
     return this.label;
+  }
+
+  /**
+   * Who set the current label: `"user"` (Rename), `"agent"`
+   * (`session_info_update` / title poll), or `null` when unlabeled. The
+   * session index records this so a user rename survives native
+   * `listSessions` sweeps the same way it survives agent retitles here.
+   */
+  getLabelSource(): "user" | "agent" | null {
+    return this.labelSource;
   }
 
   setLabel(label: string | null): void {
@@ -646,6 +672,18 @@ export class AgentSession {
    * No-op when the user has already renamed this session — Rename wins so
    * later agent-side title revisions don't blow away the user's choice.
    */
+  /**
+   * Apply a label restored from persisted history with its original source.
+   * A user-renamed title is reapplied as a sticky user rename; an agent or
+   * derived title is applied agent-sourced, so a resumed opencode/codex
+   * session can still refresh its title from later `session_info_update` /
+   * title-poll updates instead of being frozen as if the user had renamed it.
+   */
+  restoreLabel(label: string, source: "user" | "agent"): void {
+    if (source === "user") this.setLabel(label);
+    else this.applyAgentLabel(label);
+  }
+
   private applyAgentLabel(label: string | null | undefined): void {
     if (this.labelSource === "user") return;
     const next = label?.trim() ? label.trim() : null;
