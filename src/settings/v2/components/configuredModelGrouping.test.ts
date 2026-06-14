@@ -224,6 +224,28 @@ describe("toRow", () => {
     expect(row.label).toBe("Default (recommended)");
     expect(row.description).toBe("Opus 4.7 with 1M context · Most capable for complex work");
   });
+
+  it("flags opencode Zen models (opencode/ wire id) as free, others not", () => {
+    const provider = agentProvider("oc", "opencode", "opencode");
+    const zen = toRow({
+      configuredModel: model("z", "oc", "opencode/big-pickle"),
+      provider,
+      enabled: false,
+    });
+    const lms = toRow({
+      configuredModel: model("l", "oc", "lmstudio/gpt-oss-20b"),
+      provider,
+      enabled: false,
+    });
+    const byok = toRow({
+      configuredModel: model("b", "p", "claude-sonnet-4-5"),
+      provider: byokProvider("p", "Anthropic"),
+      enabled: false,
+    });
+    expect(zen.isFree).toBe(true);
+    expect(lms.isFree).toBe(false);
+    expect(byok.isFree).toBe(false);
+  });
 });
 
 describe("rowMatches", () => {

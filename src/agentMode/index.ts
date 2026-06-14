@@ -47,7 +47,10 @@ export type { AgentBrand, BackendDescriptor, BackendId, InstallState } from "./s
 export { computeDefaultEnabledIds } from "./session/agentDefaultEnable";
 export type { EnrolledModelRef } from "./session/agentDefaultEnable";
 export { partitionOpencodeOnlyWireIds } from "./backends/opencode/opencodeProbePartition";
-export { mapProviderToOpencodeId } from "./backends/opencode/opencodeModelResolve";
+export {
+  mapProviderToOpencodeId,
+  isOpencodeZenWireId,
+} from "./backends/opencode/opencodeModelResolve";
 export type { OpencodeProviderMapping } from "./backends/opencode/opencodeModelResolve";
 export { installBadge, InstallBadge, InstallStatusLine } from "./backends/shared/installStatus";
 export type {

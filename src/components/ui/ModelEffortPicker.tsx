@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { ChevronDown } from "lucide-react";
 import * as SliderPrimitive from "@radix-ui/react-slider";
 import { Button } from "@/components/ui/button";
+import { FreeModelWarningIcon } from "@/components/ui/FreeModelWarningIcon";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ModelDisplay } from "@/components/ui/model-display";
 import { type ModelSelectorEntry } from "@/components/ui/ModelSelector";
@@ -272,7 +273,10 @@ export function ModelEffortPicker({ override, className }: ModelEffortPickerProp
                       {isActive ? "✓" : isHighlight ? "›" : ""}
                     </span>
                     <div className="tw-min-w-0">
-                      <ModelDisplay model={entry} iconSize={12} />
+                      <div className="tw-flex tw-min-w-0 tw-items-center tw-gap-1">
+                        <ModelDisplay model={entry} iconSize={12} />
+                        {entry._isFree && <FreeModelWarningIcon />}
+                      </div>
                       {entry._subtitle && (
                         <div className="tw-truncate tw-text-xs tw-text-muted">
                           {entry._subtitle}

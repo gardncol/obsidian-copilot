@@ -1,5 +1,6 @@
 import { Badge } from "@/components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { FreeModelWarningIcon } from "@/components/ui/FreeModelWarningIcon";
 import { SearchBar } from "@/components/ui/SearchBar";
 import { SettingSwitch } from "@/components/ui/setting-switch";
 import { cn } from "@/lib/utils";
@@ -18,6 +19,13 @@ export interface ModelEnableRow {
   wireId?: string;
   /** Whether the model is currently enabled. */
   enabled: boolean;
+  /**
+   * `true` for a free model (zero catalog cost) routed through a third party.
+   * Renders a privacy-warning icon + tooltip beside the label, since such
+   * providers may retain or train on prompts. Self-hosted / local models
+   * (Ollama, LM Studio) are excluded.
+   */
+  isFree?: boolean;
 }
 
 /** A provider-display-name-grouped section of model rows. */
@@ -89,7 +97,10 @@ export const ModelEnableList: React.FC<ModelEnableListProps> = ({
           )}
         >
           <div className="tw-min-w-0">
-            <div className="tw-truncate">{row.label}</div>
+            <div className="tw-flex tw-min-w-0 tw-items-center tw-gap-1">
+              <span className="tw-truncate">{row.label}</span>
+              {row.isFree && <FreeModelWarningIcon />}
+            </div>
             {row.description && (
               <div className="tw-truncate tw-text-xs tw-text-muted">{row.description}</div>
             )}

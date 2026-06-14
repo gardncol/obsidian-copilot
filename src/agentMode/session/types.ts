@@ -132,6 +132,12 @@ export interface EnabledModelEntry {
   name: string;
   description?: string;
   credentialState: EnabledModelCredentialState;
+  /**
+   * `true` for an opencode Zen model (opencode's self-hosted free tier). The
+   * opencode backend computes this; the UI just renders a privacy warning, so
+   * it never needs to know what "Zen" means (`ui` can't import the backend).
+   */
+  isFree?: boolean;
 }
 
 /**

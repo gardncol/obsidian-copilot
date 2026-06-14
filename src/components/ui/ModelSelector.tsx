@@ -45,6 +45,12 @@ export type ModelSelectorEntry = CustomModel & {
    * ignores it and stays single-line.
    */
   _subtitle?: string;
+  /**
+   * `true` for an opencode Zen model (opencode's self-hosted free tier). The
+   * dropdown row renders a privacy-warning icon + tooltip beside the name,
+   * since prompts go to a third party that may retain or train on them.
+   */
+  _isFree?: boolean;
 };
 
 interface ModelSelectorProps {

@@ -425,6 +425,35 @@ describe("appendBackendSection — getEnabledModelEntries path", () => {
     expect(byId["openrouter/c"].displayName).toBe("Reported C");
   });
 
+  it("carries the backend's free flag onto the picker entry", () => {
+    const enabled: EnabledModelEntry[] = [
+      {
+        baseModelId: "opencode/big-pickle",
+        name: "Big Pickle",
+        credentialState: "ok",
+        isFree: true,
+      },
+      {
+        baseModelId: "lmstudio/gpt-oss-20b",
+        name: "GPT OSS 20B",
+        credentialState: "ok",
+        isFree: false,
+      },
+    ];
+    const entries: ModelSelectorEntry[] = [];
+    appendBackendSection(entries, opencodeWithEntries(enabled), {
+      backendModels: [
+        makeModelEntry("opencode/big-pickle", "Big Pickle"),
+        makeModelEntry("lmstudio/gpt-oss-20b", "GPT OSS 20B"),
+      ],
+      keepBaseModelId: null,
+      settings: emptySettings,
+    });
+    const byId = Object.fromEntries(entries.map((e) => [e.name, e]));
+    expect(byId["opencode/big-pickle"]._isFree).toBe(true);
+    expect(byId["lmstudio/gpt-oss-20b"]._isFree).toBe(false);
+  });
+
   it("flags a stale, unreported agent-native model as 'not offered by agent'", () => {
     // claude/codex entries are always credentialState "ok"; an enabled id the
     // agent no longer reports renders flagged rather than silently hidden.
