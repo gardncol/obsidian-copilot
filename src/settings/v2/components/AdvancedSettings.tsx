@@ -1,3 +1,4 @@
+import { CHAT_AGENT_VIEWTYPE } from "@/constants";
 import { Button } from "@/components/ui/button";
 import { SettingItem } from "@/components/ui/setting-item";
 import { ObsidianNativeSelect } from "@/components/ui/obsidian-native-select";
@@ -138,6 +139,54 @@ export const AdvancedSettings: React.FC = () => {
     const modal = new SystemPromptAddModal(app, prompts);
     modal.open();
   };
+
+  const handleReportIssue = useCallback(() => {
+    // Gate before importing the agentMode barrel: on mobile the barrel pulls in
+    // Node-only modules that throw during evaluation, so the desktop check must
+    // happen first (mirrors the frame-log buttons below).
+    if (!isDesktopRuntime()) {
+      new Notice("Reporting an issue is available on desktop only.");
+      return;
+    }
+    void (async () => {
+      const { ReportIssueModal } = await import("@/agentMode");
+      const copilotPlugin = (
+        app as unknown as {
+          plugins: {
+            getPlugin: (id: string) => {
+              manifest?: { version?: string };
+              agentSessionManager?: { getActiveSession?: () => { backendId?: string } | null };
+            } | null;
+          };
+        }
+      ).plugins.getPlugin("copilot");
+      // Prefer the active session's backend: switching Agent Mode tabs changes
+      // the active session without touching the persisted default backend, so
+      // settings.agentMode.activeBackend can name the wrong pane.
+      const activeBackend =
+        copilotPlugin?.agentSessionManager?.getActiveSession?.()?.backendId ??
+        settings.agentMode.activeBackend;
+      new ReportIssueModal({
+        app,
+        activeBackend,
+        pluginVersion: copilotPlugin?.manifest?.version ?? "unknown",
+        // Resolve at capture time so we can close this Settings window and
+        // reveal the agent pane first — the screenshot should be the chat
+        // surface, not the settings dialog. Null when no agent pane is open.
+        resolveCaptureTarget: () => {
+          (app as unknown as { setting: { close: () => void } }).setting.close();
+          const leaf = app.workspace.getLeavesOfType(CHAT_AGENT_VIEWTYPE)[0];
+          if (!leaf) return null;
+          app.workspace.revealLeaf(leaf);
+          const view = leaf.view as unknown as {
+            contentEl?: HTMLElement;
+            containerEl?: HTMLElement;
+          };
+          return view.contentEl ?? view.containerEl ?? null;
+        },
+      }).open();
+    })();
+  }, [app, settings.agentMode.activeBackend]);
 
   const handleForgetAllSecrets = useCallback(async () => {
     if (forgetting) return;
@@ -445,7 +494,7 @@ export const AdvancedSettings: React.FC = () => {
         <SettingItem
           type="switch"
           title="Debug Mode"
-          description="Debug mode will log some debug message to the console."
+          description="Logs Copilot chat activity to the developer console (View → Toggle Developer Tools). For troubleshooting the regular chat — Agent Mode has its own log below."
           checked={settings.debug}
           onCheckedChange={(checked) => updateSetting("debug", checked)}
         />
@@ -453,7 +502,7 @@ export const AdvancedSettings: React.FC = () => {
         <SettingItem
           type="custom"
           title="Create Log File"
-          description={`Open the Copilot log file (${logFileManager.getLogPath()}) for easy sharing when reporting issues.`}
+          description={`Save and open the regular Copilot chat log (${logFileManager.getLogPath()}) to share when reporting a chat issue. Agent Mode issues are handled by the "Report an Issue" button in the agent pane instead.`}
         >
           <Button
             variant="secondary"
@@ -469,11 +518,30 @@ export const AdvancedSettings: React.FC = () => {
             Create Log File
           </Button>
         </SettingItem>
+      </section>
+
+      {/* Agent Mode debugging Section */}
+      <section className="tw-space-y-4 tw-rounded-lg tw-border tw-p-4">
+        <div className="tw-text-xl tw-font-bold">Agent Mode debugging</div>
+        <div className="tw-text-sm tw-text-muted">
+          Tools for diagnosing Agent Mode problems, separate from the regular Copilot chat logs
+          above.
+        </div>
+
+        <SettingItem
+          type="custom"
+          title="Report an Issue"
+          description="Bundles a screenshot of the Agent Mode chat pane and a recent activity log into a folder, then opens a prefilled GitHub issue for you to attach them to."
+        >
+          <Button variant="secondary" size="sm" onClick={handleReportIssue}>
+            Report an Issue
+          </Button>
+        </SettingItem>
 
         <SettingItem
           type="switch"
-          title="Log Full Agent Mode Frames"
-          description={`Writes diagnostic Agent Mode frames as NDJSON outside your vault at ${frameLogPath}. Frames include prompts, tool inputs/outputs, and attachments; oversized frames are summarized to avoid runaway logs. Sensitive content lands on disk in plaintext. Leave off unless actively debugging.`}
+          title="Keep an Agent Mode activity log"
+          description="Records the behind-the-scenes messages between Copilot and the agent so the Report an Issue button always has recent activity to attach. Stored on this device only, outside your vault, and can include your prompts and note contents in plain text. On by default; turn off to stop logging."
           checked={settings.agentMode.debugFullFrames}
           onCheckedChange={(checked) => {
             setSettings((cur) => ({
@@ -484,8 +552,8 @@ export const AdvancedSettings: React.FC = () => {
 
         <SettingItem
           type="custom"
-          title="Agent Mode Frame Log"
-          description={`Open or clear the Agent Mode frame log (${frameLogPath}).`}
+          title="Agent Mode activity log file"
+          description={`Open or clear the log file on disk (${frameLogPath}).`}
         >
           <div className="tw-flex tw-gap-2">
             <Button
