@@ -147,8 +147,28 @@ describe("miyo-search builtin skill", () => {
     expect(MIYO_SEARCH_SKILL.enabledAgents).toEqual(["claude", "codex", "opencode"]);
   });
 
-  it("ships no helper script — the miyo CLI is the runnable", () => {
-    expect(MIYO_SEARCH_SKILL.files).toEqual([]);
+  const miyoScript = (ext: ".sh" | ".cmd"): string => {
+    const file = MIYO_SEARCH_SKILL.files.find((f) => f.path.endsWith(ext));
+    if (!file) throw new Error(`miyo-search ships no ${ext} script`);
+    return file.content;
+  };
+
+  it("ships exactly two OS wrappers — POSIX sh + Windows cmd, no Node", () => {
+    expect(MIYO_SEARCH_SKILL.files.map((f) => f.path)).toEqual([
+      "miyo-search.sh",
+      "miyo-search.cmd",
+    ]);
+    expect(MIYO_SEARCH_SKILL.skillMd).toContain(
+      `sh "/absolute/path/to/this/skill/directory/miyo-search.sh"`
+    );
+    // Windows is shown with the PowerShell call operator `&` (a bare quoted
+    // path is a string in PowerShell and wouldn't run).
+    expect(MIYO_SEARCH_SKILL.skillMd).toContain(
+      `& "/absolute/path/to/this/skill/directory/miyo-search.cmd"`
+    );
+    // No Node runtime anywhere — neither a .mjs file nor a node invocation.
+    expect(MIYO_SEARCH_SKILL.files.some((f) => f.path.endsWith(".mjs"))).toBe(false);
+    expect(MIYO_SEARCH_SKILL.skillMd).not.toContain("node ");
   });
 
   it("keeps the SKILL.md frontmatter version in sync with the numeric version", () => {
@@ -160,6 +180,8 @@ describe("miyo-search builtin skill", () => {
   it("embeds no Plus license env — Miyo is a local loopback CLI", () => {
     expect(MIYO_SEARCH_SKILL.skillMd).not.toContain(PLUS_ENV.licenseKey);
     expect(MIYO_SEARCH_SKILL.skillMd).not.toContain(PLUS_ENV.baseUrl);
+    expect(miyoScript(".sh")).not.toContain(PLUS_ENV.licenseKey);
+    expect(miyoScript(".cmd")).not.toContain(PLUS_ENV.licenseKey);
   });
 
   it("documents concrete triggers for when to call it", () => {
@@ -172,25 +194,25 @@ describe("miyo-search builtin skill", () => {
     expect(md).toMatch(/doesn't surface enough relevant notes/i);
   });
 
-  it("documents the search + files subcommands with --json output", () => {
-    const md = MIYO_SEARCH_SKILL.skillMd;
-    expect(md).toContain("miyo search");
-    expect(md).toContain("miyo files");
-    expect(md).toContain("--json");
+  it("runs one deterministic `miyo search ... --json` in each script", () => {
+    expect(miyoScript(".sh")).toContain('search "$QUERY"');
+    expect(miyoScript(".sh")).toContain("--json");
+    expect(miyoScript(".cmd")).toContain("search %* -n 10 --json");
   });
 
-  it("resolves the binary PATH-first with a per-OS absolute fallback", () => {
-    const md = MIYO_SEARCH_SKILL.skillMd;
-    // macOS / Linux symlink install location.
-    expect(md).toContain("~/.miyo/bin/miyo");
-    // Windows copied install location.
-    expect(md).toContain("\\Miyo\\bin\\miyo\\miyo.exe");
+  it("resolves the binary absolute-path-first with a PATH fallback, per OS", () => {
+    // POSIX (.sh): absolute install path tried before falling back to PATH.
+    expect(miyoScript(".sh")).toContain("$HOME/.miyo/bin/miyo");
+    expect(miyoScript(".sh")).toContain("command -v miyo");
+    // Windows (.cmd): the %LOCALAPPDATA% install, then PATH.
+    expect(miyoScript(".cmd")).toContain("%LOCALAPPDATA%\\Miyo\\bin\\miyo\\miyo.exe");
+    expect(miyoScript(".cmd")).toContain("where miyo");
   });
 
-  it("guides the agent through not-installed and service-down degradation", () => {
-    const md = MIYO_SEARCH_SKILL.skillMd;
-    expect(md).toContain("not installed");
-    expect(md).toContain("Is the Miyo app running?");
+  it("degrades clearly when Miyo is not installed (both scripts)", () => {
+    expect(miyoScript(".sh")).toMatch(/not installed/i);
+    expect(miyoScript(".sh")).toMatch(/may not be running/i);
+    expect(miyoScript(".cmd")).toMatch(/not installed/i);
   });
 });
 
