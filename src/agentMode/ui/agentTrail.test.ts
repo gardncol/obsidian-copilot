@@ -1,6 +1,6 @@
 import {
+  agentResponseText,
   buildAgentTrail,
-  finalAnswerText,
   splitTrailingText,
   type RenderNode,
 } from "@/agentMode/ui/agentTrail";
@@ -346,8 +346,8 @@ describe("splitTrailingText", () => {
   });
 });
 
-describe("finalAnswerText", () => {
-  it("returns only the trailing run of text parts, ignoring the research half", () => {
+describe("agentResponseText", () => {
+  it("collects all text parts in stream order, even across interleaved research", () => {
     const parts: AgentMessagePart[] = [
       thought("let me search the vault"),
       tool("a", { vendorToolName: "Grep" }),
@@ -355,21 +355,38 @@ describe("finalAnswerText", () => {
       tool("b", { vendorToolName: "Read" }),
       text("This is the final answer."),
     ];
-    expect(finalAnswerText(parts)).toBe("This is the final answer.");
+    expect(agentResponseText(parts)).toBe(
+      "Here is an early note that should NOT be copied.\n\nThis is the final answer."
+    );
   });
 
-  it("sanitizes the trailing text the same way legacy chat copy does", () => {
+  it("joins text parts split by a thought", () => {
+    const parts: AgentMessagePart[] = [text("A"), thought("Thought for < 1s"), text("B")];
+    expect(agentResponseText(parts)).toBe("A\n\nB");
+  });
+
+  it("joins text parts split by a tool call", () => {
+    const parts: AgentMessagePart[] = [text("A"), tool("x"), text("B")];
+    expect(agentResponseText(parts)).toBe("A\n\nB");
+  });
+
+  it("drops a whitespace-only text part without leaving a stray blank line", () => {
+    const parts: AgentMessagePart[] = [text("A"), text("   "), text("B")];
+    expect(agentResponseText(parts)).toBe("A\n\nB");
+  });
+
+  it("sanitizes the text the same way legacy chat copy does", () => {
     const parts: AgentMessagePart[] = [
       tool("a"),
       text("<think>internal</think>The answer.\n\n\n\nMore.   "),
     ];
     // removeThinkTags strips the think block, 3+ newlines collapse to 2, and
     // trailing whitespace is trimmed — matching `cleanMessageForCopy`.
-    expect(finalAnswerText(parts)).toBe("The answer.\n\nMore.");
+    expect(agentResponseText(parts)).toBe("The answer.\n\nMore.");
   });
 
-  it("returns an empty string when the turn produced no trailing prose", () => {
-    expect(finalAnswerText([thought("..."), tool("a")])).toBe("");
-    expect(finalAnswerText([])).toBe("");
+  it("returns an empty string when the turn produced no prose", () => {
+    expect(agentResponseText([thought("..."), tool("a")])).toBe("");
+    expect(agentResponseText([])).toBe("");
   });
 });
