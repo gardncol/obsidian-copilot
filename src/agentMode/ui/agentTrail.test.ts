@@ -351,12 +351,14 @@ describe("agentResponseText", () => {
     const parts: AgentMessagePart[] = [
       thought("let me search the vault"),
       tool("a", { vendorToolName: "Grep" }),
-      text("Here is an early note that should NOT be copied."),
+      text("Early prose emitted before the research finished."),
       tool("b", { vendorToolName: "Read" }),
-      text("This is the final answer."),
+      text("The wrap-up after the research."),
     ];
+    // Both prose segments are captured — the earlier one is no longer dropped
+    // just because a tool_call follows it.
     expect(agentResponseText(parts)).toBe(
-      "Here is an early note that should NOT be copied.\n\nThis is the final answer."
+      "Early prose emitted before the research finished.\n\nThe wrap-up after the research."
     );
   });
 
