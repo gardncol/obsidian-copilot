@@ -20,7 +20,7 @@ import {
   Settings,
   SquarePen,
 } from "lucide-react";
-import { App, Notice, TFile, TFolder } from "obsidian";
+import { App, TFile, TFolder } from "obsidian";
 import React, { memo, useEffect, useState } from "react";
 
 /**
@@ -307,8 +307,13 @@ export const ProjectInfoPopover = memo(
             );
             onEdited?.(updated.project);
           } catch (e) {
+            // Reason: log for diagnostics, then rethrow so AddProjectModal keeps the
+            // form open and surfaces the failure (duplicate name / folder collision)
+            // instead of resolving onSave, closing, and discarding the user's edits.
+            // Mirrors the inline edit action in AgentProjectRowActions, which lets
+            // updateProject throw into the modal's own error handling.
             logError("[ProjectInfoPopover] updateProject failed", e);
-            new Notice(`Failed to update project "${project.name}".`);
+            throw e;
           }
         },
         project,

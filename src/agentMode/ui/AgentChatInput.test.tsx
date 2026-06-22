@@ -34,10 +34,7 @@ jest.mock("@/agentMode/ui/mentionedAgents", () => ({
 let capturedAgentBrands: ReadonlyArray<unknown> | undefined;
 jest.mock("@/components/chat-components/ChatInput", () => ({
   __esModule: true,
-  default: (props: {
-    agentBrands?: ReadonlyArray<unknown>;
-    handleSendMessage?: () => void;
-  }) => {
+  default: (props: { agentBrands?: ReadonlyArray<unknown>; handleSendMessage?: () => void }) => {
     capturedAgentBrands = props.agentBrands;
     return (
       <button type="button" onClick={() => props.handleSendMessage?.()}>
@@ -124,13 +121,19 @@ describe("AgentChatInput agent-mention gate", () => {
 
   it("passes the real installed-agent list when entitled", () => {
     mockUseCanUseMultiAgent.mockReturnValue(true);
-    renderInput({ sendMessage: jest.fn(), cancel: jest.fn() } as unknown as AgentChatBackend, makeDraft());
+    renderInput(
+      { sendMessage: jest.fn(), cancel: jest.fn() } as unknown as AgentChatBackend,
+      makeDraft()
+    );
     expect(capturedAgentBrands).toBe(FAKE_BRANDS);
   });
 
   it("passes the frozen empty list (not a fresh []) when not entitled", () => {
     mockUseCanUseMultiAgent.mockReturnValue(false);
-    renderInput({ sendMessage: jest.fn(), cancel: jest.fn() } as unknown as AgentChatBackend, makeDraft());
+    renderInput(
+      { sendMessage: jest.fn(), cancel: jest.fn() } as unknown as AgentChatBackend,
+      makeDraft()
+    );
     expect(capturedAgentBrands).toBe(EMPTY_AGENT_MENTION_BRANDS);
   });
 });
