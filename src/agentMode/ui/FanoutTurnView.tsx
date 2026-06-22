@@ -49,9 +49,12 @@ const FanoutTab: React.FC<FanoutTabProps> = ({ option, selected, onSelect }) => 
       onClick={handleClick}
       className={cn(
         "tw-flex tw-items-center tw-gap-1.5 tw-rounded-md tw-border tw-border-solid tw-border-transparent tw-px-2 tw-py-1 tw-text-sm tw-transition-colors",
+        // Active tab: accent border + faint accent tint + normal-weight text,
+        // matching AgentTabStrip's active-tab treatment. The accent border is the
+        // reliable highlight; a background-only swap reads as "no active tab".
         selected
-          ? "tw-bg-interactive-accent tw-text-on-accent"
-          : "tw-text-muted hover:tw-bg-interactive-hover"
+          ? "tw-border-interactive-accent tw-font-medium tw-text-normal tw-bg-interactive-accent/10"
+          : "tw-text-muted hover:tw-bg-interactive-hover hover:tw-text-normal"
       )}
     >
       {Icon ? <Icon className="tw-size-4 tw-shrink-0" /> : null}
@@ -77,7 +80,7 @@ const FanoutStatusDot: React.FC<FanoutStatusDotProps> = ({ state }) => {
   if (state === "error") {
     return <AlertTriangle className="tw-size-3 tw-shrink-0 tw-text-error" />;
   }
-  if (state === "cancelled") {
+  if (state === "cancelled" || state === "empty") {
     return <CircleSlash className="tw-size-3 tw-shrink-0 tw-text-muted" />;
   }
   return null;
@@ -182,6 +185,17 @@ const FanoutTurnBody: React.FC<FanoutTurnBodyProps> = ({ turn, value, app }) => 
           <FanoutStatusLine icon={<ThinkingSpinner />} text="Streaming…" shimmer />
         ) : null}
       </div>
+    );
+  }
+
+  // Finished with no text — terminal "did not answer", NOT a spinner (a `done`
+  // slot must never read as still thinking).
+  if (answer.status === "done") {
+    return (
+      <FanoutStatusLine
+        icon={<CircleSlash className="tw-size-4 tw-text-muted" />}
+        text="This agent did not answer."
+      />
     );
   }
 
