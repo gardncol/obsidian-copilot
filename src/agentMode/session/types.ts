@@ -1,5 +1,7 @@
 import type React from "react";
 import type { FormattedDateTime, MessageContext } from "@/types/message";
+// `import type` keeps the cycle with `fanoutTypes` compile-time only.
+import type { FanoutTurn } from "@/agentMode/session/fanout/fanoutTypes";
 
 export type {
   BackendAuth,
@@ -61,6 +63,12 @@ export interface ModeMapping {
   /** Required when `kind === "configOption"`. Ignored for `setMode`. */
   configId?: string;
   canonical: Partial<Record<CopilotMode, string>>;
+  /**
+   * Native mode id of the backend's genuine READ-ONLY sandbox (Codex
+   * `"read-only"`); unset when none exists. Distinct from `canonical.plan`, which
+   * may write plan artifacts (Claude). The fan-out orchestrator applies this.
+   */
+  readOnlyModeId?: string | null;
 }
 
 /** One option in the mode picker — a Copilot-canonical mode the backend supports. */
@@ -670,6 +678,13 @@ export interface BackendProcess {
   setAskUserQuestionPrompter?(
     fn: (req: AskUserQuestionPrompt) => Promise<AgentQuestionAnswers>
   ): void;
+  /**
+   * Optional: register a predicate telling the backend whether a session is an
+   * ephemeral read-only fan-out sub-session. Backends with their own permission
+   * gate (Claude SDK's `canUseTool`) use it to hard-deny write/exec for such
+   * sessions; ACP backends governed by the shared prompter omit it.
+   */
+  setReadOnlySessionPredicate?(fn: (sessionId: SessionId) => boolean): void;
   registerSessionHandler(sessionId: SessionId, handler: SessionUpdateHandler): () => void;
   newSession(params: OpenSessionInput): Promise<OpenSessionOutput>;
   prompt(params: PromptInput): Promise<PromptOutput>;
@@ -790,6 +805,13 @@ export interface AgentChatMessage {
    * turn ends.
    */
   turnDurationMs?: number;
+  /**
+   * Per-agent fan-out state when this assistant message is a multi-agent QA turn.
+   * LIVE in-memory only — persistence rides in the body as a composite
+   * (`serializeFanoutComposite`) and is reconstructed here on load
+   * (`parseFanoutComposite`). When present, the UI renders the tab row.
+   */
+  fanout?: FanoutTurn;
 }
 
 /** Creation shape — id is assigned by the store if absent. */

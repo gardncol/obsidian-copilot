@@ -6,6 +6,7 @@ import {
   ChatModels,
   EmbeddingModelProviders,
   EmbeddingModels,
+  PLUS_UTM_MEDIUMS,
   PlusUtmMedium,
 } from "@/constants";
 import { BrevilabsClient } from "@/LLMProviders/brevilabsClient";
@@ -129,6 +130,61 @@ export function useIsPlusUser(): boolean | undefined {
     }
   }
   return settings.isPlusUser;
+}
+
+/**
+ * Synchronous entitlement check for the multi-agent fan-out feature. Reuses the
+ * Plus entitlement (any paid plan) rather than a parallel notion of "paid".
+ */
+export function canUseMultiAgent(): boolean {
+  return isPlusEnabled();
+}
+
+/**
+ * Authoritative send-boundary entitlement check for the fan-out feature — the
+ * single source of truth the non-React session calls before dispatching, so a UI
+ * bypass can't evade the paywall.
+ *
+ * Fast path: a paying user (cached `isPlusEnabled()`) is allowed with no network
+ * call. Slow path: re-verify against `/license` so a stale-false cache still gets
+ * through; anything not confirmed valid is a HARD block (no single-agent fallback).
+ */
+export async function ensureMultiAgentEntitlement(
+  app?: App,
+  context?: Record<string, unknown>
+): Promise<boolean> {
+  if (isPlusEnabled()) {
+    return true;
+  }
+  // Re-verify so a stale-false cache for a real paid user still gets through;
+  // `validateLicenseKey` flips the cached flag itself.
+  const result = await BrevilabsClient.getInstance().validateLicenseKey(app, {
+    feature: "multi_agent_per_turn",
+    ...context,
+  });
+  return result.isValid === true;
+}
+
+/**
+ * Surface the multi-agent-is-Plus upgrade prompt, reusing the shared Plus CTA
+ * (`navigateToPlusPage`) so callers and tests share one copy + action.
+ */
+export function showMultiAgentUpgradePrompt(): void {
+  new Notice(
+    "Multi-agent QA (@-mentioning more than one agent in a turn) is a Copilot Plus feature. Opening the upgrade page…",
+    8000
+  );
+  navigateToPlusPage(PLUS_UTM_MEDIUMS.MULTI_AGENT);
+}
+
+/**
+ * Reactive form of {@link canUseMultiAgent} for React render gates; subscribes to
+ * settings so the gate flips live. Mirrors `useIsPlusUser` (not `isPlusEnabled`),
+ * so it can differ from the sync form for a self-host user with the toggle on but
+ * no license receipt yet. `undefined` (still resolving) reads as not entitled.
+ */
+export function useCanUseMultiAgent(): boolean {
+  return useIsPlusUser() === true;
 }
 
 /**

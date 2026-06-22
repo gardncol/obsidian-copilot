@@ -1,5 +1,6 @@
 import { AgentTrail } from "@/agentMode/ui/AgentTrailView";
 import { AskUserQuestionCard } from "@/agentMode/ui/AskUserQuestionCard";
+import { FanoutMessageCard } from "@/agentMode/ui/FanoutMessageCard";
 import { PlanProposalCard } from "@/agentMode/ui/PlanProposalCard";
 import { ToolPermissionCard } from "@/agentMode/ui/ToolPermissionCard";
 import { BottomLoadingIndicator } from "@/components/chat-components/BottomLoadingIndicator";
@@ -47,6 +48,14 @@ function toChatMessageView(m: AgentChatMessage): ChatMessage {
   };
 }
 
+/** The last non-user (assistant) message, or `undefined` if none. */
+function lastAssistant(visible: AgentChatMessage[]): AgentChatMessage | undefined {
+  for (let i = visible.length - 1; i >= 0; i--) {
+    if (visible[i].sender !== USER_SENDER) return visible[i];
+  }
+  return undefined;
+}
+
 const AgentChatMessages = memo(
   ({
     messages,
@@ -92,13 +101,7 @@ const AgentChatMessages = memo(
     // in-place `isStreamingPlaceholder` spinner covers that).
     const { streamingMessageId, showBottomLoader } = useMemo(() => {
       if (!isLoading) return { streamingMessageId: undefined, showBottomLoader: false };
-      let streaming: AgentChatMessage | undefined;
-      for (let i = visible.length - 1; i >= 0; i--) {
-        if (visible[i].sender !== USER_SENDER) {
-          streaming = visible[i];
-          break;
-        }
-      }
+      const streaming = lastAssistant(visible);
       if (!streaming) return { streamingMessageId: undefined, showBottomLoader: false };
       const parts = streaming.parts ?? [];
       const last = parts[parts.length - 1];
@@ -146,6 +149,12 @@ const AgentChatMessages = memo(
             // they hit send rather than an empty assistant bubble.
             const isStreamingPlaceholder =
               isAssistant && message.id === streamingMessageId && !hasParts && !message.message;
+            // A multi-agent turn owns this message's body — the segmented tab
+            // row replaces the plain assistant text and the streaming spinner
+            // (its per-agent slots show their own live states). `message.fanout`
+            // is present for BOTH the live in-flight turn and a reloaded
+            // transcript whose composite body was parsed back into a turn.
+            const fanoutTurn = isAssistant ? message.fanout : undefined;
 
             return (
               <div
@@ -156,7 +165,11 @@ const AgentChatMessages = memo(
                   minHeight: shouldApplyMinHeight ? `${containerMinHeight}px` : "auto",
                 }}
               >
-                {isStreamingPlaceholder ? (
+                {fanoutTurn ? (
+                  <div className="tw-px-3 tw-pt-2">
+                    <FanoutMessageCard message={message} turn={fanoutTurn} app={app} />
+                  </div>
+                ) : isStreamingPlaceholder ? (
                   <div className="tw-px-3 tw-pt-2">
                     <BottomLoadingIndicator />
                   </div>

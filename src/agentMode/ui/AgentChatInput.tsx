@@ -14,11 +14,21 @@ import {
 import { CustomCommandManager } from "@/commands/customCommandManager";
 import { getCachedCustomCommands } from "@/commands/state";
 import ChatInput, { type ChatInputProps } from "@/components/chat-components/ChatInput";
+import { EMPTY_AGENT_MENTION_BRANDS } from "@/components/chat-components/hooks/useAtMentionCategories";
 import { useActiveWebTabState } from "@/components/chat-components/hooks/useActiveWebTabState";
 import { Button } from "@/components/ui/button";
-import { ACTIVE_WEB_TAB_MARKER, EVENT_NAMES } from "@/constants";
+import { ACTIVE_WEB_TAB_MARKER, EVENT_NAMES, PLUS_UTM_MEDIUMS } from "@/constants";
+import { cn } from "@/lib/utils";
+import { navigateToPlusPage, useCanUseMultiAgent } from "@/plusUtils";
 import { EventTargetContext } from "@/context";
 import { logError, logWarn } from "@/logger";
+import {
+  isFanout,
+  listInstalledAgentBrands,
+  resolveAnswerers,
+} from "@/agentMode/ui/mentionedAgents";
+import type { BackendId } from "@/agentMode/session/types";
+import { useSettingsValue } from "@/settings/model";
 import { buildWebTabsWithActiveSnapshot } from "@/services/webViewerService/activeWebTabSnapshot";
 import {
   isNoteSelectedTextContext,
@@ -28,9 +38,9 @@ import {
 } from "@/types/message";
 import { arrayBufferToBase64 } from "@/utils/base64";
 import { mergeWebTabContexts } from "@/utils/urlNormalization";
-import { Clock, X } from "lucide-react";
+import { Clock, Sparkles, X } from "lucide-react";
 import { App, Notice, TFile } from "obsidian";
-import React, { memo, useCallback, useContext, useEffect, useRef } from "react";
+import React, { memo, useCallback, useContext, useEffect, useMemo, useRef } from "react";
 import { v4 as uuidv4 } from "uuid";
 
 interface AgentChatInputProps {
@@ -45,6 +55,11 @@ interface AgentChatInputProps {
    */
   draft: AgentInputDraftControls;
   app: App;
+  /**
+   * The session's main agent (the summarizer). Used by `isFanout` to collapse the
+   * degenerate `[main]` selection to the single-agent path. `null` before a session lands.
+   */
+  mainAgentId: BackendId | null;
   updateUserMessageHistory: (newMessage: string) => void;
   isStarting: boolean;
   hasPendingPlanPermission: boolean;
@@ -90,6 +105,11 @@ const combineQueuedMessages = (items: QueuedAgentMessage[]): QueuedAgentMessage 
   const allSelected = items.flatMap((i) => i.context?.selectedTextContexts ?? []);
   const allWebTabs = items.flatMap((i) => i.context?.webTabs ?? []);
   const allPromptContent = items.flatMap((i) => i.promptContent ?? []);
+  // Union the per-message answerer selections, preserving first-seen order.
+  const mergedAgents = dedupeBy(
+    items.flatMap((i) => i.mentionedAgents ?? []),
+    (id) => id
+  );
 
   return {
     id: `queued-combined-${uuidv4()}`,
@@ -101,6 +121,7 @@ const combineQueuedMessages = (items: QueuedAgentMessage[]): QueuedAgentMessage 
       mergeWebTabContexts(allWebTabs)
     ),
     promptContent: allPromptContent.length > 0 ? allPromptContent : undefined,
+    mentionedAgents: mergedAgents.length > 0 ? mergedAgents : undefined,
   };
 };
 
@@ -132,6 +153,7 @@ export const AgentChatInput = memo(function AgentChatInput({
   sessionId,
   draft,
   app,
+  mainAgentId,
   updateUserMessageHistory,
   isStarting,
   hasPendingPlanPermission,
@@ -140,6 +162,7 @@ export const AgentChatInput = memo(function AgentChatInput({
   onCycleMode,
 }: AgentChatInputProps) {
   const eventTarget = useContext(EventTargetContext);
+  const settings = useSettingsValue();
   const [selectedTextContexts] = useSelectedTextContexts();
   // SSoT for the Active Web Tab; `activeWebTabForMentions` matches the send
   // snapshot (preserved only when focusing the chat panel). Drives the
@@ -149,6 +172,28 @@ export const AgentChatInput = memo(function AgentChatInput({
 
   const isMountedRef = useRef(false);
   const previousSessionIdRef = useRef(sessionId);
+
+  // The `@agent` typeahead group + pills are paid-only. Reactive so a settings
+  // change flips the gate live; the authoritative send-time check is separate.
+  const canUseMultiAgent = useCanUseMultiAgent();
+
+  // Installed agents the user can `@`-mention, recomputed only on settings change.
+  const installedAgentBrands = useMemo(() => listInstalledAgentBrands(settings), [settings]);
+  // Entitlement-gated typeahead list: free users get the frozen empty list so the
+  // "Agents" group never renders. Both operands are stable refs (no memo needed).
+  const agentBrands = canUseMultiAgent ? installedAgentBrands : EMPTY_AGENT_MENTION_BRANDS;
+  // The send-time allowlist is the REAL installed set, INDEPENDENT of the gated
+  // typeahead list: a pasted pill (or a stale-false cache) must still resolve to a
+  // real answerer so the turn fans out and hits the authoritative entitlement check.
+  const installedAgentIds = useMemo(
+    () => new Set(installedAgentBrands.map((b) => b.id)),
+    [installedAgentBrands]
+  );
+  // Held in a ref (not state) so a mention edit never re-renders mid-stream; read at send time.
+  const mentionedAgentIdsRef = useRef<string[]>([]);
+  const handleMentionedAgentsChange = useCallback((backendIds: string[]) => {
+    mentionedAgentIdsRef.current = backendIds;
+  }, []);
 
   // Draft state is owned by AgentHome (so it can read `loading`/feed the drop
   // overlay); this composer is the controlled consumer.
@@ -178,13 +223,14 @@ export const AgentChatInput = memo(function AgentChatInput({
     };
   }, []);
 
-  // Selected-text contexts are a global ephemeral atom, not per-session draft.
-  // Clear them when switching sessions so a selection made in one session
-  // doesn't silently ride along into the next.
+  // Clear cross-session ephemeral state on a session switch: the global
+  // selected-text atom and the mentioned-agent ref (neither is reset by the
+  // editor remount), so a selection or `@agent` pill can't ride into the next session.
   useEffect(() => {
     if (previousSessionIdRef.current === sessionId) return;
     previousSessionIdRef.current = sessionId;
     clearSelectedTextContexts();
+    mentionedAgentIdsRef.current = [];
   }, [sessionId]);
 
   const handleStopGenerating = useCallback(async () => {
@@ -203,7 +249,12 @@ export const AgentChatInput = memo(function AgentChatInput({
     async (item: QueuedAgentMessage) => {
       setLoading(true);
       try {
-        const { turn } = backend.sendMessage(item.text, item.context, item.promptContent);
+        const { turn } = backend.sendMessage(
+          item.text,
+          item.context,
+          item.promptContent,
+          item.mentionedAgents
+        );
         if (item.rawInput) updateUserMessageHistory(item.rawInput);
         await turn;
       } catch (error) {
@@ -268,14 +319,28 @@ export const AgentChatInput = memo(function AgentChatInput({
         if (block) content.push(block);
       }
 
+      // Resolve the `@`-mentions into the ANSWERER set (installed, deduped). Only
+      // carried when it actually fans out; the single-agent path sends no
+      // `mentionedAgents` and stays byte-for-byte the existing behavior.
+      let mentionedAgents: ReadonlyArray<BackendId> | undefined;
+      if (mainAgentId) {
+        const answerers = resolveAnswerers({
+          mentionedAgentIds: mentionedAgentIdsRef.current,
+          installedAgentIds,
+        });
+        if (isFanout(answerers, mainAgentId)) mentionedAgents = answerers;
+      }
+
       const item: QueuedAgentMessage = {
         id: `queued-${uuidv4()}`,
         text: resolvedText,
         rawInput,
         context: buildMessageContext(notes, selectedTextContexts, resolvedWebTabs),
         promptContent: content.length > 0 ? content : undefined,
+        mentionedAgents,
       };
 
+      mentionedAgentIdsRef.current = [];
       resetCompose();
       // The message context was already snapshotted above from this render's
       // captured `selectedTextContexts`, so clearing the global atom here is safe
@@ -306,6 +371,8 @@ export const AgentChatInput = memo(function AgentChatInput({
       resetCompose,
       runSend,
       setQueuedMessages,
+      mainAgentId,
+      installedAgentIds,
     ]
   );
 
@@ -360,6 +427,7 @@ export const AgentChatInput = memo(function AgentChatInput({
       {queuedMessages.length > 0 && (
         <QueuedMessageList messages={queuedMessages} onRemove={handleRemoveQueuedMessage} />
       )}
+      {!canUseMultiAgent && <MultiAgentUpsellHint />}
       <div
         className={hasPendingPlanPermission ? "tw-pointer-events-none tw-opacity-50" : undefined}
         aria-disabled={hasPendingPlanPermission || undefined}
@@ -400,6 +468,8 @@ export const AgentChatInput = memo(function AgentChatInput({
           modePickerOverride={modePickerOverride ?? undefined}
           selectedTextContexts={selectedTextContexts}
           onRemoveSelectedText={removeSelectedTextContext}
+          agentBrands={agentBrands}
+          onMentionedAgentsChange={handleMentionedAgentsChange}
           showProgressCard={NOOP}
           showIndexingCard={NOOP}
         />
@@ -407,6 +477,26 @@ export const AgentChatInput = memo(function AgentChatInput({
     </>
   );
 });
+
+/** Upsell shown to free users where the `@`-mention affordance would otherwise be. */
+const MultiAgentUpsellHint: React.FC = () => {
+  return (
+    <div className="tw-flex tw-justify-end tw-px-2 tw-pb-1">
+      <Button
+        variant="ghost2"
+        size="fit"
+        className={cn(
+          "tw-flex tw-items-center tw-text-ui-smaller tw-text-muted",
+          "hover:tw-text-normal"
+        )}
+        onClick={() => navigateToPlusPage(PLUS_UTM_MEDIUMS.MULTI_AGENT)}
+      >
+        <Sparkles className="tw-size-3" />
+        Mention multiple agents with Copilot Plus
+      </Button>
+    </div>
+  );
+};
 
 interface QueuedMessageListProps {
   messages: QueuedAgentMessage[];

@@ -219,6 +219,15 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
   // surface flips from the centered landing to the conversation layout.
   const isGlobalLanding = !manager.getActiveSession()?.hasUserVisibleMessages();
 
+  // The session's main agent — the summarizer and the dedup anchor for
+  // `@`-mentions. The composer belongs to the ACTIVE session, so anchor to its
+  // backend whenever one exists; fall back to the starting backend only for the
+  // initial no-session startup. (Preferring the starting backend would mis-anchor
+  // mentions to a backend cold-starting in another tab — e.g. `@opencode` from a
+  // visible Claude chat would collapse to the degenerate single-agent path.)
+  const mainAgentId =
+    manager.getActiveSession()?.backendId ?? manager.getStartingBackendId() ?? null;
+
   // Rotating landing greeting: re-rolled per session id (so each fresh chat /
   // landing open gets a new line) but stable across the stream re-renders within
   // a session, so it doesn't flicker as tokens arrive. sessionId is the
@@ -380,6 +389,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                     sessionId={sessionId}
                     draft={draft}
                     app={app}
+                    mainAgentId={mainAgentId}
                     updateUserMessageHistory={updateUserMessageHistory}
                     isStarting={isStarting}
                     hasPendingPlanPermission={hasPendingPlanPermission}

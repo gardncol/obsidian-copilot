@@ -21,6 +21,12 @@ import {
 import { MethodUnsupportedError } from "./errors";
 import { resolveMcpServers } from "./mcpResolver";
 import { replayPersistedMode } from "./replayPersistedMode";
+import {
+  FanoutOrchestrator,
+  type FanoutHost,
+  type FanoutRunInput,
+} from "./fanout/FanoutOrchestrator";
+import type { FanoutTurn } from "./fanout/fanoutTypes";
 import type {
   AgentQuestionAnswers,
   AskUserQuestionPrompt,
@@ -30,6 +36,7 @@ import type {
   BackendState,
   CopilotMode,
   EffortOption,
+  McpServerSpec,
   ModeApplySpec,
   ModelSelection,
   PermissionDecision,
@@ -173,6 +180,11 @@ export class AgentSessionManager {
     }
   >();
 
+  // Session ids of ephemeral read-only fan-out sub-sessions; the shared permission
+  // prompter consults this to hard-deny write/exec tools for them.
+  private readonly readOnlyFanoutSessions = new Set<SessionId>();
+  private readonly fanoutOrchestrator: FanoutOrchestrator;
+
   private getSessionState(internalId: string) {
     let entry = this.sessionState.get(internalId);
     if (!entry) {
@@ -191,6 +203,43 @@ export class AgentSessionManager {
       throw new Error("AgentSessionManager is desktop only");
     }
     this.preloader = opts.modelPreloader;
+    this.fanoutOrchestrator = new FanoutOrchestrator(this.createFanoutHost());
+  }
+
+  /** Whether `backendSessionId` is an ephemeral read-only fan-out sub-session. */
+  isReadOnlyFanoutSession(backendSessionId: SessionId): boolean {
+    return this.readOnlyFanoutSessions.has(backendSessionId);
+  }
+
+  /** Run a multi-agent read-only QA turn. Called by `AgentSession.runTurn` when the turn fans out. */
+  runFanoutTurn(input: FanoutRunInput): Promise<FanoutTurn> {
+    return this.fanoutOrchestrator.run(input);
+  }
+
+  /** Narrow backend seam the {@link FanoutOrchestrator} drives. */
+  private createFanoutHost(): FanoutHost {
+    return {
+      ensureBackendForFanout: async (backendId) => {
+        const descriptor = this.resolveDescriptor(backendId);
+        const { proc } = await this.ensureBackend(backendId, descriptor);
+        return { proc, descriptor };
+      },
+      getDefaultSelection: (backendId) => this.getDefaultSelection(backendId),
+      getDisplayName: (backendId) => this.resolveDescriptor(backendId).displayName,
+      getCwd: () => {
+        const adapter = this.app.vault.adapter;
+        return adapter instanceof FileSystemAdapter ? adapter.getBasePath() : null;
+      },
+      getMcpServers: (proc): McpServerSpec[] =>
+        resolveMcpServers(proc, getSettings().agentMode?.mcpServers),
+      registerReadOnlySession: (sessionId) => {
+        this.readOnlyFanoutSessions.add(sessionId);
+        return () => this.readOnlyFanoutSessions.delete(sessionId);
+      },
+      excludeSubSessionFromHistory: (backendId, sessionId) => {
+        void this.opts.sessionIndex?.deleteSession(backendId, sessionId);
+      },
+    };
   }
 
   /**
@@ -405,6 +454,10 @@ export class AgentSessionManager {
     for (const s of sessions) {
       if (!isSameCwd(s.cwd, vaultBasePath)) continue;
       if (probeSessionId && s.sessionId === probeSessionId) continue;
+      // A live fan-out sub-session is ephemeral: skip it even before its
+      // async tombstone lands, so a sweep racing the in-flight turn can't
+      // surface it as a phantom chat.
+      if (this.readOnlyFanoutSessions.has(s.sessionId)) continue;
       const title = s.title?.trim();
       if (!title || title.startsWith(DEFAULT_TITLE_PREFIX)) continue;
       const updatedAtMs = s.updatedAt ? Date.parse(s.updatedAt) : NaN;
@@ -509,6 +562,9 @@ export class AgentSessionManager {
       defaultModelSelection: seedSelection,
       initialCachedState: warm?.state ?? this.preloader.getCachedBackendState(resolvedId),
       getDescriptor: () => this.opts.resolveDescriptor(resolvedId),
+      runFanoutTurn: (input) => this.runFanoutTurn(input),
+      getDisplayName: (backendId) => this.resolveDescriptor(backendId).displayName,
+      getApp: () => this.app,
     });
     if (warm) {
       logInfo(
@@ -1353,6 +1409,9 @@ export class AgentSessionManager {
       initialState: resumeResult.state,
       cwd: vaultBasePath,
       getDescriptor: () => this.opts.resolveDescriptor(backendId),
+      runFanoutTurn: (input) => this.runFanoutTurn(input),
+      getDisplayName: (id) => this.resolveDescriptor(id).displayName,
+      getApp: () => this.app,
     });
     this.sessions.set(session.internalId, session);
     this.chatUIStates.set(session.internalId, new AgentChatUIState(session));
@@ -1482,9 +1541,18 @@ export class AgentSessionManager {
     // the backend session id in the signature so the first save after the
     // session finishes starting (when sessionId flips from null → real)
     // always writes through, even if the message list hasn't changed yet.
+    // For an in-flight fan-out turn `message` stays empty until completion, so
+    // fold in a fingerprint of the live slots — otherwise mid-stream autosaves
+    // de-dupe to the first partial snapshot and a crash loses later progress.
+    const last = messages[messages.length - 1];
+    const fanoutSig = last?.fanout
+      ? Object.values(last.fanout.answers)
+          .map((a) => `${a.status}:${a.text.length}`)
+          .join(",") + `|${last.fanout.summary.status}:${last.fanout.summary.text.length}`
+      : "";
     const signature = `${label ?? ""}-${sessionId ?? ""}-${messages.length}-${
-      messages[messages.length - 1]?.message ?? ""
-    }`;
+      last?.message ?? ""
+    }-${fanoutSig}`;
     const state = this.getSessionState(session.internalId);
     if (state.signature === signature) {
       return state.path ? { path: state.path } : null;
@@ -1613,6 +1681,9 @@ export class AgentSessionManager {
     if (this.opts.askUserQuestionPrompter) {
       proc.setAskUserQuestionPrompter?.(this.opts.askUserQuestionPrompter);
     }
+    // Lets a backend with its own permission gate (Claude SDK) hard-deny write/exec
+    // tools for read-only fan-out sub-sessions — see `permissionBridge`.
+    proc.setReadOnlySessionPredicate?.((sessionId) => this.isReadOnlyFanoutSession(sessionId));
   }
 
   private async ensureBackend(
