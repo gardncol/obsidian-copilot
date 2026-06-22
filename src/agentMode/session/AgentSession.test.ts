@@ -924,6 +924,46 @@ describe("AgentSession fan-out branching", () => {
     // The live turn rides on the message itself for the UI.
     expect(placeholder?.fanout?.summary.text).toBe("the narrative summary");
   });
+
+  it("does not let a first-turn fan-out consume the visible session's project context", async () => {
+    const mock = makeMockBackend();
+    const runFanoutTurn = jest.fn(async (input: FanoutRunInput): Promise<FanoutTurn> => {
+      const turn: FanoutTurn = {
+        answers: {
+          opencode: { backendId: "opencode", status: "done", text: "a" },
+          claude: { backendId: "claude", status: "done", text: "b" },
+        },
+        summary: { status: "done", text: "summary" },
+      };
+      input.onChange(turn);
+      return turn;
+    });
+    const session = new AgentSession({
+      backend: mock.asBackend,
+      backendSessionId: "acp-1",
+      internalId: "internal-1",
+      backendId: "opencode",
+      runFanoutTurn,
+    });
+    // Stand in for the block the initializer captures for the first prompt.
+    (session as unknown as { projectContextBlock: string | null }).projectContextBlock =
+      "<project_context>\n## Included folders\n- `/vault/Papers`\n</project_context>";
+
+    // Turn 1 is a fan-out: only the ephemeral sub-sessions receive the block,
+    // and the visible backend is never prompted.
+    await session.sendPrompt("review", undefined, undefined, ["opencode", "claude"]).turn;
+    const fanoutPrompt = runFanoutTurn.mock.calls[0][0].prompt[0] as { type: "text"; text: string };
+    expect(fanoutPrompt.text).toContain("<project_context>");
+    expect(mock.prompt).not.toHaveBeenCalled();
+
+    // Turn 2 is a normal turn: the visible backend must finally receive the
+    // first-turn project context (regression — a fan-out turn used to burn it).
+    await session.sendPrompt("now you").turn;
+    expect(mock.prompt).toHaveBeenCalledTimes(1);
+    const req = mock.prompt.mock.calls[0][0] as { prompt: Array<{ type: string; text?: string }> };
+    const visibleText = (req.prompt[0] as { type: "text"; text: string }).text;
+    expect(visibleText).toContain("<project_context>");
+  });
 });
 
 describe("AgentSession fan-out paywall (send-boundary entitlement)", () => {

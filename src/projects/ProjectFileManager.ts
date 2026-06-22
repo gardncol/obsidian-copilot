@@ -38,6 +38,7 @@ import {
   upsertCachedProjectRecord,
 } from "@/projects/state";
 import { ensureFolderExists } from "@/utils";
+import { isDesktopRuntime } from "@/utils/desktopRuntime";
 import { RecentUsageManager } from "@/utils/recentUsageManager";
 import {
   isInVaultCache,
@@ -612,6 +613,18 @@ export class ProjectFileManager {
       await ProjectContextCache.getInstance()
         .clearForProject(existing.project)
         .catch((err) => logError("[Projects] Failed to clear context cache on delete", err));
+
+      // Reason: the vault-level cache above leaves the off-vault failure-marker
+      // bucket (markers/<md5(projectId)>) behind. Clearing it stops a project
+      // recreated under the same id from inheriting stale negative-cache state.
+      // Desktop-gated + dynamically imported so node-backed cache modules never
+      // load on mobile; best-effort so a cleanup failure can't strand the delete.
+      if (isDesktopRuntime()) {
+        const { clearProjectMarkers } = await import("@/context/projectMarkerCleanup");
+        await clearProjectMarkers(this.app, normalizedId).catch((err) =>
+          logError(`[Projects] Failed to clear off-vault failure markers on delete`, err)
+        );
+      }
 
       logInfo(`[Projects] Deleted project: ${normalizedId} -> ${folderPath}`);
 

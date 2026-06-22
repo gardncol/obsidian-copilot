@@ -1006,9 +1006,12 @@ export class AgentSession {
           projectContextBlock,
           historyBlock
         );
-        // The first-turn project-context block (if any) has now been delivered to
-        // the fan-out agents; mark it so the next visible turn doesn't re-inject it.
-        if (isFirstTurn) this.firstPromptSent = true;
+        // Deliberately do NOT mark `firstPromptSent` here. Fan-out delivers the
+        // first-turn project-context block only to the ephemeral sub-sessions; the
+        // visible backend never receives this prompt. Consuming the flag would make
+        // the next normal turn skip the block, permanently stripping the project
+        // manifest from the main chat. Leaving it unset lets that turn deliver it
+        // (and each ephemeral fan-out, being memoryless, re-receives it meanwhile).
         return await this.runFanoutPath(placeholderId, displayText, promptBlocks, turnStartedAt);
       }
 
