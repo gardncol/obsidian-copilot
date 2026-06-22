@@ -5,12 +5,13 @@ interface UseRefreshEmptyLandingOnContextSourceChangeParams {
   /** Active workspace scope; {@link GLOBAL_SCOPE} has no project context to track. */
   activeProjectId: string;
   /**
-   * The active project's context signature, or null for global/orphaned scope.
-   * MUST be the same {@link getProjectContextSignature} the session manager uses
-   * for dirty-tracking (normalized source fields + project filePath), so React
-   * and the manager agree on what counts as a real source change — computed by
-   * the caller from the live project record so it re-derives on every store
-   * change that re-renders the host.
+   * The active project's landing-capture signature, or null for global/orphaned
+   * scope. Fingerprints the inputs an empty landing session bakes in at creation
+   * — the materialized context sources PLUS the project instruction body — so a
+   * System-Prompt-only edit triggers a refresh too. Broader than the session
+   * manager's materialization dirty signature on purpose. Computed by the caller
+   * from the live project record so it re-derives on every store change that
+   * re-renders the host.
    */
   signature: string | null;
   /** Whether the active session is still an empty landing (no user messages). */
@@ -27,14 +28,14 @@ interface UseRefreshEmptyLandingOnContextSourceChangeParams {
 }
 
 /**
- * Refresh the empty landing session when the active project's context SOURCES
+ * Refresh the empty landing session when the active project's captured inputs
  * change underneath it.
  *
- * Every context mutation — drag-drop, inline edit, +URL, chip removal, the
- * Manage modal — funnels through `updateProject` → the project store, which
- * re-renders the host. Observing the active project's context signature here
- * therefore covers every entry point (current and future) without each mutation
- * site wiring its own callback.
+ * Every project mutation — drag-drop, inline edit, +URL, chip removal, the
+ * Manage modal, a System-Prompt edit — funnels through `updateProject` → the
+ * project store, which re-renders the host. Observing the active project's
+ * landing-capture signature here therefore covers every entry point (current and
+ * future) without each mutation site wiring its own callback.
  *
  * The signature is the only trigger. A single-flight ref serializes the
  * (non-idempotent) session replacement. The baseline ref records the last
@@ -96,8 +97,9 @@ export function useRefreshEmptyLandingOnContextSourceChange({
     }
     if (baseline.signature === signature) return;
 
-    // Source changed on a surface that won't take a refresh: a conversation, not
-    // a landing. Accept the new signature — the next New Chat reads fresh config.
+    // Captured input changed on a surface that won't take a refresh: a
+    // conversation, not a landing. Accept the new signature — the next New Chat
+    // reads fresh config.
     if (!isLanding) {
       baselineRef.current = { projectId: activeProjectId, signature };
       return;

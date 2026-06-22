@@ -2,6 +2,7 @@ import type { ProjectConfig } from "@/aiParams";
 import type { ProjectFileRecord } from "@/projects/type";
 import {
   getProjectContextSignature,
+  getProjectLandingCaptureSignature,
   normalizeProjectContextSource,
 } from "./projectContextSignature";
 
@@ -76,5 +77,36 @@ describe("getProjectContextSignature", () => {
     const before = makeRecord(project, "Projects/One/project.md");
     const after = makeRecord(project, "Projects/Renamed/project.md");
     expect(getProjectContextSignature(before)).not.toBe(getProjectContextSignature(after));
+  });
+});
+
+describe("getProjectLandingCaptureSignature", () => {
+  it("changes on a System-Prompt-only edit (which the materialization signature ignores)", () => {
+    const before = makeRecord(makeProject({ systemPrompt: "old" }));
+    const after = makeRecord(makeProject({ systemPrompt: "new" }));
+    // The materialization signature is intentionally blind to systemPrompt...
+    expect(getProjectContextSignature(before)).toBe(getProjectContextSignature(after));
+    // ...but the landing-capture signature must see it, so the empty landing refreshes.
+    expect(getProjectLandingCaptureSignature(before)).not.toBe(
+      getProjectLandingCaptureSignature(after)
+    );
+  });
+
+  it("still changes on a context-source edit (folds in the materialization signature)", () => {
+    const before = makeRecord(makeProject({ contextSource: { webUrls: "https://a.com" } }));
+    const after = makeRecord(
+      makeProject({ contextSource: { webUrls: "https://a.com\nhttps://b.com" } })
+    );
+    expect(getProjectLandingCaptureSignature(before)).not.toBe(
+      getProjectLandingCaptureSignature(after)
+    );
+  });
+
+  it("does NOT change on a usage-timestamp-only touch", () => {
+    const before = makeRecord(makeProject({ systemPrompt: "same", UsageTimestamps: 1 }));
+    const after = makeRecord(makeProject({ systemPrompt: "same", UsageTimestamps: 999 }));
+    expect(getProjectLandingCaptureSignature(before)).toBe(
+      getProjectLandingCaptureSignature(after)
+    );
   });
 });

@@ -40,7 +40,7 @@ import { cn } from "@/lib/utils";
 import { logError } from "@/logger";
 import type CopilotPlugin from "@/main";
 import { ProjectFileManager } from "@/projects/ProjectFileManager";
-import { getProjectContextSignature } from "@/projects/projectContextSignature";
+import { getProjectLandingCaptureSignature } from "@/projects/projectContextSignature";
 import { getCachedProjectRecordById, useProjects } from "@/projects/state";
 import { getSettings, settingsStore, updateSetting, useSettingsValue } from "@/settings/model";
 import { useAtomValue } from "jotai";
@@ -419,19 +419,22 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     draft.images.length === 0 &&
     draft.contextNotes.length === 0 &&
     draft.queue.length === 0;
-  // Same signature the session manager dirty-tracks with (normalized sources +
-  // filePath), read from the live record. `projects` is a deliberate re-derive
-  // trigger — not read inside the factory, but a `useProjects()` change means the
-  // cached record (and thus its signature) may have changed.
-  const activeProjectContextSignature = useMemo(() => {
+  // Fingerprint of what an empty landing session captures at creation: the
+  // materialization signature PLUS the project instructions. Deliberately
+  // broader than the session manager's materialization dirty-tracking signature,
+  // because a landing also bakes in AGENTS.md / Claude's instruction append — so
+  // a System-Prompt-only edit must refresh it. Read from the live record;
+  // `projects` is a deliberate re-derive trigger — not read inside the factory,
+  // but a `useProjects()` change means the cached record may have changed.
+  const activeProjectLandingCaptureSignature = useMemo(() => {
     if (!isProjectScope) return null;
     const record = getCachedProjectRecordById(activeProjectId);
-    return record ? getProjectContextSignature(record) : null;
+    return record ? getProjectLandingCaptureSignature(record) : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isProjectScope, activeProjectId, projects]);
   useRefreshEmptyLandingOnContextSourceChange({
     activeProjectId,
-    signature: activeProjectContextSignature,
+    signature: activeProjectLandingCaptureSignature,
     isLanding,
     blocking: contextLoadBlocking,
     draftEmpty: draftIsEmpty,
