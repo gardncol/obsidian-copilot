@@ -2620,13 +2620,14 @@ describe("AgentSessionManager context-source dirty tracking", () => {
 
   function makeRecord(
     contextSource: ProjectConfig["contextSource"],
-    usageTimestamps = 0
+    usageTimestamps = 0,
+    systemPrompt = ""
   ): ProjectFileRecord {
     return {
       project: {
         id: PID,
         name: PID,
-        systemPrompt: "",
+        systemPrompt,
         projectModelKey: "",
         modelConfigs: {},
         contextSource,
@@ -2783,6 +2784,26 @@ describe("AgentSessionManager context-source dirty tracking", () => {
 
     expect(sessionCreateSpy).not.toHaveBeenCalled();
     expect(mgr.getActiveSession()).toBe(landing);
+  });
+
+  it("does not reuse an empty landing after a System-Prompt-only edit", async () => {
+    publish(makeRecord({ webUrls: "https://a.com" }, 0, "old instructions"));
+    const mgr = buildTrackedManager();
+    await mgr.enterProject(PID);
+    const landing = mgr.getActiveSession();
+    if (!landing) throw new Error("expected a landing session");
+    await mgr.exitProject();
+
+    // The materialization signature is unchanged (sources identical), so the
+    // project is NOT dirty — but the landing-capture signature changed, so the
+    // stale landing (which baked in the old instructions) must not be reused.
+    publish(makeRecord({ webUrls: "https://a.com" }, 0, "new instructions"));
+
+    sessionCreateSpy.mockClear();
+    await mgr.enterProject(PID);
+
+    expect(sessionCreateSpy).toHaveBeenCalledTimes(1);
+    expect(mgr.getActiveSession()).not.toBe(landing);
   });
 
   it("rematerializeContext forces a retry of known-bad sources", async () => {

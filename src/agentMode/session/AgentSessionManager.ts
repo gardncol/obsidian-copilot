@@ -66,7 +66,10 @@ import {
   subscribeToProjectRecords,
 } from "@/projects/state";
 import type { ProjectFileRecord } from "@/projects/type";
-import { getProjectContextSignature } from "@/projects/projectContextSignature";
+import {
+  getProjectContextSignature,
+  getProjectLandingCaptureSignature,
+} from "@/projects/projectContextSignature";
 import { ProjectFileManager } from "@/projects/ProjectFileManager";
 import { ensureAgentsMirror } from "@/projects/ensureAgentsMirror";
 import { getComposedProjectInstructions } from "@/projects/projectSystemPrompt";
@@ -271,6 +274,15 @@ export class AgentSessionManager {
   // signature — a newer edit's signature won't match, so its dirtiness survives
   // (no lost update). Mirrors chat mode's `markdownNeedsReload`.
   private readonly contextDirtySignatures = new Map<ProjectScopeId, string>();
+  // A project landing session captures MORE than materialized context at
+  // creation: codex/opencode read the AGENTS.md mirror from cwd, and Claude
+  // captures its project-instructions append. The materialization dirty flag
+  // above deliberately ignores `systemPrompt`, so reuse decisions need their own
+  // fingerprint of what the session actually baked in (the landing-capture
+  // signature). Keyed by internal session id; every project session gets an
+  // entry, but only landing-shaped ones (idle/empty) are ever consulted for
+  // reuse. A missing entry means "not reusable as a project landing".
+  private readonly landingCaptureSignatures = new Map<string, string>();
   // Snapshot of project records from the previous change notification, diffed
   // against the next to detect context-source edits. Seeded in the constructor.
   private previousProjectRecords: ProjectFileRecord[] = [];
@@ -1052,14 +1064,22 @@ export class AgentSessionManager {
 
     const resolvedId = backendId ?? getSettings().agentMode?.activeBackend ?? "opencode";
 
+    // Read the live record once: it drives both the AGENTS.md mirror below and
+    // the landing-capture signature recorded after the session is built, so the
+    // two agree on the exact config this session bakes in.
+    const projectRecord =
+      projectId === GLOBAL_SCOPE ? undefined : getCachedProjectRecordById(projectId);
+    const landingCaptureSignature = projectRecord
+      ? getProjectLandingCaptureSignature(projectRecord)
+      : undefined;
+
     // Materialize the project's AGENTS.md mirror from project.md BEFORE resolving cwd, so a
     // cwd-instruction backend (codex/opencode) discovers the instruction file on its first
     // session. This is the sole correctness guarantee for an old project.md-only project.
     // Never throws (degrades gracefully); skipped for GLOBAL_SCOPE and for claude (which gets
     // the instruction injected in-process, no file needed).
-    if (projectId !== GLOBAL_SCOPE && CWD_INSTRUCTION_BACKENDS.has(resolvedId)) {
-      const record = getCachedProjectRecordById(projectId);
-      if (record) await ensureAgentsMirror(this.app, record);
+    if (projectRecord && CWD_INSTRUCTION_BACKENDS.has(resolvedId)) {
+      await ensureAgentsMirror(this.app, projectRecord);
     }
 
     // Resolves the scope's cwd (vault root for global, project folder otherwise)
@@ -1145,6 +1165,15 @@ export class AgentSessionManager {
     }
     this.sessions.set(session.internalId, session);
     this.chatUIStates.set(session.internalId, new AgentChatUIState(session));
+    // Record what this project landing captured so re-entry can tell a current
+    // landing from one that baked in stale config (incl. a System-Prompt-only
+    // edit the materialization dirty flag ignores). Global sessions capture no
+    // project config, so they get no entry (and are never reused as landings).
+    if (landingCaptureSignature) {
+      this.landingCaptureSignatures.set(session.internalId, landingCaptureSignature);
+    } else {
+      this.landingCaptureSignatures.delete(session.internalId);
+    }
     // A fresh id is never detached; clear defensively so a new session can't
     // inherit a stale hidden-from-strip flag.
     this.detachedFromTabIds.delete(session.internalId);
@@ -1556,13 +1585,17 @@ export class AgentSessionManager {
     // restore-the-last-tab behavior (it's the implicit scope `exitProject`
     // returns to, not a project the user deliberately re-opens).
     if (projectId !== GLOBAL_SCOPE) {
-      // A dirty project (its sources changed since last materialization) must
-      // start a genuinely fresh session — reusing an empty landing would carry
-      // the stale `<project_context>` it captured at creation — so detach even
-      // empty landings and force a spawn.
+      // Reuse an empty landing only when it's safe: not dirty (its
+      // `<project_context>` would be stale — materialization-only, see
+      // `contextDirtySignatures`) AND its creation-time capture still matches the
+      // live project config (`pickReusableLandingSession` checks the
+      // landing-capture signature, which also covers a System-Prompt-only edit the
+      // dirty flag ignores). When we instead spawn fresh, detach the project's
+      // empty landings too so a stale blank one can't linger in the strip; when we
+      // reuse, leave them so the adopted tab survives.
       const dirty = this.isProjectContextDirty(projectId);
       const reusable = dirty ? null : this.pickReusableLandingSession(projectId);
-      this.detachSessionsForProjectEntry(projectId, { includeEmpty: dirty });
+      this.detachSessionsForProjectEntry(projectId, { includeEmpty: !reusable });
       if (reusable) {
         this.detachedFromTabIds.delete(reusable.internalId);
         this.activeSessionId = reusable.internalId;
@@ -1603,9 +1636,9 @@ export class AgentSessionManager {
    * Detach a project scope's prior tabs on re-entry — they stay live in the pool
    * and listed in chat history. Conversational chats (with user-visible
    * messages) always detach. Empty landing tabs detach only when
-   * `includeEmpty` is set (a dirty project, whose captured context is stale, must
-   * not leave a stale empty landing in the strip); otherwise they're left
-   * attached so a reusable one can become the fresh visit's tab (see
+   * `includeEmpty` is set (the caller is spawning a fresh session, so any
+   * existing empty landing is stale/unusable and must not linger in the strip);
+   * otherwise they're left attached so the reused one stays the visit's tab (see
    * {@link pickReusableLandingSession}).
    */
   private detachSessionsForProjectEntry(
@@ -1622,18 +1655,18 @@ export class AgentSessionManager {
 
   /**
    * The scope's reusable empty landing tab — a live, never-messaged session that
-   * a fresh visit can adopt instead of spawning a new blank one. Prefers the
-   * scope's MRU; falls back to the most recent matching session. `null` means
-   * the caller should spawn fresh.
+   * a fresh visit can adopt instead of spawning a new blank one. A candidate must
+   * also have captured the CURRENT project config (matching landing-capture
+   * signature); one that baked in stale config is skipped. Prefers the scope's
+   * MRU; falls back to the most recent matching session. `null` means the caller
+   * should spawn fresh.
    */
   private pickReusableLandingSession(projectId: ProjectScopeId): AgentSession | null {
-    // Only an idle/starting blank tab is safe to adopt as the fresh visit's tab.
-    // An "error" landing (its backend never opened) or one mid-turn
-    // ("running"/"awaiting_permission") is not a clean slate — spawn fresh instead.
+    const expected = this.currentLandingCaptureSignature(projectId);
+    if (!expected) return null;
     const isReusable = (session: AgentSession): boolean =>
-      session.projectId === projectId &&
-      (session.getStatus() === "idle" || session.getStatus() === "starting") &&
-      !session.hasUserVisibleMessages();
+      this.isReusableLandingShell(session, projectId) &&
+      this.landingCaptureSignatures.get(session.internalId) === expected;
 
     const mruId = this.lastActiveByScope.get(projectId);
     const mru = mruId ? this.sessions.get(mruId) : undefined;
@@ -1644,6 +1677,27 @@ export class AgentSessionManager {
       if (isReusable(session)) fallback = session;
     }
     return fallback;
+  }
+
+  /**
+   * Whether a session is a clean slate to adopt as a landing — idle/starting and
+   * never messaged. An "error" landing (backend never opened) or one mid-turn
+   * ("running"/"awaiting_permission") is not, so the caller should spawn fresh.
+   * This is the shell check ONLY; capture-freshness is gated separately.
+   */
+  private isReusableLandingShell(session: AgentSession, projectId: ProjectScopeId): boolean {
+    return (
+      session.projectId === projectId &&
+      (session.getStatus() === "idle" || session.getStatus() === "starting") &&
+      !session.hasUserVisibleMessages()
+    );
+  }
+
+  /** The live project record's landing-capture signature, or null off-project. */
+  private currentLandingCaptureSignature(projectId: ProjectScopeId): string | null {
+    if (projectId === GLOBAL_SCOPE) return null;
+    const record = getCachedProjectRecordById(projectId);
+    return record ? getProjectLandingCaptureSignature(record) : null;
   }
 
   /**
@@ -2077,6 +2131,7 @@ export class AgentSessionManager {
     this.detachAutoSave(id);
     this.sessions.delete(id);
     this.chatUIStates.delete(id);
+    this.landingCaptureSignatures.delete(id);
     this.detachedFromTabIds.delete(id);
     // Drop the closed session from its scope's MRU so a later enter can't
     // resurrect a dead id.
@@ -2301,6 +2356,7 @@ export class AgentSessionManager {
     );
     this.sessions.clear();
     this.chatUIStates.clear();
+    this.landingCaptureSignatures.clear();
     this.activeSessionId = null;
     this.activeProjectId = GLOBAL_SCOPE;
     this.lastActiveByScope.clear();
@@ -3042,6 +3098,7 @@ export class AgentSessionManager {
         this.detachAutoSave(s.internalId);
         this.sessions.delete(s.internalId);
         this.chatUIStates.delete(s.internalId);
+        this.landingCaptureSignatures.delete(s.internalId);
         this.detachedFromTabIds.delete(s.internalId);
         // Drop the dead session from its scope's MRU so a later enter can't
         // resurrect a dead id.
