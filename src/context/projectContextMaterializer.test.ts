@@ -313,6 +313,37 @@ describe("ensureProjectContextMaterialized — single-flight", () => {
     expect(client.url4llm).toHaveBeenCalledWith("https://b.com");
     expect(client.url4llm).toHaveBeenCalledTimes(2);
   });
+
+  it("supersedes an in-flight run whose source set was edited (a later caller must not join the stale run)", async () => {
+    const app = fakeApp();
+    // Run A materializes source A; gate its fetch so it stays in flight.
+    getRecord.mockReturnValue(record({ webUrls: "https://a.com" }));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const url4llm = jest.fn(async (url: string) => {
+      if (url === "https://a.com") await gate; // hold run A in flight
+      return { response: url === "https://a.com" ? "A text" : "B text" };
+    });
+    getClient.mockReturnValue({ url4llm, youtube4llm: jest.fn(), docs4llm: jest.fn() });
+
+    const a = ensureProjectContextMaterialized(app, "p1", CWD); // non-force, signature S1
+    await flushMicrotasks(); // A reaches the gated fetch, still in flight
+
+    // The project's context is edited mid-flight → new source set → new signature.
+    getRecord.mockReturnValue(record({ webUrls: "https://b.com" }));
+    const b = ensureProjectContextMaterialized(app, "p1", CWD); // non-force, signature S2
+
+    release(); // let A settle; B's deferred run then materializes the NEW source
+    const [aRes, bRes] = await Promise.all([a, b]);
+
+    // B did NOT join the stale run — it superseded and captured the edited sources.
+    // (Pre-fix, the unconditional non-force join returned A's pre-edit result and
+    // never fetched b.com.)
+    expect(bRes).not.toBe(aRes);
+    expect(url4llm).toHaveBeenCalledWith("https://b.com");
+  });
 });
 
 describe("Option D — failure markers, forced retry, single-source reconcile", () => {

@@ -108,12 +108,23 @@ const EMPTY_RESULT = EMPTY_CONTEXT_MATERIALIZATION_RESULT;
  *
  * The entry carries whether its run is a FORCED retry so the single-flight can
  * tell a background warm apart from a user "Retry": a forced call supersedes an
- * in-flight non-force run (see {@link ensureProjectContextMaterialized}).
+ * in-flight non-force run (see {@link ensureProjectContextMaterialized}). It also
+ * carries the context signature the run is materializing, so a caller wanting a
+ * NEWER source set (the project's context was edited mid-flight) supersedes the
+ * stale run instead of joining it.
  */
 interface InFlightMaterialization {
   promise: Promise<ContextMaterializationResult>;
   /** True when this run bypasses failure markers (a user-initiated retry). */
   forceRetryFailed: boolean;
+  /**
+   * Context signature ({@link getProjectContextSignature}) of the project record
+   * this run is materializing, captured when the run was queued. A later caller
+   * whose record signature differs supersedes rather than joins — otherwise it
+   * would receive the pre-edit `<project_context>` / `additionalDirectories`.
+   * `undefined` when no record was cached at queue time.
+   */
+  contextSignature: string | undefined;
 }
 
 const inFlightMaterializations = new Map<string, InFlightMaterialization>();
@@ -201,17 +212,34 @@ export async function ensureProjectContextMaterialized(
   forceRetryFailed?: boolean
 ): Promise<ContextMaterializationResult> {
   const force = forceRetryFailed ?? false;
+  // Captured synchronously so an incoming caller can tell whether the in-flight
+  // run is materializing the source revision it actually wants.
+  const record = getCachedProjectRecordById(projectId);
+  const currentSignature = record ? getProjectContextSignature(record) : undefined;
   const existing = inFlightMaterializations.get(projectId);
   // Single-flight: a second concurrent caller joins the in-flight run and its
   // `onProgress` is intentionally dropped — the flight owner's sink already
   // drives the shared progress atom, so every reader still sees live counts.
   //
-  // A non-force caller always joins; a forced retry joins only an already-forced
-  // run. A forced retry that finds a NON-force run in flight (e.g. a background
-  // warm, which never owns the blocking atom and so is invisible to the manager's
-  // early-exit check) must NOT join it — that would cheap-skip the known-bad
-  // sources the user explicitly asked to re-fetch. Instead it SUPERSEDES below.
-  if (existing && (!force || existing.forceRetryFailed)) return existing.promise;
+  // A caller joins ONLY when the in-flight run is materializing the SAME source
+  // set it wants (matching signature). If the project's context was edited while
+  // a run is in flight, that run's signature is now stale — joining it would hand
+  // the caller the pre-edit `<project_context>` / `additionalDirectories` (and the
+  // queued first send would flush with the old sources), so it SUPERSEDES below
+  // to capture the new sources instead.
+  //
+  // Among same-signature runs: a non-force caller joins; a forced retry joins only
+  // an already-forced run. A forced retry that finds a NON-force run in flight
+  // (e.g. a background warm, invisible to the manager's early-exit check) must NOT
+  // join it — that would cheap-skip the known-bad sources the user explicitly
+  // asked to re-fetch. Instead it SUPERSEDES below.
+  if (
+    existing &&
+    existing.contextSignature === currentSignature &&
+    (!force || existing.forceRetryFailed)
+  ) {
+    return existing.promise;
+  }
 
   // Take over the slot SYNCHRONOUSLY so a concurrent session-create joins this
   // forced run rather than the run it replaces — but defer the forced run's own
@@ -229,7 +257,11 @@ export async function ensureProjectContextMaterialized(
       inFlightMaterializations.delete(projectId);
     }
   });
-  inFlightMaterializations.set(projectId, { promise, forceRetryFailed: force });
+  inFlightMaterializations.set(projectId, {
+    promise,
+    forceRetryFailed: force,
+    contextSignature: currentSignature,
+  });
   return promise;
 }
 
