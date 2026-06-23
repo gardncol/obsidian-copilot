@@ -47,8 +47,7 @@ interface AddProjectModalContentProps {
    * dedicated Agent modal would duplicate the save/validate/context-editor
    * plumbing to fork two render branches, so the shared shell is intentional.
    * If Agent grows project fields CAG never has (forking the save/validate
-   * shape itself), split then. If a future review flags this again, point them
-   * at this note.
+   * shape itself), split then.
    */
   agentMode?: boolean;
   /** Portal target for the context editor's +URL popover — the modal's own

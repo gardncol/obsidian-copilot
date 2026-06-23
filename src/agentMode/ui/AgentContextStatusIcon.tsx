@@ -137,9 +137,8 @@ export function buildStatusView(
     // its prior failures live on disk. The `phase === "idle"` arm never receives a
     // non-zero `persistent` because the hook gates its disk read to settled-done /
     // no-entry (no producer writes a per-project `phase: "idle"` entry today); it
-    // shares this arm only to fall through to the same neutral idle glyph. If a
-    // future review flags the idle/persistent pairing as unreachable, point them
-    // at this note — it's intentional, the live path is the `!entry` one.
+    // shares this arm only to fall through to the same neutral idle glyph. The
+    // idle/persistent pairing is intentional — the live path is the `!entry` one.
     if (persistent > 0) {
       return { kind: "failed", headline: failedHeadline(persistent), steps: [], failures: [] };
     }

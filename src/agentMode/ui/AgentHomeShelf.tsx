@@ -46,8 +46,7 @@ interface AgentHomeShelfProps {
    * pairs elsewhere in this repo). Passing `activeSectionId` without
    * `onSectionSelect` yields a read-only tab bar, which is legal controlled
    * behavior, not a footgun worth a union type; the only controlled caller
-   * (AgentHome's global landing) passes both. If a future review flags the
-   * unpaired-props risk again, point them at this note.
+   * (AgentHome's global landing) passes both.
    */
   activeSectionId?: string | null;
   onSectionSelect?: (id: string) => void;

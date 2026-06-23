@@ -108,7 +108,7 @@ export function createNodeContextCacheFs(root: string): NodeContextCacheFs {
    * one. Following a pre-seeded symlink would require a local actor with write
    * access to this plugin-owned off-vault directory — already outside this
    * layer's threat model — so we skip the per-op `realpath`/`lstat` cost on the
-   * cache hot path. If a future review flags this again, point them here.
+   * cache hot path.
    */
   const resolveWithin = (cachePath: string): string => {
     if (cachePath.split(/[\\/]+/).includes("..")) {

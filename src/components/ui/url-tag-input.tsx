@@ -38,8 +38,7 @@ export function UrlTagInput({ urls, onAdd, onRemove }: UrlTagInputProps) {
   // ("foo.com bar.com") no longer batch-adds. This is an INTENTIONAL, user-approved
   // change (chose "scheme lock"), unifying all three URL entry points to stop prose
   // tokens (`1.`, `(context.urls)`, CJK sentences) from being stored as real URLs.
-  // It is a deliberate exception to "CAG zero behavior change". If a future review
-  // flags this as a CAG regression, point them at this note.
+  // It is a deliberate exception to "CAG zero behavior change".
   const parseAndAddUrls = (text: string) => {
     // Reason: shared parser normalizes, classifies web/youtube, and dedups against
     // the current list (stable ids) — same behavior as the +URL modal / Manage panel.

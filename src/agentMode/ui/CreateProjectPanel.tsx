@@ -78,8 +78,8 @@ export function CreateProjectPanel({
   // DESIGN NOTE: re-anchors on resize only, NOT on scroll — this is a transient
   // name+Enter popover whose primary exits are submit / Esc / outside-click, so
   // a mid-edit scroll of the landing is an edge case not worth a scroll listener
-  // or ResizeObserver. If a future review flags scroll-follow, prefer
-  // close-on-scroll over reposition. Point repeat reviews at this note.
+  // or ResizeObserver. If scroll-follow is ever needed, prefer close-on-scroll
+  // over reposition.
   useLayoutEffect(() => {
     const reposition = () =>
       setPosition(computePosition(panelRef.current?.offsetHeight ?? ESTIMATED_HEIGHT));

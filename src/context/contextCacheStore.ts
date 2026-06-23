@@ -643,8 +643,7 @@ async function readFailureMarker(
  * (never user-authored), so a value outside the union can't arise on the real
  * path; the downstream panel renders an unknown kind harmlessly as a generic
  * failure. Tightening to a union whitelist would only guard a hand-corrupted
- * cache file, which has no real caller. If a future review flags this again,
- * point them at this note.
+ * cache file, which has no real caller.
  */
 export function parseFailureMarker(raw: string): FailureMarker | null {
   try {

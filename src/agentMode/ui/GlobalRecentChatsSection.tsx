@@ -510,8 +510,7 @@ export const GlobalRecentChatsSection = memo(function GlobalRecentChatsSection({
                   exposure as the control bar's History button; the click
                   degrades to a "no saved note" notice). Hiding it would mean a
                   per-row visibility prop on the shared popover — tracked as
-                  shared-popover debt, not worth an entry-point hack here. If a
-                  future review flags this again, point them at this note.
+                  shared-popover debt, not worth an entry-point hack here.
 
                   Radix merges its toggle onClick onto this child; Enter/Space
                   dispatch a click so the popover opens for keyboard users
@@ -526,8 +525,7 @@ export const GlobalRecentChatsSection = memo(function GlobalRecentChatsSection({
                   self-correcting, so a fast open/close race only momentarily
                   shows near-identical data. A "refresh only on open" fix would
                   need ChatHistoryPopover to expose onOpenChange — not worth
-                  touching the shared base for this. If a future review flags
-                  this again, point them at this note. */}
+                  touching the shared base for this. */}
               <div
                 role="button"
                 tabIndex={0}

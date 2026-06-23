@@ -38,6 +38,8 @@ import {
   type FailureMarker,
   type MaterializedSourceType,
 } from "@/context/contextCacheStore";
+import type { UrlItem } from "@/utils/urlTagUtils";
+import type { TFile } from "obsidian";
 import { isDesktopRuntime } from "@/utils/desktopRuntime";
 import type { App } from "obsidian";
 
@@ -48,6 +50,31 @@ export interface AgentProcessingSource {
   source: string;
   /** Live `mtime:size` for files — stale-snapshot detection. Unset for URLs. */
   fingerprint?: string;
+}
+
+/**
+ * Build the agent pipeline's configured-source list from already-resolved URL
+ * items and file candidates: URL sources first (no fingerprint), then file
+ * sources stamped with their live `mtime:size` fingerprint for stale-snapshot
+ * detection. Callers pass their own candidate set (draft vs saved context) so
+ * this stays a pure shape-builder — the single place the `AgentProcessingSource`
+ * shape is constructed, shared by the processing-items and persistent-failure
+ * read-models so the two can't drift.
+ */
+export function buildAgentProcessingSources(
+  urls: readonly UrlItem[],
+  fileCandidates: readonly TFile[]
+): AgentProcessingSource[] {
+  return [
+    ...urls.map((u): AgentProcessingSource => ({ kind: u.type, source: u.url })),
+    ...fileCandidates.map(
+      (f): AgentProcessingSource => ({
+        kind: "file",
+        source: f.path,
+        fingerprint: `${f.stat.mtime}:${f.stat.size}`,
+      })
+    ),
+  ];
 }
 
 /** Read-only view of the agent's off-vault conversion cache, keyed by file name. */
@@ -285,8 +312,7 @@ export function buildAgentProcessingItems(
       // do NOT keep a 4th live `succeededSources` set to erase it: that would
       // duplicate the whole processingSources machinery (atom field + publish +
       // clear + tests) to smooth a cosmetic blip that never touches the cache,
-      // the send gate, or captured session context. If a future review flags
-      // this again, point them at this note.
+      // the send gate, or captured session context.
       status = "pending";
     }
 

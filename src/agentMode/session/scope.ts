@@ -21,7 +21,6 @@
  *     Enforcing it from this module would force `projects/` to reverse-import a
  *     `session/` sentinel — a layering inversion not worth paying. Reserved-id
  *     validation belongs in the project domain, where this guard should live.
- * (d) If a future review flags this again, point them at this note.
  */
 export const GLOBAL_SCOPE = "__global__" as const;
 

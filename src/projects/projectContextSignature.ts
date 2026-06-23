@@ -26,7 +26,6 @@ interface NormalizedContextSource {
  * project-records publish (a hot path), and the worst case of an over-eager
  * signature is benign: one extra materialization that single-flights and
  * cheap-skips unchanged sources — the same cost as the feature's happy path.
- * If a future review flags this again, point them at this note.
  */
 function normalizeMultiline(value: string | undefined): string {
   if (!value) return "";

@@ -104,8 +104,7 @@ const EMPTY_RESULT = EMPTY_CONTEXT_MATERIALIZATION_RESULT;
  * the joined caller would write to the pre-rename dir. That window is effectively
  * unreachable, the next session (in-flight entry cleared on settle) self-heals to
  * the new cwd, and keying by cwd would weaken the single-flight (the whole point
- * is to dedupe per project). Not worth the extra key. If a future review flags
- * this again, point them at this note.
+ * is to dedupe per project). Not worth the extra key.
  *
  * The entry carries whether its run is a FORCED retry so the single-flight can
  * tell a background warm apart from a user "Retry": a forced call supersedes an
@@ -269,8 +268,7 @@ async function runMaterialize(
     // stop the agent's native grep from reading an excluded file inside an
     // included folder. That "粒度错配的洞" is explicitly acknowledged-and-unblocked
     // — hard enforcement needs a backend/OS sandbox (Tier 2/3), deferred past PR2.
-    // See designdocs/agent-projects/PR2_DESIGN.md §4.1.1. If a future review flags
-    // this again, point them at this note.
+    // See designdocs/agent-projects/PR2_DESIGN.md §4.1.1.
     const { inclusions } = getMatchingPatterns({
       inclusions: contextSource.inclusions,
       exclusions: contextSource.exclusions,
@@ -285,8 +283,7 @@ async function runMaterialize(
     // instruction on counting Obsidian tags); precise/efficient resolution
     // (MCP `tag_search`) is deferred to PR3. So a tag whose matches live outside
     // the project cwd is reachable only via that native search, by design.
-    // See designdocs/agent-projects/PR2_DESIGN.md §4.1. If a future review flags
-    // this again, point them at this note.
+    // See designdocs/agent-projects/PR2_DESIGN.md §4.1.
     const extensions = inclusions?.extensionPatterns ?? [];
     const tags = inclusions?.tagPatterns ?? [];
 
@@ -575,8 +572,7 @@ function resolveFolderPaths(
  * explicit-path read (verified — `designdocs/agent-projects/verify/ADDDIR_FINDINGS.md`).
  * add-dir is a claude-only autonomous-search enhancement codex/opencode ignore;
  * granting one note's whole parent folder would over-grant — the exact thing
- * `obsidian-copilot-preview#165` aims to curb. If a future review flags this
- * again, point them at this note.
+ * `obsidian-copilot-preview#165` aims to curb.
  */
 function resolveNotePaths(
   app: App,

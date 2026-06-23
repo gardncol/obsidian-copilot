@@ -1,6 +1,7 @@
 import { type AgentProjectContextLoadState, type ProjectConfig } from "@/aiParams";
 import {
   buildAgentProcessingItems,
+  buildAgentProcessingSources,
   readAgentCacheDirState,
   type AgentProcessingSource,
 } from "@/components/project/agentProcessingAdapter";
@@ -53,16 +54,7 @@ export function useAgentPersistentFailureCount(
     if (!settled) return EMPTY_SOURCES;
     const contextSource = project.contextSource;
     const urls = parseProjectUrls(contextSource?.webUrls || "", contextSource?.youtubeUrls || "");
-    return [
-      ...urls.map((u): AgentProcessingSource => ({ kind: u.type, source: u.url })),
-      ...listMaterializeCandidates(app, contextSource).map(
-        (f): AgentProcessingSource => ({
-          kind: "file",
-          source: f.path,
-          fingerprint: `${f.stat.mtime}:${f.stat.size}`,
-        })
-      ),
-    ];
+    return buildAgentProcessingSources(urls, listMaterializeCandidates(app, contextSource));
   }, [app, project.contextSource, settled]);
 
   // Snapshot names of the FILE sources, so the read fetches their stored

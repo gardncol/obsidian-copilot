@@ -46,8 +46,7 @@ export class CachePreviewModal extends Modal {
 
     // NOTE: `cls` strings here stay bare (no cn()) to match this file's existing
     // createDiv convention; cn() is for merging conditional JSX classNames, which
-    // this imperative DOM construction doesn't need. If a future review flags
-    // this, point them here.
+    // this imperative DOM construction doesn't need.
     // Header: file icon + title + copy button
     const header = contentEl.createDiv({
       cls: "tw-flex tw-items-center tw-justify-between tw-px-5 tw-py-3 tw-border-b tw-border-border",
@@ -138,7 +137,6 @@ export class CachePreviewModal extends Modal {
       // only residual case (async post-processors finishing after close) writes
       // to a detached, GC-able container with no observable effect. A generation
       // guard would defend a path no caller can reach.
-      // If a future review flags this again, point them at this note.
       const win = this.contentEl.win ?? window;
       this.renderRafWin = win;
       this.renderRafId = win.requestAnimationFrame(() => {

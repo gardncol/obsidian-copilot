@@ -1,6 +1,7 @@
 import { agentProjectContextLoadAtom, type ProjectConfig } from "@/aiParams";
 import {
   buildAgentProcessingItems,
+  buildAgentProcessingSources,
   readAgentCacheDirState,
   type AgentCacheDirState,
   type AgentProcessingSource,
@@ -69,16 +70,7 @@ export function useAgentProcessingItems(
   const sources = useMemo<AgentProcessingSource[]>(() => {
     if (!enabled) return [];
     const urls = parseProjectUrls(contextSource?.webUrls || "", contextSource?.youtubeUrls || "");
-    return [
-      ...urls.map((u): AgentProcessingSource => ({ kind: u.type, source: u.url })),
-      ...candidates.map(
-        (f): AgentProcessingSource => ({
-          kind: "file",
-          source: f.path,
-          fingerprint: `${f.stat.mtime}:${f.stat.size}`,
-        })
-      ),
-    ];
+    return buildAgentProcessingSources(urls, candidates);
   }, [enabled, contextSource?.webUrls, contextSource?.youtubeUrls, candidates]);
 
   // Sources a materialization run can actually see — i.e. the persisted config.

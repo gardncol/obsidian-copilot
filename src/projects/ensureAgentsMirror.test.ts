@@ -168,7 +168,7 @@ describe("ensureAgentsMirror", () => {
     // A user who removed the marker owns the file; we never overwrite it. The trade-off is that
     // this project's codex/opencode sessions don't receive the built-in policy via the mirror
     // (Claude still does, via getProjectProfile). Intentional — it matches AGENTS.md precedence,
-    // where user/local content wins. If a future review flags this, point them here.
+    // where user/local content wins.
     await ensureAgentsMirror(makeApp(vault), makeRecord("anything"));
     expect(vault.files.get(MIRROR_PATH)).toBe("user file, no marker");
   });

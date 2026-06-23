@@ -59,7 +59,6 @@ export class CodexBackend implements AcpBackend {
     // would also apply to GLOBAL sessions and let codex read a user's vault-root `project.md`
     // note as instructions. On the rare ensure failure a project session gets no instructions
     // (ensure never throws and re-runs next session) rather than the frontmatter-laden source.
-    // If a future review flags the missing fallback, point them here + at the session-start ensure.
     return descriptor;
   }
 }

@@ -141,7 +141,6 @@ const EMPTY_HISTORY_ITEMS = Object.freeze([]) as unknown as ChatHistoryItem[];
 // (c) Runtime immutability rests on the `ReadonlySet<string>` type (no `.add`/`.delete` in
 //     the surface) plus the convention that no caller mutates the result — consumers only
 //     `.has()`, read `.size`, and iterate.
-// If a future review flags this again, point them at this note.
 const EMPTY_RECENT_CHAT_IDS: ReadonlySet<string> = new Set();
 
 // Backends that discover project instructions from a physical `AGENTS.md` in the session cwd.
@@ -476,7 +475,6 @@ export class AgentSessionManager {
       // QA, whose answers are advisory and whose authoritative, fully-scoped reply
       // comes from the main session. Threading project scope into the sub-sessions
       // is a deliberate follow-up, not part of the project-workspace landing.
-      // If a future review flags this again, point them at this note.
       getCwd: () => {
         const adapter = this.app.vault.adapter;
         return adapter instanceof FileSystemAdapter ? adapter.getBasePath() : null;
@@ -693,8 +691,7 @@ export class AgentSessionManager {
    * neither saved nor reached the native index yet has NO row in the list at
    * all, so its spinner/dot has nowhere to hang until the list next reloads.
    * That's a missing row, not an id mismatch — dual ids can't help, and forcing
-   * a history reload from here would couple autosave to row visibility. If a
-   * future review flags this again, point them at this note.
+   * a history reload from here would couple autosave to row visibility.
    */
   private recentChatIdsForSession(internalId: string, session: AgentSession): string[] {
     const ids: string[] = [];
