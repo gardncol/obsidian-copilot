@@ -23,6 +23,9 @@ export interface AgentProcessingItemsState {
   skippedMarkdownCount: number;
 }
 
+// Referentially stable empty so a disabled call never feeds callers a fresh [].
+const EMPTY_PROCESSING_ITEMS: ProcessingItem[] = Object.freeze([]) as unknown as ProcessingItem[];
+
 /**
  * The agent pipeline's Content Conversion read-model: synthesizes the live load
  * atom + the off-vault conversion cache + the (possibly draft) context source into the
@@ -39,20 +42,30 @@ export interface AgentProcessingItemsState {
 export function useAgentProcessingItems(
   app: App,
   project: ProjectConfig,
-  contextSource: ProjectConfig["contextSource"]
+  contextSource: ProjectConfig["contextSource"],
+  options?: { enabled?: boolean }
 ): AgentProcessingItemsState {
+  // Disabled for CAG callers: the agent read-model touches the off-vault cache
+  // (node fs, desktop-only) and the agent load atom, neither of which a CAG/chat
+  // project has. A caller that always mounts this hook (React rule) passes
+  // `enabled: false` to short-circuit it to empty without that work.
+  const enabled = options?.enabled ?? true;
   const loadStates = useAtomValue(agentProjectContextLoadAtom, { store: settingsStore });
-  const liveEntry = loadStates[project.id];
+  const liveEntry = enabled ? loadStates[project.id] : undefined;
 
-  const inclusions = contextSource?.inclusions;
-  const exclusions = contextSource?.exclusions;
+  const inclusions = enabled ? contextSource?.inclusions : undefined;
+  const exclusions = enabled ? contextSource?.exclusions : undefined;
   const summary = useMemo(
-    () => listMaterializeContextFileSummary(app, { inclusions, exclusions }),
-    [app, inclusions, exclusions]
+    () =>
+      enabled
+        ? listMaterializeContextFileSummary(app, { inclusions, exclusions })
+        : { candidates: [], skippedMarkdownCount: 0 },
+    [app, enabled, inclusions, exclusions]
   );
   const candidates = summary.candidates;
 
   const sources = useMemo<AgentProcessingSource[]>(() => {
+    if (!enabled) return [];
     const urls = parseProjectUrls(contextSource?.webUrls || "", contextSource?.youtubeUrls || "");
     return [
       ...urls.map((u): AgentProcessingSource => ({ kind: u.type, source: u.url })),
@@ -64,13 +77,14 @@ export function useAgentProcessingItems(
         })
       ),
     ];
-  }, [contextSource?.webUrls, contextSource?.youtubeUrls, candidates]);
+  }, [enabled, contextSource?.webUrls, contextSource?.youtubeUrls, candidates]);
 
   // Sources a materialization run can actually see — i.e. the persisted config.
   // Draft-only additions are excluded so they can't show as "processing".
   const savedContextSource = project.contextSource;
   const savedKeys = useMemo(() => {
     const keys = new Set<string>();
+    if (!enabled) return keys;
     const urls = parseProjectUrls(
       savedContextSource?.webUrls || "",
       savedContextSource?.youtubeUrls || ""
@@ -78,7 +92,7 @@ export function useAgentProcessingItems(
     for (const u of urls) keys.add(u.id);
     for (const f of listMaterializeCandidates(app, savedContextSource)) keys.add(`file:${f.path}`);
     return keys;
-  }, [app, savedContextSource]);
+  }, [app, enabled, savedContextSource]);
 
   const fileSnapshotNames = useMemo(
     () => new Set(candidates.map((f) => cacheFileName("file", f.path))),
@@ -87,6 +101,10 @@ export function useAgentProcessingItems(
 
   const [disk, setDisk] = useState<AgentCacheDirState | undefined>(undefined);
   useEffect(() => {
+    if (!enabled) {
+      setDisk(undefined);
+      return;
+    }
     // Re-read the off-vault cache whenever the live atom entry changes — not just
     // on `phase`. A single-source retry rewrites snapshots / deletes a failure
     // marker while leaving phase at "done", so keying on the whole entry is what
@@ -98,11 +116,14 @@ export function useAgentProcessingItems(
     return () => {
       cancelled = true;
     };
-  }, [app, project.id, fileSnapshotNames, liveEntry]);
+  }, [app, enabled, project.id, fileSnapshotNames, liveEntry]);
 
   const items = useMemo(
-    () => buildAgentProcessingItems(sources, liveEntry, disk, savedKeys),
-    [sources, liveEntry, disk, savedKeys]
+    () =>
+      enabled
+        ? buildAgentProcessingItems(sources, liveEntry, disk, savedKeys)
+        : EMPTY_PROCESSING_ITEMS,
+    [enabled, sources, liveEntry, disk, savedKeys]
   );
 
   return { items, skippedMarkdownCount: summary.skippedMarkdownCount };

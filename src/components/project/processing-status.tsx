@@ -13,12 +13,17 @@ import { Progress } from "@/components/ui/progress";
 import { TruncatedText } from "@/components/TruncatedText";
 import type { ProcessingItem } from "@/components/project/processingAdapter";
 import {
+  getProcessingStatusLabel,
+  processingItemKey,
+  ProcessingStatusIcon,
+} from "@/components/project/processingItemStatusView";
+import {
   AlertCircle,
+  ArrowUpRight,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock,
-  ArrowUpRight,
   FileImage,
   FileText,
   FileVideo,
@@ -53,36 +58,6 @@ interface ProcessingStatusProps {
   hideSummaryBar?: boolean;
 }
 
-/**
- * Renders the status icon for a ProcessingItem.
- * For ready+contentEmpty items, shows a warning HelpCircle instead of a green checkmark.
- */
-function StatusIcon({
-  status,
-  contentEmpty,
-}: {
-  status: ProcessingItem["status"];
-  contentEmpty?: boolean;
-}) {
-  // Reason: contentEmpty is a sub-state of "ready" — item was fetched but had no extractable content.
-  if (status === "ready" && contentEmpty) {
-    return <HelpCircle className="tw-size-3.5 tw-text-warning" />;
-  }
-
-  switch (status) {
-    case "ready":
-      return <CheckCircle2 className="tw-size-3.5 tw-text-success" />;
-    case "processing":
-      return <Loader2 className="tw-size-3.5 tw-animate-spin tw-text-loading" />;
-    case "failed":
-      return <AlertCircle className="tw-size-3.5 tw-text-error" />;
-    case "pending":
-      return <Clock className="tw-size-3.5 tw-text-muted" />;
-    case "unsupported":
-      return <HelpCircle className="tw-size-3.5 tw-text-muted" />;
-  }
-}
-
 function FileTypeIcon({ fileType }: { fileType: ProcessingItem["fileType"] }) {
   switch (fileType) {
     case "pdf":
@@ -109,28 +84,6 @@ function getStatusCounts(items: ProcessingItem[]) {
     unsupported: items.filter((i) => i.status === "unsupported").length,
     total: items.length,
   };
-}
-
-/**
- * Returns the human-readable label for a given status.
- * For ready+contentEmpty items the caller should override to "No content".
- */
-function getStatusLabel(status: ProcessingItem["status"], contentEmpty?: boolean): string {
-  // Reason: "No content" is a UI-only distinction within the "ready" status.
-  if (status === "ready" && contentEmpty) return "No content";
-
-  switch (status) {
-    case "ready":
-      return "Converted";
-    case "processing":
-      return "Converting...";
-    case "failed":
-      return "Failed";
-    case "pending":
-      return "Queued";
-    case "unsupported":
-      return "Unsupported";
-  }
 }
 
 /** Status priority for sorting: active/problematic items first, completed last. */
@@ -182,7 +135,7 @@ export function ProcessingStatus({
           <ScrollableList maxHeight={maxHeight || "200px"}>
             {sortedFileItems.map((item) => (
               <ProcessingItemRow
-                key={`${item.cacheKind}:${item.id}`}
+                key={processingItemKey(item)}
                 item={item}
                 onRetry={onRetry}
                 onRetryItem={onRetryItem}
@@ -210,7 +163,7 @@ export function ProcessingStatus({
           <ScrollableList maxHeight={maxHeight || "200px"}>
             {sortedUrlItems.map((item) => (
               <ProcessingItemRow
-                key={`${item.cacheKind}:${item.id}`}
+                key={processingItemKey(item)}
                 item={item}
                 onRetry={onRetry}
                 onRetryItem={onRetryItem}
@@ -421,10 +374,10 @@ function ProcessingItemRow({
                   Exception: contentEmpty items need a visible "No content" label. */}
               {(item.status !== "ready" || item.contentEmpty) && (
                 <span className="tw-text-ui-smaller tw-text-muted">
-                  {getStatusLabel(item.status, item.contentEmpty)}
+                  {getProcessingStatusLabel(item.status, item.contentEmpty)}
                 </span>
               )}
-              <StatusIcon status={item.status} contentEmpty={item.contentEmpty} />
+              <ProcessingStatusIcon item={item} tooltip={false} />
             </div>
           </div>
         </div>

@@ -1,6 +1,13 @@
 import { FailedItem, ProjectConfig, useProjectContextLoad, getCurrentProject } from "@/aiParams";
 import { ContextCache, ProjectContextCache } from "@/cache/projectContextCache";
 import { FolderSearchModal } from "@/components/modals/FolderSearchModal";
+import type { ProcessingItem } from "@/components/project/processingAdapter";
+import {
+  buildProcessingItemLookup,
+  ProcessingStatusIcon,
+  processingSourceKey,
+} from "@/components/project/processingItemStatusView";
+import { useAgentProcessingItems } from "@/components/project/useAgentProcessingItems";
 import { openCachedProjectFile } from "@/utils/cacheFileOpener";
 import { ProjectFileSelectModal } from "@/components/modals/ProjectFileSelectModal";
 import { TagSearchModal } from "@/components/modals/TagSearchModal";
@@ -25,8 +32,6 @@ import {
   AlertCircle,
   ArrowUpRight,
   CheckCircle,
-  CheckCircle2,
-  Clock,
   FileAudio,
   FileImage,
   FileText,
@@ -294,46 +299,6 @@ const STATUS_COLOR: Record<ProjectContextItemStatus, string> = {
   notStarted: "tw-text-muted",
 };
 
-/** Agent (Links-style) compact status icons — keyed lookup instead of a condition
- * chain. `success` rests hidden (revealed on row hover) since it needs no
- * attention; `processing` spins. */
-const COMPACT_STATUS_ICON: Record<
-  ProjectContextItemStatus,
-  { Icon: React.ComponentType<{ className?: string }>; spin?: boolean; revealOnHover?: boolean }
-> = {
-  success: { Icon: CheckCircle2, revealOnHover: true },
-  failed: { Icon: AlertCircle },
-  processing: { Icon: Loader2, spin: true },
-  notStarted: { Icon: Clock },
-};
-
-/** The compact, icon-only status for the agent (Links) variant: a bare glyph whose
- * tooltip reveals the status label, or the failure error when failed. */
-function CompactStatusIcon({ loadStatus }: { loadStatus: ProjectContextItemStatusInfo }) {
-  const { Icon, spin, revealOnHover } = COMPACT_STATUS_ICON[loadStatus.status];
-  const tooltip =
-    loadStatus.status === "failed" && loadStatus.failedItem?.error
-      ? `Failed: ${loadStatus.failedItem.error}`
-      : STATUS_LABELS[loadStatus.status];
-  return (
-    <HelpTooltip
-      side="top"
-      contentClassName="tw-z-[60]"
-      content={<div className="tw-max-w-80">{tooltip}</div>}
-    >
-      <span
-        className={cn(
-          "tw-flex tw-size-5 tw-shrink-0 tw-items-center tw-justify-center",
-          STATUS_COLOR[loadStatus.status],
-          revealOnHover && "tw-opacity-0 group-hover:tw-opacity-100"
-        )}
-      >
-        <Icon className={cn("tw-size-3.5", spin && "tw-animate-spin")} />
-      </span>
-    </HelpTooltip>
-  );
-}
-
 // ============================================================================
 // ItemCard Component
 // ============================================================================
@@ -342,6 +307,9 @@ interface ItemCardProps {
   item: GroupItem;
   viewMode: "list";
   loadStatus?: ProjectContextItemStatusInfo;
+  /** Agent (Links) variant: per-file conversion status from the agent pipeline,
+   * rendered via the shared {@link ProcessingStatusIcon}. CAG uses `loadStatus`. */
+  agentProcessingItem?: ProcessingItem;
   onDelete: (e: React.MouseEvent, item: GroupItem) => void;
   /** Optional: callback to open the cached parsed content for this file. */
   onOpenCached?: () => void;
@@ -354,6 +322,7 @@ function ItemCard({
   item,
   viewMode,
   loadStatus,
+  agentProcessingItem,
   onDelete,
   onOpenCached,
   compactStatus,
@@ -401,7 +370,9 @@ function ItemCard({
           // bare icon (ready hidden until row hover), error revealed on hover.
           <>
             {previewButton}
-            {loadStatus && <CompactStatusIcon loadStatus={loadStatus} />}
+            {agentProcessingItem && (
+              <ProcessingStatusIcon item={agentProcessingItem} revealReadyOnHover />
+            )}
           </>
         ) : (
           // CAG (unchanged): icon + text Badge, then the preview arrow.
@@ -612,6 +583,21 @@ function ContextManage({
     cachedFiles,
     isCurrentProject,
   ]);
+
+  // Agent (Links) variant ONLY: one shared conversion-status lookup keyed by
+  // `processingSourceKey`, covering both URL rows and File Context rows so they
+  // render the same {@link ProcessingStatusIcon}. Gated to `enableLinks` so the
+  // CAG path never runs the agent read-model (off-vault cache / agent atom).
+  const { items: agentProcessingItems } = useAgentProcessingItems(
+    app,
+    initialProject,
+    initialProject.contextSource,
+    { enabled: enableLinks }
+  );
+  const agentProcessingByKey = useMemo(
+    () => buildProcessingItemLookup(agentProcessingItems),
+    [agentProcessingItems]
+  );
 
   const { inclusions: inclusionPatterns, exclusions: exclusionPatterns } = useMemo(() => {
     return getMatchingPatterns({
@@ -1528,9 +1514,9 @@ function ContextManage({
               {isLinksActive ? (
                 <LinksContentPanel
                   app={app}
-                  project={initialProject}
                   urlItems={contextUrls.urlItems}
                   filter={activeSection}
+                  agentProcessingByKey={agentProcessingByKey}
                   onRemove={contextUrls.removeUrl}
                 />
               ) : getDisplayItems.length === 0 ? (
@@ -1557,12 +1543,19 @@ function ContextManage({
                               item={item}
                               viewMode="list"
                               compactStatus={enableLinks}
+                              agentProcessingItem={
+                                // Agent file rows read the shared agent status lookup
+                                // (`file:<path>`); ignored rows never show status.
+                                enableLinks && activeSection !== "ignoreFiles" && !item.isIgnored
+                                  ? agentProcessingByKey.get(processingSourceKey("file", item.id))
+                                  : undefined
+                              }
                               loadStatus={
-                                // The Agent (Links) variant has no per-file status: agent context-load
-                                // state is aggregate (surfaced by AgentContextStatusIcon), and the CAG
-                                // ProjectContextCache / useProjectContextLoad atom this lookup reads is
-                                // never populated by the agent pipeline — feeding it here would render
-                                // stale or empty CAG state against agent files.
+                                // CAG-only per-file status. The agent variant uses
+                                // `agentProcessingItem` above — its status comes from the agent
+                                // pipeline (atom + off-vault cache), NOT the CAG
+                                // ProjectContextCache / useProjectContextLoad atom this lookup
+                                // reads, which the agent pipeline never populates.
                                 enableLinks || activeSection === "ignoreFiles" || item.isIgnored
                                   ? undefined
                                   : getProjectContextItemStatus(item.id, contextLoadLookup)

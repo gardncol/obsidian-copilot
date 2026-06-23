@@ -1,27 +1,18 @@
-import type { ProjectConfig } from "@/aiParams";
 import type { ProcessingItem } from "@/components/project/processingAdapter";
+import {
+  ProcessingStatusIcon,
+  processingSourceKey,
+} from "@/components/project/processingItemStatusView";
 import { AddUrlPopover } from "@/components/project/AddUrlPopover";
 import { UrlTypeIcon } from "@/components/project/UrlTypeIcon";
-import { useAgentProcessingItems } from "@/components/project/useAgentProcessingItems";
 import { TruncatedText } from "@/components/TruncatedText";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { openAgentCachedItemPreview } from "@/utils/cacheFileOpener";
 import type { UrlItem, UrlKind } from "@/utils/urlTagUtils";
-import {
-  AlertCircle,
-  ArrowUpRight,
-  CheckCircle2,
-  Clock,
-  Globe,
-  Link,
-  Loader2,
-  PlusCircle,
-  X,
-  Youtube,
-} from "lucide-react";
+import { ArrowUpRight, Globe, Link, PlusCircle, X, Youtube } from "lucide-react";
 import { App } from "obsidian";
-import React, { useMemo } from "react";
+import React from "react";
 
 /** The three Links-related selections in the Manage sidebar. */
 export type LinksSection = "links" | "web" | "youtube";
@@ -131,10 +122,11 @@ function LinkSubItem({
 
 interface LinksContentPanelProps {
   app: App;
-  /** Persisted project — drives the per-URL conversion status + preview path. */
-  project: ProjectConfig;
   urlItems: UrlItem[];
   filter: LinksSection;
+  /** Agent conversion status by {@link processingSourceKey}, supplied by the
+   * modal (one shared lookup across Links + File Context). */
+  agentProcessingByKey: ReadonlyMap<string, ProcessingItem>;
   onRemove: (id: string) => void;
 }
 
@@ -145,32 +137,17 @@ interface LinksContentPanelProps {
  * popover, matching every other context type (Tags / Folders / Files), whose
  * right pane is a pure list with no inline add affordance.
  *
- * This panel renders ONLY when Links is selected (agent `enableLinks`), so
- * reading the agent pipeline's status here never runs on the CAG path. Status
- * reflects the SAVED config — a freshly added (unsaved) URL has no status yet.
+ * Status reflects the SAVED config — a freshly added (unsaved) URL has no status
+ * yet. The status lookup is passed in (not derived here) so the URL rows and the
+ * File Context list share ONE {@link ProcessingStatusIcon} judgment.
  */
 export function LinksContentPanel({
   app,
-  project,
   urlItems,
   filter,
+  agentProcessingByKey,
   onRemove,
 }: LinksContentPanelProps) {
-  const { items } = useAgentProcessingItems(app, project, project.contextSource);
-  // Key by (cacheKind, url), not url alone: the same URL can be configured as
-  // BOTH a web and a youtube source, which the processing adapter emits as two
-  // distinct items sharing one `id` (see agentProcessingAdapter's same-URL pair
-  // contract). Keying on url alone would let one kind's status/snapshot clobber
-  // the other's — this matches how the canonical processing-status list keys its
-  // rows (`${cacheKind}:${id}`).
-  const statusByKey = useMemo(() => {
-    const map = new Map<string, ProcessingItem>();
-    for (const item of items) {
-      if (item.source === "url") map.set(`${item.cacheKind}:${item.id}`, item);
-    }
-    return map;
-  }, [items]);
-
   const handlePreview = (item: ProcessingItem) => {
     // Snapshots are off-vault and keyed by source identity, so the preview no
     // longer needs the project folder — just the item's kind + id.
@@ -189,7 +166,7 @@ export function LinksContentPanel({
           label="Web"
           type="web"
           items={webItems}
-          statusByKey={statusByKey}
+          agentProcessingByKey={agentProcessingByKey}
           onRemove={onRemove}
           onPreview={handlePreview}
         />
@@ -199,7 +176,7 @@ export function LinksContentPanel({
           label="YouTube"
           type="youtube"
           items={youtubeItems}
-          statusByKey={statusByKey}
+          agentProcessingByKey={agentProcessingByKey}
           onRemove={onRemove}
           onPreview={handlePreview}
         />
@@ -213,35 +190,18 @@ export function LinksContentPanel({
   );
 }
 
-/** Per-URL conversion status glyph (design M badges). `null` for unstarted /
- * unsaved URLs (no row badge). */
-function UrlStatusIcon({ status }: { status: ProcessingItem["status"] }) {
-  switch (status) {
-    case "ready":
-      return <CheckCircle2 className="tw-size-3.5 tw-text-success" />;
-    case "processing":
-      return <Loader2 className="tw-size-3.5 tw-animate-spin tw-text-accent" />;
-    case "pending":
-      return <Clock className="tw-size-3.5 tw-text-faint" />;
-    case "failed":
-      return <AlertCircle className="tw-size-3.5 tw-text-error" />;
-    default:
-      return null;
-  }
-}
-
 function UrlGroup({
   label,
   type,
   items,
-  statusByKey,
+  agentProcessingByKey,
   onRemove,
   onPreview,
 }: {
   label: string;
   type: UrlKind;
   items: UrlItem[];
-  statusByKey: ReadonlyMap<string, ProcessingItem>;
+  agentProcessingByKey: ReadonlyMap<string, ProcessingItem>;
   onRemove: (id: string) => void;
   onPreview: (item: ProcessingItem) => void;
 }) {
@@ -252,7 +212,7 @@ function UrlGroup({
         {label} <span className="tw-font-medium">({items.length})</span>
       </div>
       {items.map((item) => {
-        const status = statusByKey.get(`${type}:${item.url}`);
+        const status = agentProcessingByKey.get(processingSourceKey(type, item.url));
         const isReady = status?.status === "ready";
         return (
           <div
@@ -270,15 +230,7 @@ function UrlGroup({
                 aria-label="View converted content"
               />
             )}
-            {status && (
-              // Success rests hidden (revealed on row hover); processing / queued /
-              // failed stay visible since they need attention.
-              <span
-                className={cn("tw-shrink-0", isReady && "tw-opacity-0 group-hover:tw-opacity-100")}
-              >
-                <UrlStatusIcon status={status.status} />
-              </span>
-            )}
+            {status && <ProcessingStatusIcon item={status} revealReadyOnHover />}
             <X
               className="tw-size-4 tw-shrink-0 tw-cursor-pointer tw-text-faint tw-opacity-0 hover:tw-text-error group-hover:tw-opacity-100"
               onClick={() => onRemove(item.id)}
