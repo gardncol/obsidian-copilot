@@ -2031,7 +2031,7 @@ function buildWebSelectionBlocks(context: MessageContext | undefined): string | 
 }
 
 /**
- * Build the `<attached_context>` envelope listing the vault items attached to
+ * Build the `<copilot-context>` envelope listing the vault items attached to
  * THIS message (`@notes` + selected excerpts) and inlining note excerpts.
  * Returns `null` when there's nothing to attach. Distinct from the project-wide
  * `<project_context>` block, which lists the project's configured sources.
@@ -2043,7 +2043,7 @@ function buildContextEnvelope(context: MessageContext | undefined): string | nul
   if (notePaths.length === 0 && excerpts.length === 0) return null;
 
   const lines: string[] = [
-    "<attached_context>",
+    "<copilot-context>",
     "The user attached the following vault items. The vault is your current working directory; use the Read tool to inspect them when relevant.",
   ];
   if (notePaths.length > 0) {
@@ -2057,7 +2057,7 @@ function buildContextEnvelope(context: MessageContext | undefined): string | nul
       for (const l of e.content.split("\n")) lines.push(`  ${l}`);
     }
   }
-  lines.push("</attached_context>");
+  lines.push("</copilot-context>");
   return lines.join("\n");
 }
 

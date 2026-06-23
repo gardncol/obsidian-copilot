@@ -384,9 +384,6 @@ the awaited spawn means the user has moved on).
   from under the user), the composer blocks both keyboard sends and the
   queued-message flush, not just pointer events, so a turn can't drain into a dead
   project.
-- **Attachment envelope rename** — the per-message attachment envelope is
-  `<attached_context>` (renamed from `<copilot-context>`) to disambiguate it from
-  the project-wide `<project_context>` block.
 - **Unified todo / plan** — backend todo lists across claude / codex / opencode
   are normalized into one plan model feeding the project info popover, with
   per-session todo-id tracking and symmetric plan-clear on empty.

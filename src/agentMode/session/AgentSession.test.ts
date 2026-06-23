@@ -135,10 +135,10 @@ describe("buildPromptBlocks", () => {
     expect(blocks).toHaveLength(1);
     expect(blocks[0].type).toBe("text");
     const text = (blocks[0] as { type: "text"; text: string }).text;
-    expect(text).toContain("<attached_context>");
+    expect(text).toContain("<copilot-context>");
     expect(text).toContain("- daily/2026-04-28.md");
     expect(text).toContain("- projects/copilot.md");
-    expect(text).toContain("</attached_context>");
+    expect(text).toContain("</copilot-context>");
     expect(text).toContain("<user-message>\nsummarize them\n</user-message>");
   });
 
@@ -190,7 +190,7 @@ describe("buildPromptBlocks", () => {
     expect(blocks).toHaveLength(3);
     expect(blocks[0].type).toBe("text");
     const head = (blocks[0] as { type: "text"; text: string }).text;
-    expect(head).toContain("<attached_context>");
+    expect(head).toContain("<copilot-context>");
     expect(head).toContain("- a.md");
     expect(head).toContain("<user-message>\nlook at this\n</user-message>");
     expect(blocks[1]).toEqual({
@@ -255,7 +255,7 @@ describe("buildPromptBlocks", () => {
       webTabBlock
     );
     const text = (blocks[0] as { type: "text"; text: string }).text;
-    const envelopePos = text.indexOf("<attached_context>");
+    const envelopePos = text.indexOf("<copilot-context>");
     const selectionPos = text.indexOf("<web_selected_text>");
     const webTabPos = text.indexOf("<web_tab_context>");
     const messagePos = text.indexOf("<user-message>");
@@ -279,8 +279,8 @@ describe("buildPromptBlocks", () => {
     expect(text).toContain("<project_context>");
     expect(text).toContain("`/vault/Papers`");
     // Project context leads, then the per-message attached context, then the message.
-    expect(text.indexOf("<project_context>")).toBeLessThan(text.indexOf("<attached_context>"));
-    expect(text.indexOf("<attached_context>")).toBeLessThan(text.indexOf("<user-message>"));
+    expect(text.indexOf("<project_context>")).toBeLessThan(text.indexOf("<copilot-context>"));
+    expect(text.indexOf("<copilot-context>")).toBeLessThan(text.indexOf("<user-message>"));
   });
 
   it("omits the project-context block when none is provided (later turns)", () => {
