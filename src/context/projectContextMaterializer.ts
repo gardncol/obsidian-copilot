@@ -262,6 +262,15 @@ async function runMaterialize(
       ...youtubeUrls.map((url): RemoteSource => ({ type: "youtube", url })),
     ];
 
+    // DESIGN NOTE — exclusions are parsed (they gate `listMaterializeCandidates`
+    // below, so excluded binaries aren't converted) but deliberately NOT carried
+    // into the manifest/search guidance. PR2 exclusion is Tier 1 (soft,
+    // best-effort = "don't materialize / don't feed" + ignore files); it does NOT
+    // stop the agent's native grep from reading an excluded file inside an
+    // included folder. That "粒度错配的洞" is explicitly acknowledged-and-unblocked
+    // — hard enforcement needs a backend/OS sandbox (Tier 2/3), deferred past PR2.
+    // See designdocs/agent-projects/PR2_DESIGN.md §4.1.1. If a future review flags
+    // this again, point them at this note.
     const { inclusions } = getMatchingPatterns({
       inclusions: contextSource.inclusions,
       exclusions: contextSource.exclusions,
@@ -269,6 +278,15 @@ async function runMaterialize(
     });
     const folders = inclusions?.folderPatterns ?? [];
     const notes = inclusions?.notePatterns ?? [];
+    // DESIGN NOTE — tag/extension inclusions are forwarded to the manifest as
+    // SOURCE LABELS, not resolved to absolute paths or `additionalDirectories`
+    // (unlike folders/notes, which are concrete locations). PR2 routes tags/
+    // extensions through the agent's NATIVE search (grep/find + a resident
+    // instruction on counting Obsidian tags); precise/efficient resolution
+    // (MCP `tag_search`) is deferred to PR3. So a tag whose matches live outside
+    // the project cwd is reachable only via that native search, by design.
+    // See designdocs/agent-projects/PR2_DESIGN.md §4.1. If a future review flags
+    // this again, point them at this note.
     const extensions = inclusions?.extensionPatterns ?? [];
     const tags = inclusions?.tagPatterns ?? [];
 
