@@ -86,6 +86,7 @@ const makeDraft = (overrides: Partial<AgentInputDraftControls> = {}): AgentInput
   setIncludeActiveWebTab: jest.fn(),
   setLoading: jest.fn(),
   setQueue: jest.fn(),
+  migrateDraft: jest.fn(),
   resetCompose: jest.fn(),
   ...overrides,
 });

@@ -385,10 +385,11 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
   // STALE inline block until a new chat. Replace it in place (the handleNewChat
   // pattern) so its fresh `initialize()` re-captures the new context — createSession
   // joins the just-started materialization (single-flight by project) on Retry, or
-  // re-materializes the updated config on Edit. Guarded on an EMPTY draft: a replace
-  // mints a new session id, which prunes the draft (input/images/notes/queue), so we
-  // never discard text the user has started typing — those edits then apply to the
-  // next new chat instead.
+  // re-materializes the updated config on Edit. Guarded on an EMPTY draft so a
+  // refresh never interrupts a draft already in progress. The replace mints a new
+  // session id and prunes the old draft, so to honor "never discard text the user
+  // has started typing" we also migrate any draft typed during the async startup
+  // window onto the new id (the pre-await check can't see those late keystrokes).
   // Returns whether a swap actually happened (false = guarded no-op), so the
   // context-source observer advances its baseline only on a real capture.
   const refreshContextForEmptyLanding = useCallback(async (): Promise<boolean> => {
@@ -401,7 +402,8 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       draft.queue.length === 0;
     if (!draftEmpty) return false;
     try {
-      await manager.replaceSessionInPlace(active.internalId, active.backendId);
+      const replacement = await manager.replaceSessionInPlace(active.internalId, active.backendId);
+      draft.migrateDraft(active.internalId, replacement.internalId);
       return true;
     } catch (e) {
       logError("[AgentMode] refresh landing context failed", e);
