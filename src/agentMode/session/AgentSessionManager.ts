@@ -1571,6 +1571,10 @@ export class AgentSessionManager {
       return;
     }
 
+    // Snapshot the scope this entry replaces BEFORE the optimistic switch, so a
+    // rejected auto-spawn below can restore it (see `spawnEnteredScopeOrRollback`).
+    const previousActiveProjectId = this.activeProjectId;
+    const previousActiveSessionId = this.activeSessionId;
     this.parkActiveScope();
     this.activeProjectId = projectId;
 
@@ -1604,7 +1608,11 @@ export class AgentSessionManager {
       }
       this.activeSessionId = null;
       this.notify();
-      await this.getOrCreateActiveSession();
+      await this.spawnEnteredScopeOrRollback(
+        projectId,
+        previousActiveProjectId,
+        previousActiveSessionId
+      );
       this.touchProjectUsage(projectId);
       return;
     }
@@ -1774,6 +1782,41 @@ export class AgentSessionManager {
   ): void {
     if (this.activeProjectId === attemptedProjectId) {
       this.activeProjectId = previousProjectId;
+    }
+  }
+
+  /**
+   * Auto-spawn a just-entered project scope's first session, undoing the
+   * optimistic scope switch if the spawn rejects (e.g. a missing backend binary).
+   * By this point `enterProject` has parked the prior scope, pointed
+   * `activeProjectId` at the new scope, detached the new scope's tabs, and nulled
+   * `activeSessionId`. The callers only surface a Notice, so without this a
+   * rejected spawn would strand the manager in a project scope with no active
+   * chat. Restores the previous scope's `activeProjectId` + active-session pointer
+   * and re-notifies, then rethrows so the caller still reports the failure.
+   *
+   * Guarded on still being parked in the attempted scope: a concurrent
+   * `enterProject` during the awaited spawn means the user moved on, and forcing
+   * them back would clobber that newer switch (mirrors
+   * {@link rollbackHistoryLoadScope}). The detached tabs are intentionally left
+   * detached — they belong to the project we failed to enter, are invisible from
+   * the restored scope, and a later successful entry re-detaches them anyway as a
+   * fresh visit.
+   */
+  private async spawnEnteredScopeOrRollback(
+    attemptedProjectId: ProjectScopeId,
+    previousProjectId: ProjectScopeId,
+    previousActiveSessionId: string | null
+  ): Promise<void> {
+    try {
+      await this.getOrCreateActiveSession();
+    } catch (err) {
+      if (this.activeProjectId === attemptedProjectId) {
+        this.activeProjectId = previousProjectId;
+        this.activeSessionId = previousActiveSessionId;
+        this.notify();
+      }
+      throw err;
     }
   }
 

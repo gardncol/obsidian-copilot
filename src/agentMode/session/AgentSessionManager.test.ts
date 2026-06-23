@@ -2487,6 +2487,35 @@ describe("AgentSessionManager.enterProject MRU touch", () => {
     expect(mgr.getActiveProjectId()).toBe(PROJECT_ID);
     expect(mgr.getActiveSession()).toBe(projectSession);
   });
+
+  it("rolls the entered scope back when its auto-spawn fails", async () => {
+    const OTHER_ID = "proj-other-fail";
+    recordSpy.mockImplementation((id: string) =>
+      id === PROJECT_ID || id === OTHER_ID
+        ? { filePath: `Projects/${id}/project.md`, project: { id } }
+        : undefined
+    );
+    const mgr = buildManager();
+    // Land in a project scope with a live session — the exact state a failed
+    // entry into a DIFFERENT project must restore.
+    await mgr.enterProject(PROJECT_ID);
+    const projectSession = mgr.getActiveSession();
+    expect(mgr.getActiveProjectId()).toBe(PROJECT_ID);
+
+    // Entering OTHER_ID switches the active scope and nulls the active session
+    // before awaiting the fresh spawn; the spawn then rejects. (Inject at
+    // AgentSession.start, which createSession always calls even on a warm proc —
+    // the prior enter left the backend running, so a cold-start reject wouldn't
+    // fire here.) The rollback must restore the prior scope + session rather than
+    // strand the manager in a chatless OTHER_ID scope (callers only show a Notice).
+    sessionCreateSpy.mockImplementationOnce(() => {
+      throw new Error("spawn boom");
+    });
+    await expect(mgr.enterProject(OTHER_ID)).rejects.toThrow();
+
+    expect(mgr.getActiveProjectId()).toBe(PROJECT_ID);
+    expect(mgr.getActiveSession()).toBe(projectSession);
+  });
 });
 
 describe("AgentSessionManager fresh-visit tab detach", () => {
