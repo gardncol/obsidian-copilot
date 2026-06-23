@@ -13,17 +13,21 @@ import { AGENT_TODO_PLANNING_STEERING } from "@/system-prompts/agentTodoPlanning
  * the project folder (`resolveScopeCwd`), so "this project's folder" and "outputs/" stay
  * portable — no vault-absolute paths, no hardcoded folder branches.
  *
- * The default-only-cwd rule deliberately carves out the paths the user already opted into:
- * the project's configured context sources are handed to backends as out-of-cwd
- * `additionalDirectories`, so reading them is expected, not a violation. Carrying its own
+ * The default-only-cwd rule deliberately carves out the paths the user already opted into,
+ * which reach the backend two ways: out-of-cwd context FOLDERS as `additionalDirectories`,
+ * and materialized snapshots (PDFs/spreadsheets/images, web/YouTube captures) as inline
+ * absolute paths in the `<project_context>` block. Both are expected reads, not violations —
+ * so the rule names the block itself, not just the vague "configured context sources", to keep
+ * an off-vault cache path (`~/.obsidian-copilot/.../context-cache/...`) from reading as
+ * forbidden. Carrying its own
  * `## ` heading keeps this layer visually distinct from the user's custom prompt once the two
  * are concatenated. "Built-in" (vs the user's "Custom") matches the plugin's existing
  * vocabulary — the global "Disable builtin system prompt" toggle.
  */
 export const BUILTIN_PROJECT_SYSTEM_PROMPT = `## Built-in system prompt
-- This project's folder is your working directory. Treat it as the project workspace and keep your work inside it by default.
-- Write generated files, drafts, and intermediate artifacts under an \`${PROJECT_OUTPUTS_DIRNAME}/\` folder inside the working directory, creating it if needed — unless the user names a different destination.
-- By default, only read and search files inside the working directory. Don't reach for files outside it unless these instructions, the project's configured context sources, or the user explicitly point you to a specific file or location.`;
+- This project's folder is your working directory and workspace. Write generated files, drafts, and intermediate artifacts under an \`${PROJECT_OUTPUTS_DIRNAME}/\` folder inside it, creating it if needed — unless the user names a different destination.
+- Read and search inside the working directory by default. On top of that, the project's configured context sources listed in the \`<project_context>\` block are opted-in even when they live outside it — notably the off-vault materialized snapshots (converted PDFs/spreadsheets/images, web/YouTube captures) under the device-local context cache — so reading and searching those paths is expected, not a violation. When a source shows a \`→ <absolute path>\` snapshot pointer, read that path directly, without hesitation or asking.
+- Don't reach for unrelated files outside the working directory or those context sources unless these instructions or the user point you to a specific file or location.`;
 
 /**
  * Heading that opens the user's own system-prompt section. Markdown has no section terminator —

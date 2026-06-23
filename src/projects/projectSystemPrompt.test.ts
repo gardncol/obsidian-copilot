@@ -1,3 +1,4 @@
+import { buildProjectContextBlock } from "@/context/manifestBuilder";
 import { PROJECT_OUTPUTS_DIRNAME } from "@/projects/constants";
 import {
   BUILTIN_PROJECT_SYSTEM_PROMPT,
@@ -32,6 +33,25 @@ describe("BUILTIN_PROJECT_SYSTEM_PROMPT", () => {
 
   it("has no leading/trailing whitespace", () => {
     expect(BUILTIN_PROJECT_SYSTEM_PROMPT).toBe(BUILTIN_PROJECT_SYSTEM_PROMPT.trim());
+  });
+
+  it("points the read carve-out at the same tag the manifest actually emits", () => {
+    // The read carve-out tells the agent to read paths listed in the `<project_context>` block.
+    // That tag is hardcoded in both this prompt and the manifest builder; if the builder ever
+    // renames it, the opt-in instruction silently dangles and the off-vault-cache regression
+    // returns (the agent stops reading materialized snapshots). Pin both to one literal.
+    const tag = "<project_context>";
+    const block = buildProjectContextBlock({
+      folders: [],
+      notes: [],
+      extensions: [],
+      tags: [],
+      webUrls: [],
+      youtubeUrls: [],
+      materialized: [],
+    });
+    expect(block).toContain(tag);
+    expect(BUILTIN_PROJECT_SYSTEM_PROMPT).toContain(tag);
   });
 });
 
