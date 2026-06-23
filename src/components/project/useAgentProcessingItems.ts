@@ -45,10 +45,12 @@ export function useAgentProcessingItems(
   contextSource: ProjectConfig["contextSource"],
   options?: { enabled?: boolean }
 ): AgentProcessingItemsState {
-  // Disabled for CAG callers: the agent read-model touches the off-vault cache
-  // (node fs, desktop-only) and the agent load atom, neither of which a CAG/chat
-  // project has. A caller that always mounts this hook (React rule) passes
-  // `enabled: false` to short-circuit it to empty without that work.
+  // Disabled for CAG callers: the agent read-model enumerates context sources and
+  // reads the off-vault cache (node fs, desktop-only), which a CAG/chat project
+  // has no use for. A caller that always mounts this hook (React rule) passes
+  // `enabled: false` to short-circuit it to a stable empty result, skipping that
+  // work. (The atom is still subscribed — hooks run unconditionally — but its
+  // value is unused when disabled, so it only costs a harmless re-render.)
   const enabled = options?.enabled ?? true;
   const loadStates = useAtomValue(agentProjectContextLoadAtom, { store: settingsStore });
   const liveEntry = enabled ? loadStates[project.id] : undefined;

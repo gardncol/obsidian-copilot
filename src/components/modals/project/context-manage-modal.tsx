@@ -8,7 +8,7 @@ import {
   processingSourceKey,
 } from "@/components/project/processingItemStatusView";
 import { useAgentProcessingItems } from "@/components/project/useAgentProcessingItems";
-import { openCachedProjectFile } from "@/utils/cacheFileOpener";
+import { openAgentCachedItemPreview, openCachedProjectFile } from "@/utils/cacheFileOpener";
 import { ProjectFileSelectModal } from "@/components/modals/ProjectFileSelectModal";
 import { TagSearchModal } from "@/components/modals/TagSearchModal";
 import { TruncatedText } from "@/components/TruncatedText";
@@ -290,8 +290,8 @@ const STATUS_LABELS: Record<ProjectContextItemStatus, string> = {
   notStarted: "Not started",
 };
 
-/** Status → text color — shared by the CAG badge and the agent compact icon so the
- * two never drift. */
+/** Status → text color for the CAG badge. (The agent variant renders status via
+ * the shared {@link ProcessingStatusIcon}, which owns its own colors.) */
 const STATUS_COLOR: Record<ProjectContextItemStatus, string> = {
   success: "tw-text-success",
   failed: "tw-text-error",
@@ -333,8 +333,13 @@ function ItemCard({
   const IconComponent = item.isIgnored ? Plus : XIcon;
 
   // Shared "view parsed content" arrow (revealed on row hover for converted items).
+  // "Converted" is the agent item's `ready` state (Links variant) or the CAG
+  // `success` state — each surface feeds the matching status above.
+  const hasConvertedSnapshot = compactStatus
+    ? agentProcessingItem?.status === "ready"
+    : loadStatus?.status === "success";
   const previewButton =
-    onOpenCached && loadStatus?.status === "success" ? (
+    onOpenCached && hasConvertedSnapshot ? (
       <Button
         variant="ghost2"
         size="icon"
@@ -587,7 +592,9 @@ function ContextManage({
   // Agent (Links) variant ONLY: one shared conversion-status lookup keyed by
   // `processingSourceKey`, covering both URL rows and File Context rows so they
   // render the same {@link ProcessingStatusIcon}. Gated to `enableLinks` so the
-  // CAG path never runs the agent read-model (off-vault cache / agent atom).
+  // CAG path skips the off-vault/fs read and gets a stable empty result (the
+  // hook still subscribes to the agent atom, which is harmless — its value is
+  // unused when disabled).
   const { items: agentProcessingItems } = useAgentProcessingItems(
     app,
     initialProject,
@@ -727,6 +734,39 @@ function ContextManage({
   const [activeItem, setActiveItem] = useState<ActiveItem>(null);
   const isLinksActive =
     activeSection === "links" || activeSection === "web" || activeSection === "youtube";
+
+  // A file row's status + snapshot-preview, resolved in ONE place so the JSX
+  // doesn't branch on `enableLinks` per prop. Agent reads the shared agent
+  // pipeline (status icon + off-vault snapshot); CAG reads its ProjectContextCache
+  // (badge + in-vault parsed content). Ignored rows get neither.
+  const getFileRowStatusProps = useCallback(
+    (
+      item: GroupItem
+    ): Pick<ItemCardProps, "agentProcessingItem" | "loadStatus" | "onOpenCached"> => {
+      if (item.isIgnored || activeSection === "ignoreFiles") return {};
+      if (enableLinks) {
+        const agentItem = agentProcessingByKey.get(processingSourceKey("file", item.id));
+        return {
+          agentProcessingItem: agentItem,
+          onOpenCached: agentItem
+            ? () => void openAgentCachedItemPreview(app, agentItem)
+            : undefined,
+        };
+      }
+      const isMarkdown = item.id.split(".").pop()?.toLowerCase() === "md";
+      return {
+        loadStatus: getProjectContextItemStatus(item.id, contextLoadLookup),
+        // Markdown isn't converted, so it has no parsed snapshot to open.
+        onOpenCached: isMarkdown
+          ? undefined
+          : () => {
+              const name = item.name || item.id.split("/").pop() || item.id;
+              void openCachedProjectFile(app, projectCache, item.id, name);
+            },
+      };
+    },
+    [enableLinks, activeSection, agentProcessingByKey, contextLoadLookup, app, projectCache]
+  );
 
   //  groupList convert to inclusions format
   const convertGroupListToInclusions = useCallback(
@@ -1530,57 +1570,32 @@ function ContextManage({
                   {activeSection || searchTerm
                     ? // When a category is selected or a search is performed, display the normal item list.
                       sortItems(getDisplayItems)
-                        .map((item) =>
-                          showingCategoryItems && isCategoryItem(item) ? (
-                            <CategoryItemCard
-                              key={item.id}
-                              item={item}
-                              onClick={handleCategoryItemClick}
-                            />
-                          ) : !isCategoryItem(item) ? (
+                        .map((item) => {
+                          if (showingCategoryItems && isCategoryItem(item)) {
+                            return (
+                              <CategoryItemCard
+                                key={item.id}
+                                item={item}
+                                onClick={handleCategoryItemClick}
+                              />
+                            );
+                          }
+                          if (isCategoryItem(item)) return null;
+                          return (
                             <ItemCard
                               key={item.id}
                               item={item}
                               viewMode="list"
                               compactStatus={enableLinks}
-                              agentProcessingItem={
-                                // Agent file rows read the shared agent status lookup
-                                // (`file:<path>`); ignored rows never show status.
-                                enableLinks && activeSection !== "ignoreFiles" && !item.isIgnored
-                                  ? agentProcessingByKey.get(processingSourceKey("file", item.id))
-                                  : undefined
-                              }
-                              loadStatus={
-                                // CAG-only per-file status. The agent variant uses
-                                // `agentProcessingItem` above — its status comes from the agent
-                                // pipeline (atom + off-vault cache), NOT the CAG
-                                // ProjectContextCache / useProjectContextLoad atom this lookup
-                                // reads, which the agent pipeline never populates.
-                                enableLinks || activeSection === "ignoreFiles" || item.isIgnored
-                                  ? undefined
-                                  : getProjectContextItemStatus(item.id, contextLoadLookup)
-                              }
                               onDelete={
                                 activeSection === "ignoreFiles" || item.isIgnored
                                   ? handleDeleteIgnoreItem
                                   : handleDeleteItem
                               }
-                              onOpenCached={
-                                // Reason: only offer open for processed non-markdown files. CAG-only:
-                                // the parsed content lives in CAG's ProjectContextCache, which the agent
-                                // pipeline never writes (agent snapshots live in the off-vault conversion cache).
-                                !enableLinks &&
-                                !item.isIgnored &&
-                                item.id.split(".").pop()?.toLowerCase() !== "md"
-                                  ? () => {
-                                      const name = item.name || item.id.split("/").pop() || item.id;
-                                      void openCachedProjectFile(app, projectCache, item.id, name);
-                                    }
-                                  : undefined
-                              }
+                              {...getFileRowStatusProps(item)}
                             />
-                          ) : null
-                        )
+                          );
+                        })
                         .filter(Boolean)
                     : // When no category is selected and no search, display the grouped category list.
                       getDisplayItems
