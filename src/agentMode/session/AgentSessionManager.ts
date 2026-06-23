@@ -1,7 +1,12 @@
 import { logError, logInfo, logWarn } from "@/logger";
 import type CopilotPlugin from "@/main";
 import { AgentChatUIState } from "@/agentMode/session/AgentChatUIState";
-import { getSettings, setSettings } from "@/settings/model";
+import {
+  getSettings,
+  setSettings,
+  subscribeToSettingsChange,
+  type CopilotSettings,
+} from "@/settings/model";
 import { err2String } from "@/utils";
 import type { ChatHistoryItem } from "@/components/chat-components/ChatHistoryPopover";
 import { fileToHistoryItem } from "@/utils/chatHistoryUtils";
@@ -27,6 +32,7 @@ import {
   type FanoutRunInput,
 } from "./fanout/FanoutOrchestrator";
 import type { FanoutTurn } from "./fanout/fanoutTypes";
+import { backendStateSignature } from "./translateBackendState";
 import type {
   AgentQuestionAnswers,
   AskUserQuestionPrompt,
@@ -183,7 +189,15 @@ export class AgentSessionManager {
   // Session ids of ephemeral read-only fan-out sub-sessions; the shared permission
   // prompter consults this to hard-deny write/exec tools for them.
   private readonly readOnlyFanoutSessions = new Set<SessionId>();
+  // Serializes per-session default-model re-applies so two rapid settings
+  // changes can't race their setModel/setConfigOption round-trips and leave
+  // the session on a stale model. Each link re-reads the latest default, so
+  // the final settings value always wins.
+  private readonly defaultApplyChains = new Map<string, Promise<void>>();
   private readonly fanoutOrchestrator: FanoutOrchestrator;
+  // Tear-down for the settings subscription that re-applies a changed
+  // per-backend default model to any live session on that backend.
+  private readonly settingsUnsub: () => void;
 
   private getSessionState(internalId: string) {
     let entry = this.sessionState.get(internalId);
@@ -204,6 +218,78 @@ export class AgentSessionManager {
     }
     this.preloader = opts.modelPreloader;
     this.fanoutOrchestrator = new FanoutOrchestrator(this.createFanoutHost());
+    this.settingsUnsub = subscribeToSettingsChange((prev, next) =>
+      this.onDefaultSelectionsChanged(prev, next)
+    );
+  }
+
+  /**
+   * React to a per-backend default model change made in settings: re-apply
+   * it to any live session on that backend so the user's *next* turn uses
+   * it (an in-flight turn is unaffected — the descriptor's live re-apply
+   * only takes effect on the following prompt). Routes through
+   * `descriptor.applySelection` directly rather than `this.applySelection`
+   * to avoid re-entrancy with the settings write that triggered us, and to
+   * reach a non-active session on that backend.
+   */
+  private onDefaultSelectionsChanged(prev: CopilotSettings, next: CopilotSettings): void {
+    const prevBackends = prev.agentMode?.backends as
+      | Record<string, { defaultModel?: ModelSelection | null } | undefined>
+      | undefined;
+    const nextBackends = next.agentMode?.backends as
+      | Record<string, { defaultModel?: ModelSelection | null } | undefined>
+      | undefined;
+    for (const session of this.sessions.values()) {
+      if (session.getStatus() === "closed") continue;
+      const backendId = session.backendId;
+      const before = prevBackends?.[backendId]?.defaultModel ?? null;
+      const after = nextBackends?.[backendId]?.defaultModel ?? null;
+      if (before?.baseModelId === after?.baseModelId && before?.effort === after?.effort) continue;
+      const descriptor = this.opts.resolveDescriptor(backendId);
+      if (!descriptor) continue;
+      this.enqueueDefaultApply(session, descriptor);
+    }
+  }
+
+  /**
+   * Append a default-model re-apply to the session's serialized chain. The
+   * apply re-reads the latest default at run time (clearing to "Agent default"
+   * resolves to the catalog native so the next turn isn't pinned to the old
+   * explicit model; no probed catalog leaves the session as-is), so when
+   * several changes land in a burst the final settings value wins instead of
+   * an out-of-order round-trip. Chaining off `session.ready` also covers a
+   * session still in its startup window, which has no `backendSessionId` yet
+   * and would throw on a bare `applySelection`.
+   */
+  private enqueueDefaultApply(session: AgentSession, descriptor: BackendDescriptor): void {
+    const backendId = session.backendId;
+    const prior = this.defaultApplyChains.get(session.internalId) ?? Promise.resolve();
+    const next = prior
+      .then(() => session.ready)
+      .then(() => {
+        if (session.getStatus() === "closed") return;
+        const target =
+          this.getDefaultSelection(backendId) ?? this.nativeDefaultSelection(backendId);
+        if (!target) return;
+        return descriptor.applySelection(session, target);
+      })
+      .catch((e) => logWarn(`[AgentMode] re-applying default model for ${backendId} failed`, e))
+      .finally(() => {
+        if (this.defaultApplyChains.get(session.internalId) === next) {
+          this.defaultApplyChains.delete(session.internalId);
+        }
+      });
+    this.defaultApplyChains.set(session.internalId, next);
+  }
+
+  /**
+   * The agent's catalog-declared native default as a `ModelSelection`, or
+   * `null` when no catalog has been probed. Used to revert a live session
+   * after its explicit default is cleared.
+   */
+  private nativeDefaultSelection(backendId: BackendId): ModelSelection | null {
+    const baseModelId = this.getDefaultBaseModelId(backendId);
+    return baseModelId ? { baseModelId, effort: null } : null;
   }
 
   /** Whether `backendSessionId` is an ephemeral read-only fan-out sub-session. */
@@ -224,7 +310,12 @@ export class AgentSessionManager {
         const { proc } = await this.ensureBackend(backendId, descriptor);
         return { proc, descriptor };
       },
-      getDefaultSelection: (backendId) => this.getDefaultSelection(backendId),
+      // Mirror createSession's fallback: a fan-out sub-session spawned on a
+      // warm/running subprocess inherits the model baked into its spawn-time
+      // config, so a cleared default must resolve to the catalog native to
+      // override that stale model rather than no-op.
+      getDefaultSelection: (backendId) =>
+        this.getDefaultSelection(backendId) ?? this.nativeDefaultSelection(backendId),
       getDisplayName: (backendId) => this.resolveDescriptor(backendId).displayName,
       getCwd: () => {
         const adapter = this.app.vault.adapter;
@@ -558,12 +649,15 @@ export class AgentSessionManager {
    * to `settings.agentMode.activeBackend` (the model-picker keeps that in
    * sync with the user's most recently selected default model).
    *
-   * The new session's initial (model, effort) is read from the persisted
-   * default for `backendId` via `getDefaultSelection`. Picker call sites that
-   * want a specific selection on a new backend should call
-   * `persistDefaultSelection` first.
+   * The new session's initial (model, effort) defaults to the persisted
+   * default for `backendId` via `getDefaultSelection`. Pass `seedSelection`
+   * to seed a specific (model, effort) without touching that default — used
+   * by a cross-backend chat pick, which is transient.
    */
-  async createSession(backendId?: BackendId): Promise<AgentSession> {
+  async createSession(
+    backendId?: BackendId,
+    seedSelection?: ModelSelection
+  ): Promise<AgentSession> {
     if (this.disposed) {
       throw new Error("AgentSessionManager has been shut down");
     }
@@ -599,7 +693,19 @@ export class AgentSessionManager {
       throw new Error("AgentSessionManager was shut down during session creation");
     }
 
-    const seedSelection = this.getDefaultSelection(resolvedId) ?? undefined;
+    // Falls back to the catalog native default when there's no transient seed
+    // and no stored default. Otherwise a warm/running subprocess (e.g.
+    // opencode) keeps serving the model baked into its spawn-time config from
+    // a since-cleared default, so a brand-new "Agent default" chat would
+    // silently inherit the stale model. Confirming the native selection here
+    // pins the new session to native instead. With no probed catalog there's
+    // no native id to target, so the seed stays undefined and behavior is
+    // unchanged.
+    const resolvedSeed =
+      seedSelection ??
+      this.getDefaultSelection(resolvedId) ??
+      this.nativeDefaultSelection(resolvedId) ??
+      undefined;
 
     // A new chat must always start from a brand-new backend session. When a
     // warm preload probe is available we reuse its already-spawned and
@@ -615,7 +721,7 @@ export class AgentSessionManager {
       cwd: vaultBasePath,
       internalId: uuidv4(),
       backendId: resolvedId,
-      defaultModelSelection: seedSelection,
+      defaultModelSelection: resolvedSeed,
       initialCachedState: warm?.state ?? this.preloader.getCachedBackendState(resolvedId),
       getDescriptor: () => this.opts.resolveDescriptor(resolvedId),
       runFanoutTurn: (input) => this.runFanoutTurn(input),
@@ -645,7 +751,7 @@ export class AgentSessionManager {
       .then(async () => {
         if (descriptor.applyInitialSessionConfig) {
           try {
-            await descriptor.applyInitialSessionConfig(session, getSettings());
+            await descriptor.applyInitialSessionConfig(session, getSettings(), resolvedSeed);
           } catch (e) {
             logWarn(
               `[AgentMode] applyInitialSessionConfig failed for ${resolvedId}; continuing`,
@@ -735,9 +841,10 @@ export class AgentSessionManager {
    * sibling, which captures the backend id at picker-build time and
    * might fire after a session swap.
    *
-   * After a successful descriptor apply, the resolved selection is also
-   * written to the persisted default for the active backend — symmetric
-   * with `applyMode`. If the descriptor throws, no persistence occurs.
+   * A chat-side model switch is transient: it mutates only the active
+   * session. The durable per-backend default is written exclusively by the
+   * settings picker (`persistDefaultSelection`), so a one-off chat pick no
+   * longer drifts the default.
    */
   async applySelection(
     patch: { baseModelId?: string; effort?: string | null },
@@ -754,7 +861,6 @@ export class AgentSessionManager {
       effort: patch.effort !== undefined ? patch.effort : current.effort,
     };
     await descriptor.applySelection(session, resolved);
-    await this.persistDefaultSelection(session.backendId, resolved);
   }
 
   /**
@@ -929,6 +1035,27 @@ export class AgentSessionManager {
   /** Subscribe to preloader cache updates. Used by the picker hook. */
   subscribeModelCache(listener: () => void): () => void {
     return this.preloader.subscribe(listener);
+  }
+
+  /**
+   * Stable string that changes whenever anything a model picker reads for
+   * `backendId` changes: preload status, the cached backend state, and the
+   * prefetched effort catalog. A `useSyncExternalStore` snapshot built only
+   * from `getPreloadStatus` would miss the post-`"ready"` effort-catalog
+   * prefetch (the snapshot stays `"ready"`, so React skips the rerender and
+   * the Default effort dropdown never appears).
+   */
+  getModelCacheSignature(backendId: BackendId): string {
+    const status = this.getPreloadStatus(backendId);
+    const state = backendStateSignature(this.getCachedBackendState(backendId));
+    const effort = this.getEffortCatalog(backendId);
+    const effortSig = effort
+      ? Object.keys(effort)
+          .sort()
+          .map((id) => `${id}:${effort[id].map((o) => o.value ?? "").join(",")}`)
+          .join("|")
+      : "";
+    return `${status}#${state}#${effortSig}`;
   }
 
   /** Kick off a (best-effort) model probe for `backendId`. */
@@ -1172,6 +1299,7 @@ export class AgentSessionManager {
   async shutdown(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.settingsUnsub();
     logInfo(
       `[AgentMode] shutdown (pool size=${this.sessions.size}, backends=${this.backends.size})`
     );
