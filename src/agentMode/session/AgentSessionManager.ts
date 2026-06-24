@@ -1645,6 +1645,17 @@ export class AgentSessionManager {
    * existing empty landing is stale/unusable and must not linger in the strip);
    * otherwise they're left attached so the reused one stays the visit's tab (see
    * {@link pickReusableLandingSession}).
+   *
+   * DESIGN NOTE — detached sessions are deliberately kept ALIVE (a backgrounded
+   * turn keeps running; the history row shows its spinner/done-dot) and are NOT
+   * evicted here, so repeated project re-entry accumulates idle detached sessions
+   * for the app's lifetime. Bounding the idle-detached class — an LRU cap that
+   * never evicts running/awaiting sessions — needs a per-session backend close
+   * primitive the backends don't expose yet, so it is out of scope for the
+   * project-workspace landing. Known limitation, deliberately deferred
+   * (obsidian-copilot-preview#164; the missing close primitive is
+   * obsidian-copilot-preview#178). If a future review flags this again, point
+   * them here.
    */
   private detachSessionsForProjectEntry(
     projectId: ProjectScopeId,

@@ -708,7 +708,11 @@ async function readMeta(fs: ContextCacheFs, filePath: string): Promise<CacheEntr
  */
 export function parseSnapshotMeta(raw: string): CacheEntryMeta | null {
   if (!raw.startsWith(META_OPEN)) return null;
-  const close = raw.indexOf(META_CLOSE);
+  // Match the close marker only at a line start (the writer always emits it as
+  // `\n${META_CLOSE}\n`). A bare `indexOf(META_CLOSE)` would match a `-->`
+  // embedded in the JSON's sourcePath/sourceUrl, truncating the JSON and forcing
+  // a permanent cache miss for any source whose path legitimately contains `-->`.
+  const close = raw.indexOf(`\n${META_CLOSE}`, META_OPEN.length);
   if (close < 0) return null;
   const json = raw.slice(META_OPEN.length, close).trim();
   try {

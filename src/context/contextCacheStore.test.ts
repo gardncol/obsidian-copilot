@@ -2,8 +2,11 @@ import { Mutex } from "async-mutex";
 import { join } from "node:path";
 import type { ContextCacheFs } from "./contextCacheFs";
 import {
+  CACHE_SCHEMA_VERSION,
   materializeSources,
+  parseSnapshotMeta,
   reconcileMarkers,
+  type CacheEntryMeta,
   type ContextConverters,
   type FileSource,
   type MaterializeProgress,
@@ -693,5 +696,32 @@ describe("reconcileMarkers", () => {
     expect(fs.files.has(join(REMOTES_DIR, "web-abc01.md"))).toBe(true);
     expect(fs.files.has(join(FILES_DIR, "file-abc02.md"))).toBe(true);
     expect(fs.files.has(join(MARKER_DIR, "failed-youtube-abc03.json"))).toBe(false);
+  });
+});
+
+describe("parseSnapshotMeta", () => {
+  // Mirror the writer's exact framing (META_OPEN / META_CLOSE are module-private).
+  const buildSnapshot = (meta: CacheEntryMeta): string =>
+    `<!-- copilot-context-cache\n${JSON.stringify(meta)}\n-->\n\n# File: x\n\ncontent\n`;
+
+  const fileMeta = (sourcePath: string): CacheEntryMeta => ({
+    schemaVersion: CACHE_SCHEMA_VERSION,
+    sourceType: "file",
+    sourcePath,
+    fetchedAt: "2026-01-01T00:00:00.000Z",
+    fingerprint: "123:456",
+  });
+
+  it("parses a well-formed meta block", () => {
+    const meta = fileMeta("Notes/foo.md");
+    expect(parseSnapshotMeta(buildSnapshot(meta))).toEqual(meta);
+  });
+
+  it("does not truncate the JSON on a '-->' inside the source path", () => {
+    // Regression: indexOf("-->") matched the marker embedded in the JSON value,
+    // cutting the JSON short -> JSON.parse threw -> permanent cache miss. The
+    // close marker is now anchored to a line boundary.
+    const meta = fileMeta("Notes/a-->b.md");
+    expect(parseSnapshotMeta(buildSnapshot(meta))).toEqual(meta);
   });
 });

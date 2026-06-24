@@ -119,6 +119,16 @@ describe("extractUrlsFromText", () => {
     expect(extractUrlsFromText("(see https://example.com.)")).toEqual(["https://example.com"]);
   });
 
+  it("handles a long unbalanced trailing bracket run without quadratic blowup", () => {
+    // Perf tripwire: trimming used to re-split the whole string per stripped char
+    // (O(n²)), freezing the main thread on a pathological paste. The linear
+    // rewrite resolves this 100k-')' run instantly; reintroducing the quadratic
+    // form would blow the test timeout. (Correctness of the rewrite itself is
+    // covered by the small balanced/unbalanced cases above.)
+    const url = "https://example.com";
+    expect(extractUrlsFromText(`${url}${")".repeat(100_000)}`)).toEqual([url]);
+  });
+
   it("strips markdown image/link wrappers down to the url", () => {
     expect(extractUrlsFromText('![alt](https://cdn.example.com/a.png "title")')).toEqual([
       "https://cdn.example.com/a.png",

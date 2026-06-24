@@ -72,29 +72,44 @@ export function createUrlItem(raw: string): UrlItem {
 
 const CLOSING_TO_OPENING: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
 
+const SENTENCE_PUNCTUATION_RE = /[.,;:!?，。！？；：、]/u;
+
+/** Walk back over trailing sentence/CJK punctuation in `url[0, end)`, returning the new end. */
+function trimSentencePunctuationEnd(url: string, end: number): number {
+  while (end > 0 && SENTENCE_PUNCTUATION_RE.test(url[end - 1])) end--;
+  return end;
+}
+
 /**
  * Trim trailing punctuation a URL accretes from the prose around it — sentence
  * enders and CJK punctuation — plus an UNBALANCED closing bracket, so
  * "(see https://x.com)" yields "https://x.com" while a path that legitimately
  * ends in a balanced bracket (e.g. Wikipedia ".../Foo_(disambiguation)") keeps it.
  */
-function trimSentencePunctuation(url: string): string {
-  return url.replace(/[.,;:!?，。！？；：、]+$/u, "");
-}
-
 function trimUrlTrailingPunctuation(url: string): string {
-  let next = trimSentencePunctuation(url);
-  while (next.length > 0) {
-    const last = next[next.length - 1];
+  let end = trimSentencePunctuationEnd(url, url.length);
+  // Count brackets once so the trailing-strip loop stays O(n). Re-splitting the
+  // whole string per stripped char is O(n²) and freezes the main thread on a
+  // pathological trailing-bracket run (e.g. a corrupted paste). Only closers and
+  // sentence punctuation are ever stripped — never openers — so these opener
+  // totals stay valid as `end` walks left.
+  const openCounts: Record<string, number> = { "(": 0, "[": 0, "{": 0 };
+  const closeCounts: Record<string, number> = { ")": 0, "]": 0, "}": 0 };
+  for (let i = 0; i < end; i++) {
+    const ch = url[i];
+    if (ch === "(" || ch === "[" || ch === "{") openCounts[ch]++;
+    else if (ch === ")" || ch === "]" || ch === "}") closeCounts[ch]++;
+  }
+  while (end > 0) {
+    const last = url[end - 1];
     const opener = CLOSING_TO_OPENING[last];
     if (!opener) break;
-    const opens = next.split(opener).length - 1;
-    const closes = next.split(last).length - 1;
-    if (closes <= opens) break;
-    // Re-trim sentence punctuation that the bracket was hiding ("example.com.)").
-    next = trimSentencePunctuation(next.slice(0, -1));
+    if (closeCounts[last] <= openCounts[opener]) break; // balanced — keep it
+    closeCounts[last]--;
+    // Re-trim sentence punctuation the bracket was hiding ("example.com.)").
+    end = trimSentencePunctuationEnd(url, end - 1);
   }
-  return next;
+  return url.slice(0, end);
 }
 
 /**
