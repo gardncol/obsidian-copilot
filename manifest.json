@@ -1,14 +1,11 @@
 {
-  "id": "copilot",
-  "name": "Copilot",
-  "version": "3.3.3",
+  "id": "obsidian-agent",
+  "name": "Obsidian Agent",
+  "version": "3.3.3-fork",
   "minAppVersion": "1.11.4",
   "isDesktopOnly": false,
-  "description": "Your AI Copilot: Chat with Your Second Brain, Learn Faster, Work Smarter.",
-  "author": "Logan Yang",
-  "authorUrl": "https://twitter.com/logancyang",
-  "fundingUrl": {
-    "Buy Me a Coffee": "https://www.buymeacoffee.com/logancyang",
-    "GitHub Sponsor": "https://github.com/sponsors/logancyang"
-  }
+  "description": "AI agent with BYOK agent mode, hybrid search, and no Plus license requirement. Fork of Copilot for Obsidian.",
+  "author": "Colin (forked from Logan Yang)",
+  "authorUrl": "https://github.com/gardncol/obsidian-copilot",
+  "fundingUrl": {}
 }
