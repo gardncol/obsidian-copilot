@@ -20,7 +20,6 @@ import { CustomCommandChatModal } from "@/commands/CustomCommandChatModal";
 import { ConfirmModal } from "@/components/modals/ConfirmModal";
 import { ApplyCustomCommandModal } from "@/components/modals/ApplyCustomCommandModal";
 import { YoutubeTranscriptModal } from "@/components/modals/YoutubeTranscriptModal";
-import { checkIsPlusUser } from "@/plusUtils";
 // Debug modals removed with search v3
 import CopilotPlugin from "@/main";
 import { shouldUseMiyo } from "@/miyo/miyoUtils";
@@ -632,14 +631,8 @@ export function registerCommands(
     modal.open();
   });
 
-  // Add command to download YouTube script (Copilot Plus only)
+  // Add command to download YouTube script
   addCommand(plugin, COMMAND_IDS.DOWNLOAD_YOUTUBE_SCRIPT, async () => {
-    const isPlusUser = await checkIsPlusUser();
-    if (!isPlusUser) {
-      new Notice("Download YouTube Script (plus) is a Copilot Plus feature");
-      return;
-    }
-
     const modal = new YoutubeTranscriptModal(plugin.app);
     modal.open();
   });

@@ -21,8 +21,13 @@ jest.mock("@/tools/toolManager", () => ({
   },
 }));
 
+jest.mock("@/settings/model", () => ({
+  getSettings: jest.fn(),
+}));
+
 import { checkIsPlusUser } from "@/plusUtils";
 import { ToolManager } from "@/tools/toolManager";
+import * as settingsModule from "@/settings/model";
 
 describe("toolExecution", () => {
   const mockCheckIsPlusUser = checkIsPlusUser as jest.MockedFunction<typeof checkIsPlusUser>;
@@ -69,7 +74,7 @@ describe("toolExecution", () => {
       expect(mockCheckIsPlusUser).not.toHaveBeenCalled();
     });
 
-    it("should block plus-only tools for non-plus users", async () => {
+    it("should block plus-only tools when no API key is configured", async () => {
       const plusTool = createLangChainTool({
         name: "plusTool",
         description: "Plus-only tool",
@@ -89,19 +94,32 @@ describe("toolExecution", () => {
         },
       });
 
-      mockCheckIsPlusUser.mockResolvedValueOnce(false);
+      // Mock getSettings to return no API keys
+      const mockGetSettings = jest.fn().mockReturnValue({
+        openAIApiKey: "",
+        openRouterAiApiKey: "",
+        anthropicApiKey: "",
+        googleApiKey: "",
+        mistralApiKey: "",
+        deepseekApiKey: "",
+        xaiApiKey: "",
+        huggingfaceApiKey: "",
+        cohereApiKey: "",
+        siliconflowApiKey: "",
+      });
+      jest.spyOn(settingsModule, "getSettings").mockImplementation(mockGetSettings);
 
       const result = await executeSequentialToolCall({ name: "plusTool", args: {} }, [plusTool]);
 
       expect(result).toEqual({
         toolName: "plusTool",
-        result: "Error: plusTool requires a Copilot Plus subscription",
+        result: "Error: plusTool requires an API key to be configured in settings.",
         success: false,
       });
       expect(mockCallTool).not.toHaveBeenCalled();
     });
 
-    it("should allow plus-only tools for plus users", async () => {
+    it("should allow plus-only tools when API key is configured", async () => {
       const plusTool = createLangChainTool({
         name: "plusTool",
         description: "Plus-only tool",
@@ -121,7 +139,11 @@ describe("toolExecution", () => {
         },
       });
 
-      mockCheckIsPlusUser.mockResolvedValueOnce(true);
+      // Mock getSettings to return an API key
+      const mockGetSettings = jest.fn().mockReturnValue({
+        openRouterAiApiKey: "sk-or-test-key",
+      });
+      jest.spyOn(settingsModule, "getSettings").mockImplementation(mockGetSettings);
       mockCallTool.mockResolvedValueOnce("Plus tool executed");
 
       const result = await executeSequentialToolCall({ name: "plusTool", args: {} }, [plusTool]);
@@ -131,7 +153,6 @@ describe("toolExecution", () => {
         result: "Plus tool executed",
         success: true,
       });
-      expect(mockCheckIsPlusUser).toHaveBeenCalled();
       expect(mockCallTool).toHaveBeenCalled();
     });
 

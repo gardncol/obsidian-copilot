@@ -14,7 +14,6 @@ import {
   MessageContent,
 } from "@/imageProcessing/imageProcessor";
 import { logInfo, logWarn } from "@/logger";
-import { checkIsPlusUser } from "@/plusUtils";
 import { getSettings } from "@/settings/model";
 import { getSystemPromptWithMemory } from "@/system-prompts/systemPromptBuilder";
 import { writeFileTool } from "@/tools/ComposerTools";
@@ -758,25 +757,8 @@ Include your extracted terms as: [SALIENT_TERMS: term1, term2, term3]`;
     const thinkStreamer = new ThinkBlockStreamer(updateCurrentAiMessage, excludeThinking);
     let sources: { title: string; path: string; score: number; explanation?: unknown }[] = [];
 
-    const isPlusUser = await checkIsPlusUser({
-      isCopilotPlus: true,
-    });
-    if (!isPlusUser) {
-      await this.handleError(
-        new Error("Invalid license key"),
-        thinkStreamer.processErrorChunk.bind(thinkStreamer) as (message: string) => void
-      );
-      const errorResponse = thinkStreamer.close().content;
-
-      return this.handleResponse(
-        errorResponse,
-        userMessage,
-        abortController,
-        addMessage,
-        updateCurrentAiMessage,
-        undefined // no sources
-      );
-    }
+    // Plus license check removed: agent mode is available for any user with a valid API key
+    // The tool-level check in toolExecution.ts handles the API key validation
 
     try {
       logInfo("==== Step 1: Planning tools ====");

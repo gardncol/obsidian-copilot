@@ -1,6 +1,5 @@
 import { StructuredTool } from "@langchain/core/tools";
 import { logError, logInfo, logWarn } from "@/logger";
-import { checkIsPlusUser, isSelfHostModeValid } from "@/plusUtils";
 import { getSettings } from "@/settings/model";
 import { ToolManager } from "@/tools/toolManager";
 import { ToolRegistry } from "@/tools/ToolRegistry";
@@ -64,11 +63,24 @@ export async function executeSequentialToolCall(
 
     // Check if tool requires Plus subscription
     if (metadata?.isPlusOnly) {
-      const isPlusUser = await checkIsPlusUser();
-      if (!isPlusUser && !isSelfHostModeValid()) {
+      // BYOK users can use all tools without Plus license
+      // Only require a configured API key (any provider)
+      const hasApiKey = Boolean(
+        getSettings().openAIApiKey ||
+          getSettings().openRouterAiApiKey ||
+          getSettings().anthropicApiKey ||
+          getSettings().googleApiKey ||
+          getSettings().mistralApiKey ||
+          getSettings().deepseekApiKey ||
+          getSettings().xaiApiKey ||
+          getSettings().huggingfaceApiKey ||
+          getSettings().cohereApiKey ||
+          getSettings().siliconflowApiKey
+      );
+      if (!hasApiKey) {
         return {
           toolName: toolCall.name,
-          result: `Error: ${getToolDisplayName(toolCall.name)} requires a Copilot Plus subscription`,
+          result: `Error: ${getToolDisplayName(toolCall.name)} requires an API key to be configured in settings.`,
           success: false,
         };
       }
