@@ -1,6 +1,5 @@
 import { ConfirmModal } from "@/components/modals/ConfirmModal";
 import { useApp } from "@/context";
-import { Badge } from "@/components/ui/badge";
 import { HelpTooltip } from "@/components/ui/help-tooltip";
 import { SettingItem } from "@/components/ui/setting-item";
 import { DEFAULT_SETTINGS } from "@/constants";
@@ -96,11 +95,6 @@ export const CopilotPlusSettings: React.FC = () => {
   return (
     <div className="tw-flex tw-flex-col tw-gap-4">
       <section className="tw-flex tw-flex-col tw-gap-4">
-        <div className="tw-flex tw-items-center tw-py-4">
-          <Badge variant="secondary" className="tw-text-accent">
-            Plus Required
-          </Badge>
-        </div>
         <div className="tw-flex tw-flex-col tw-gap-4">
           <div className="tw-pt-4 tw-text-xl tw-font-semibold">Autonomous Agent</div>
 
