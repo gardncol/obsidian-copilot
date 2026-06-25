@@ -49,7 +49,7 @@ const SUGGESTED_PROMPTS: Record<string, NotePrompt> = {
     ],
   },
   copilotPlus: {
-    title: "Copilot Plus",
+    title: "Agent Mode",
     prompts: [
       `Give me a recap of last week @vault`,
       `What are the key takeaways from my notes on <topic> @vault`,
