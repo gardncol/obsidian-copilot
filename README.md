@@ -2,8 +2,7 @@
 
 > **Fork of [Copilot for Obsidian](https://github.com/logancyang/obsidian-copilot) by Logan Yang** — customized for personal use.
 
-**TL;DR:** Copilot for Obsidian with the Plus license requirement removed. Agent mode and all tools work with your own API key — no Copilot Plus subscription needed.
-
+**TL;DR:** Copilot for Obsidian with the Plus license requirement removed. Agent mode and all tools work with your own API key
 ## What's Changed
 
 | Change                                                                                                                          | File(s)                                         |
@@ -14,9 +13,9 @@
 
 ## Why This Exists
 
-Copilot for Obsidian is MIT-licensed (frontend) and excellent, but the agent mode and certain tools require a paid Plus subscription ($11.67/mo). This fork removes those gates so everything works with **Bring Your Own Key** — OpenRouter, Anthropic, OpenAI, Google, etc.
+Copilot for Obsidian is MIT-licensed (frontend) and excellent, but the agent mode and certain tools require a paid Plus subscription ($11.67/mo). 
 
-This is a personal fork for my own use. I keep it synced with upstream changes.
+This is a personal fork for my own use. 
 
 ## Install
 
