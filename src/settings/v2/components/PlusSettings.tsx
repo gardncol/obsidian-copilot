@@ -13,8 +13,8 @@ export function PlusSettings() {
           support) work with your own API key.
         </div>
         <div>
-          Configure your API key above, then switch to <strong>Copilot Plus (Beta)</strong> in the
-          chat dropdown to use agent mode.
+          Configure your API key above, then switch to <strong>Agent Mode</strong> in the chat
+          dropdown to use agent mode.
         </div>
       </div>
     </section>
