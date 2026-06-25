@@ -962,7 +962,7 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   passMarkdownImages: true,
   enableAutonomousAgent: true,
   enableCustomPromptTemplating: true,
-  enableSemanticSearchV3: false,
+  enableSemanticSearchV3: true,
   enableSelfHostMode: false,
   enableMiyo: false,
   miyoSearchAll: false,

@@ -49,8 +49,8 @@ export const QASettings: React.FC = () => {
           {/* Enable Semantic Search (v3) */}
           <SettingItem
             type="switch"
-            title="Enable Semantic Search"
-            description="Enable semantic search for meaning-based document retrieval. When disabled, uses fast lexical search only. Use 'Refresh Vault Index' or 'Force Reindex Vault' to build the embedding index."
+            title="Enable Semantic Search (Hybrid Mode)"
+            description="Enable hybrid search (BM25 + vector embeddings) for meaning-based document retrieval. When enabled, search results blend keyword matches with semantic similarity for best precision. When disabled, uses fast lexical (BM25) search only. Use 'Refresh Vault Index' to build the embedding index."
             checked={settings.enableSemanticSearchV3}
             onCheckedChange={(checked) => {
               // Show confirmation modal with appropriate message
