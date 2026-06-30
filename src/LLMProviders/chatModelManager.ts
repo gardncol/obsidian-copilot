@@ -55,7 +55,7 @@ const GOOGLE_SAFETY_SETTINGS_BLOCK_NONE: SafetySetting[] = [
 // vocabulary from tiktoken.pages.dev, which blocks all LLM calls when the CDN is
 // unreachable. This char/4 estimation is the same fallback LangChain uses internally
 // before tiktoken loads. Actual token usage comes from API response metadata.
- 
+
 (
   BaseLanguageModel.prototype as { getNumTokens: (...args: unknown[]) => Promise<number> }
 ).getNumTokens = async (content: string | Array<{ type: string; text?: string }>) => {
@@ -88,6 +88,7 @@ const CHAT_PROVIDER_CONSTRUCTORS = {
   [ChatModelProviders.DEEPSEEK]: ChatDeepSeek,
   [ChatModelProviders.AMAZON_BEDROCK]: BedrockChatModel,
   [ChatModelProviders.GITHUB_COPILOT]: GitHubCopilotChatModel,
+  [ChatModelProviders.OLLAMA_CLOUD]: ChatOllama,
 } as const;
 
 type ChatProviderConstructMap = typeof CHAT_PROVIDER_CONSTRUCTORS;
@@ -154,6 +155,7 @@ export default class ChatModelManager {
     [ChatModelProviders.SILICONFLOW]: () => getSettings().siliconflowApiKey,
     [ChatModelProviders.GITHUB_COPILOT]: () =>
       getSettings().githubCopilotToken || getSettings().githubCopilotAccessToken,
+    [ChatModelProviders.OLLAMA_CLOUD]: () => getSettings().ollamaCloudApiKey,
   } as const;
 
   private constructor() {
@@ -351,6 +353,23 @@ export default class ChatModelManager {
         // Thinking content goes to additional_kwargs.reasoning_content
         think: customModel.capabilities?.includes(ModelCapability.REASONING) ?? false,
         // Reduce repetition in local models (1.1 = slight penalty, helps with hallucination loops)
+        repeatPenalty: 1.1,
+        numCtx: customModel.numCtx ?? DEFAULT_OLLAMA_NUM_CTX,
+      },
+      [ChatModelProviders.OLLAMA_CLOUD]: {
+        // ChatOllama has `model` instead of `modelName`!!
+        model: modelName,
+        // Must NOT use /v1 in the baseUrl for Ollama Cloud — ChatOllama appends it
+        baseUrl: customModel.baseUrl || "https://api.ollama.com",
+        headers: {
+          Authorization: `Bearer ${await getDecryptedKey(customModel.apiKey || settings.ollamaCloudApiKey)}`,
+        },
+        // Route through Obsidian's requestUrl (safeFetch) to bypass CORS
+        // restrictions on the browser platform
+        fetch: customModel.enableCors ? safeFetch : undefined,
+        // Enable thinking for models with REASONING capability
+        think: customModel.capabilities?.includes(ModelCapability.REASONING) ?? false,
+        // Reduce repetition penalty slightly for cloud models
         repeatPenalty: 1.1,
         numCtx: customModel.numCtx ?? DEFAULT_OLLAMA_NUM_CTX,
       },
@@ -599,6 +618,7 @@ export default class ChatModelManager {
           ChatModelProviders.GOOGLE,
           ChatModelProviders.OPENROUTERAI,
           ChatModelProviders.OLLAMA,
+          ChatModelProviders.OLLAMA_CLOUD,
           ChatModelProviders.LM_STUDIO,
           ChatModelProviders.OPENAI_FORMAT,
           ChatModelProviders.MISTRAL,
@@ -619,6 +639,7 @@ export default class ChatModelManager {
           ChatModelProviders.AZURE_OPENAI,
           ChatModelProviders.OPENROUTERAI,
           ChatModelProviders.OLLAMA,
+          ChatModelProviders.OLLAMA_CLOUD,
           ChatModelProviders.LM_STUDIO,
           ChatModelProviders.OPENAI_FORMAT,
           ChatModelProviders.MISTRAL,

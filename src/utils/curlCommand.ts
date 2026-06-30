@@ -785,7 +785,11 @@ export async function buildCurlCommandForModel(
   }
 
   // Ollama (native API)
-  if (provider === ChatModelProviders.OLLAMA || provider === EmbeddingModelProviders.OLLAMA) {
+  if (
+    provider === ChatModelProviders.OLLAMA ||
+    provider === ChatModelProviders.OLLAMA_CLOUD ||
+    provider === EmbeddingModelProviders.OLLAMA
+  ) {
     const result = await buildOllamaRequestSpec(model, isEmbeddingModel);
     if (!result.ok) return result;
     return { ok: true, command: formatCurlCommand(result.spec), warnings: result.warnings };

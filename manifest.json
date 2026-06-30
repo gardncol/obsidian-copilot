@@ -1,7 +1,7 @@
 {
   "id": "obsidian-agent",
   "name": "Obsidian Agent",
-  "version": "3.3.3-fork",
+  "version": "3.3.3-fork.2",
   "minAppVersion": "1.11.4",
   "isDesktopOnly": false,
   "description": "AI agent with BYOK agent mode, hybrid search, and no Plus license requirement. Fork of Copilot for Obsidian.",

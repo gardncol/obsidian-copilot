@@ -408,6 +408,7 @@ export interface ProviderResponseMap {
   [ChatModelProviders.OPENROUTERAI]: OpenRouterAIModelResponse;
   [ChatModelProviders.SILICONFLOW]: SiliconFlowModelResponse;
   [ChatModelProviders.COPILOT_PLUS]: null;
+  [ChatModelProviders.OLLAMA_CLOUD]: null;
   [ChatModelProviders.AZURE_OPENAI]: null;
   [ChatModelProviders.AMAZON_BEDROCK]: unknown;
   [ChatModelProviders.GITHUB_COPILOT]: GitHubCopilotModelResponse;

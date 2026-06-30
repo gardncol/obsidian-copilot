@@ -198,6 +198,9 @@ export enum ChatModels {
   OPENROUTER_GROK_4_3 = "x-ai/grok-4.3",
   SILICONFLOW_DEEPSEEK_V3 = "deepseek-ai/DeepSeek-V3",
   SILICONFLOW_DEEPSEEK_R1 = "deepseek-ai/DeepSeek-R1",
+  OLLAMA_CLOUD_LLAMA3 = "llama3",
+  OLLAMA_CLOUD_QWEN3 = "qwen3",
+  OLLAMA_CLOUD_MISTRAL = "mistral",
 }
 
 // Model Providers
@@ -219,6 +222,7 @@ export enum ChatModelProviders {
   COHEREAI = "cohereai",
   SILICONFLOW = "siliconflow",
   GITHUB_COPILOT = "github-copilot",
+  OLLAMA_CLOUD = "ollama-cloud",
 }
 
 export enum ModelCapability {
@@ -436,6 +440,29 @@ export const BUILTIN_CHAT_MODELS: CustomModel[] = [
     isBuiltIn: false,
     baseUrl: "https://api.siliconflow.com/v1",
     capabilities: [ModelCapability.REASONING],
+  },
+  {
+    name: ChatModels.OLLAMA_CLOUD_LLAMA3,
+    provider: ChatModelProviders.OLLAMA_CLOUD,
+    enabled: true,
+    isBuiltIn: true,
+    projectEnabled: true,
+    baseUrl: "https://api.ollama.com",
+  },
+  {
+    name: ChatModels.OLLAMA_CLOUD_QWEN3,
+    provider: ChatModelProviders.OLLAMA_CLOUD,
+    enabled: false,
+    isBuiltIn: true,
+    baseUrl: "https://api.ollama.com",
+    capabilities: [ModelCapability.VISION],
+  },
+  {
+    name: ChatModels.OLLAMA_CLOUD_MISTRAL,
+    provider: ChatModelProviders.OLLAMA_CLOUD,
+    enabled: false,
+    isBuiltIn: true,
+    baseUrl: "https://api.ollama.com",
   },
 ];
 
@@ -678,6 +705,13 @@ export const ProviderInfo: Record<Provider, ProviderMetadata> = {
     keyManagementURL: "",
     listModelURL: "",
   },
+  [ChatModelProviders.OLLAMA_CLOUD]: {
+    label: "Ollama Cloud",
+    host: "https://api.ollama.com",
+    curlBaseURL: "https://api.ollama.com",
+    keyManagementURL: "https://ollama.com/settings/keys",
+    listModelURL: "",
+  },
   [ChatModelProviders.LM_STUDIO]: {
     label: "LM Studio",
     host: "http://localhost:1234/v1",
@@ -754,6 +788,7 @@ export const ProviderSettingsKeyMap: Record<SettingKeyProviders, keyof CopilotSe
   "amazon-bedrock": "amazonBedrockApiKey",
   siliconflow: "siliconflowApiKey",
   "github-copilot": "githubCopilotToken",
+  "ollama-cloud": "ollamaCloudApiKey",
 };
 
 export enum VAULT_VECTOR_STORE_STRATEGY {
@@ -907,6 +942,7 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   amazonBedrockApiKey: "",
   amazonBedrockRegion: "",
   siliconflowApiKey: "",
+  ollamaCloudApiKey: "",
   // GitHub Copilot OAuth tokens
   githubCopilotAccessToken: "",
   githubCopilotToken: "",
