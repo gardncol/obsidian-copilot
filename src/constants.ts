@@ -710,7 +710,7 @@ export const ProviderInfo: Record<Provider, ProviderMetadata> = {
     host: "https://api.ollama.com",
     curlBaseURL: "https://api.ollama.com",
     keyManagementURL: "https://ollama.com/settings/keys",
-    listModelURL: "",
+    listModelURL: "https://api.ollama.com/api/tags",
   },
   [ChatModelProviders.LM_STUDIO]: {
     label: "LM Studio",

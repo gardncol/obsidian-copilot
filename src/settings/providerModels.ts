@@ -395,6 +395,10 @@ export interface GitHubCopilotModel {
   supported_endpoints?: string[];
 }
 
+export interface OllamaCloudModelResponse {
+  models: { name: string; model?: string; modified_at?: string; size?: number }[];
+}
+
 // Response type mapping
 export interface ProviderResponseMap {
   [ChatModelProviders.OPENAI]: OpenAIModelResponse;
@@ -408,7 +412,7 @@ export interface ProviderResponseMap {
   [ChatModelProviders.OPENROUTERAI]: OpenRouterAIModelResponse;
   [ChatModelProviders.SILICONFLOW]: SiliconFlowModelResponse;
   [ChatModelProviders.COPILOT_PLUS]: null;
-  [ChatModelProviders.OLLAMA_CLOUD]: null;
+  [ChatModelProviders.OLLAMA_CLOUD]: OllamaCloudModelResponse;
   [ChatModelProviders.AZURE_OPENAI]: null;
   [ChatModelProviders.AMAZON_BEDROCK]: unknown;
   [ChatModelProviders.GITHUB_COPILOT]: GitHubCopilotModelResponse;
@@ -509,6 +513,13 @@ const providerAdapters: ProviderModelAdapters = {
       id: model.id,
       name: model.id,
       provider: ChatModelProviders.GITHUB_COPILOT,
+    })) || [],
+
+  [ChatModelProviders.OLLAMA_CLOUD]: (data): StandardModel[] =>
+    data?.models?.map((model: { name: string }) => ({
+      id: model.name,
+      name: model.name,
+      provider: ChatModelProviders.OLLAMA_CLOUD,
     })) || [],
 };
 
