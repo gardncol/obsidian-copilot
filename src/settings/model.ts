@@ -143,6 +143,8 @@ export interface CopilotSettings {
   defaultSendShortcut: SEND_SHORTCUT;
   disableIndexOnMobile: boolean;
   showSuggestedPrompts: boolean;
+  showRelevantNotes: boolean;
+  generateAIChatTitleOnSave: boolean;
   numPartitions: number;
   defaultConversationNoteName: string;
   // Any valid paid license (Lite and above). undefined means never checked.

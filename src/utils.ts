@@ -6,6 +6,7 @@ import { ChainType } from "@/chainType";
 import {
   ALLOWED_NOTE_CONTEXT_EXTENSIONS,
   ChatModelProviders,
+  EmbeddingModelProviders,
   ModelCapability,
   NOMIC_EMBED_TEXT,
   Provider,
@@ -898,6 +899,22 @@ export function getProviderInfo(provider: string): ProviderMetadata {
     ...info,
     label: info.label || provider,
   };
+}
+
+export function getNeedSetKeyProvider(): Provider[] {
+  const excludeProviders: Provider[] = [
+    ChatModelProviders.OPENAI_FORMAT,
+    ChatModelProviders.OLLAMA,
+    ChatModelProviders.LM_STUDIO,
+    ChatModelProviders.AZURE_OPENAI,
+    ChatModelProviders.GITHUB_COPILOT,
+    EmbeddingModelProviders.COPILOT_PLUS,
+    EmbeddingModelProviders.COPILOT_PLUS_JINA,
+  ];
+
+  return (Object.keys(ProviderInfo) as Provider[]).filter(
+    (key) => !excludeProviders.includes(key)
+  );
 }
 
 /**

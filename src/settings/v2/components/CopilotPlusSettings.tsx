@@ -5,7 +5,7 @@ import { SettingItem } from "@/components/ui/setting-item";
 import { DEFAULT_SETTINGS } from "@/constants";
 import { MiyoClient } from "@/miyo/MiyoClient";
 import { getMiyoCustomUrl, getMiyoFolderName } from "@/miyo/miyoUtils";
-import { useIsSelfHostEligible, validateSelfHostMode } from "@/plusUtils";
+import { useIsSelfHostEligible, isSelfHostModeValid } from "@/plusUtils";
 import { updateSetting, useSettingsValue } from "@/settings/model";
 import { Notice } from "obsidian";
 import React, { useState } from "react";
@@ -25,10 +25,10 @@ export const CopilotPlusSettings: React.FC = () => {
   const handleSelfHostModeToggle = async (enabled: boolean) => {
     if (enabled) {
       setIsValidatingSelfHost(true);
-      const isValid = await validateSelfHostMode();
+      const isValid = isSelfHostModeValid();
       setIsValidatingSelfHost(false);
       if (!isValid) {
-        // Validation failed - Notice already shown by validateSelfHostMode
+        // Validation failed - Notice already shown by isSelfHostModeValid
         return;
       }
       updateSetting("enableSelfHostMode", true);

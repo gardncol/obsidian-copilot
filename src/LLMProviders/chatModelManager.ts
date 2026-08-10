@@ -408,7 +408,7 @@ export default class ChatModelManager {
         // Must NOT use /v1 in the baseUrl for Ollama Cloud — ChatOllama appends it
         baseUrl: customModel.baseUrl || "https://api.ollama.com",
         headers: {
-          Authorization: `Bearer ${await getDecryptedKey(customModel.apiKey || settings.ollamaCloudApiKey)}`,
+          Authorization: `Bearer ${await this.resolveApiKey(customModel.apiKey, settings.ollamaCloudApiKey, true)}`,
         },
         // Route through Obsidian's requestUrl (safeFetch) to bypass CORS
         // restrictions on the browser platform

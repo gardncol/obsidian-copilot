@@ -5,7 +5,7 @@ import { z } from "zod";
 
 // Mock dependencies
 jest.mock("@/plusUtils", () => ({
-  checkIsPlusUser: jest.fn(),
+  isPaidEnabled: jest.fn(),
   isSelfHostModeValid: jest.fn().mockReturnValue(false),
 }));
 
@@ -25,12 +25,12 @@ jest.mock("@/settings/model", () => ({
   getSettings: jest.fn(),
 }));
 
-import { checkIsPlusUser } from "@/plusUtils";
+import { isPaidEnabled } from "@/plusUtils";
 import { ToolManager } from "@/tools/toolManager";
 import * as settingsModule from "@/settings/model";
 
 describe("toolExecution", () => {
-  const mockCheckIsPlusUser = checkIsPlusUser as jest.MockedFunction<typeof checkIsPlusUser>;
+  const mockIsPaidEnabled = isPaidEnabled as jest.MockedFunction<typeof isPaidEnabled>;
   const mockCallTool = ToolManager.callTool as jest.MockedFunction<typeof ToolManager.callTool>;
 
   beforeEach(() => {
@@ -71,7 +71,7 @@ describe("toolExecution", () => {
         result: "Tool executed successfully",
         success: true,
       });
-      expect(mockCheckIsPlusUser).not.toHaveBeenCalled();
+      expect(mockIsPaidEnabled).not.toHaveBeenCalled();
     });
 
     it("should block plus-only tools when no API key is configured", async () => {

@@ -16,13 +16,13 @@ import {
 import { logInfo, logWarn } from "@/logger";
 import { getSettings } from "@/settings/model";
 import { getSystemPromptWithMemory } from "@/system-prompts/systemPromptBuilder";
-import { writeFileTool } from "@/tools/ComposerTools";
+import { createWriteFileTool } from "@/tools/ComposerTools";
 import { ToolManager } from "@/tools/toolManager";
 import { ToolResultFormatter } from "@/tools/ToolResultFormatter";
 import { ToolRegistry } from "@/tools/ToolRegistry";
 import { initializeBuiltinTools } from "@/tools/builtinTools";
-import { localSearchTool, webSearchTool } from "@/tools/SearchTools";
-import { updateMemoryTool } from "@/tools/memoryTools";
+import { createLocalSearchTool, webSearchTool } from "@/tools/SearchTools";
+import { createUpdateMemoryTool } from "@/tools/memoryTools";
 import { extractChatHistory } from "@/utils";
 import { ChatMessage, ResponseMetadata } from "@/types/message";
 import { getApiErrorMessage, getMessageRole, withSuppressedTokenWarnings } from "@/utils";
@@ -83,7 +83,7 @@ export class CopilotPlusChainRunner extends BaseChainRunner {
 
     // Initialize tools if not already done
     if (registry.getAllTools().length === 0) {
-      initializeBuiltinTools(this.chainManager.app?.vault);
+      initializeBuiltinTools(this.chainManager.app);
     }
 
     // Get all tools as StructuredTool instances
@@ -273,7 +273,7 @@ Include your extracted terms as: [SALIENT_TERMS: term1, term2, term3]`;
       const hasLocalSearch = toolCalls.some((tc) => tc.tool.name === "localSearch");
       if (!hasLocalSearch) {
         toolCalls.push({
-          tool: localSearchTool,
+          tool: createLocalSearchTool(this.chainManager.app),
           args: {
             query: cleanQuery,
             salientTerms: context.salientTerms,
@@ -306,7 +306,7 @@ Include your extracted terms as: [SALIENT_TERMS: term1, term2, term3]`;
       const hasUpdateMemory = toolCalls.some((tc) => tc.tool.name === "updateMemory");
       if (!hasUpdateMemory) {
         toolCalls.push({
-          tool: updateMemoryTool,
+          tool: createUpdateMemoryTool(this.chainManager.app),
           args: {
             statement: cleanQuery,
           },
@@ -711,7 +711,7 @@ Include your extracted terms as: [SALIENT_TERMS: term1, term2, term3]`;
       contextEnvelope: userMessage.contextEnvelope,
     });
 
-    const actionStreamer = new ActionBlockStreamer(ToolManager, writeFileTool);
+    const actionStreamer = new ActionBlockStreamer(ToolManager, createWriteFileTool(this.chainManager.app));
 
     // Wrap the stream call with warning suppression
     const chatStream = await withSuppressedTokenWarnings(() =>
