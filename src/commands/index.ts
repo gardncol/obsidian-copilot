@@ -103,7 +103,7 @@ export function registerCommands(plugin: CopilotPlugin, publish: PublishFile) {
   addEditorCommand(plugin, COMMAND_IDS.COUNT_WORD_AND_TOKENS_SELECTION, async (editor: Editor) => {
     const selectedText = editor.getSelection();
     const wordCount = selectedText.split(" ").length;
-    const tokenCount = await plugin.projectManager
+    const tokenCount = await (plugin as any).projectManager
       .getCurrentChainManager()
       .chatModelManager.countTokens(selectedText);
     new Notice(`Selected text contains ${wordCount} words and ${tokenCount} tokens.`);
@@ -112,7 +112,7 @@ export function registerCommands(plugin: CopilotPlugin, publish: PublishFile) {
   addCommand(plugin, COMMAND_IDS.COUNT_TOTAL_VAULT_TOKENS, async () => {
     try {
       const allContent = await getAllQAMarkdownContent(plugin.app);
-      const totalTokens = await plugin.projectManager
+      const totalTokens = await (plugin as any).projectManager
         .getCurrentChainManager()
         .chatModelManager.countTokens(allContent);
       new Notice(`Total tokens in your vault: ${totalTokens}`);

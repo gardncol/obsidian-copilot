@@ -9,7 +9,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { logError } from "@/logger";
 import { shouldUseMiyo } from "@/miyo/miyoUtils";
 import { updateSetting, useSettingsValue } from "@/settings/model";
-import { Docs4LLMParser } from "@/tools/FileParserManager";
 import { isRateLimitError } from "@/utils/rateLimitUtils";
 import { useApp } from "@/context";
 import { DropdownMenu, DropdownMenuTrigger } from "@radix-ui/react-dropdown-menu";
@@ -162,9 +161,7 @@ async function forceRebuildCurrentProjectContext(app: App) {
 
         // Step 1: Completely clear all cached data for this project (in-memory and on-disk)
         // Reset rate limit notice timer to allow showing notices during force rebuild
-        Docs4LLMParser.resetRateLimitNoticeTimer();
-
-        await ProjectContextCache.getInstance().clearForProject(currentProject);
+                await ProjectContextCache.getInstance().clearForProject(currentProject);
         new Notice(`Cache for project "${currentProject.name}" has been cleared.`);
 
         // Step 2: Trigger a full reload from scratch.

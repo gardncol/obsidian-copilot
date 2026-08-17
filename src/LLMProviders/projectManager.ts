@@ -50,9 +50,7 @@ export default class ProjectManager {
     this.projectContextCache = ProjectContextCache.getInstance();
     this.fileParserManager = new FileParserManager(
       BrevilabsClient.getInstance(),
-      this.app.vault,
-      true,
-      null
+      this.app.vault
     );
     this.loadTracker = ProjectLoadTracker.getInstance(this.app);
 
@@ -247,9 +245,7 @@ export default class ProjectManager {
       // Update FileParserManager with the current project
       this.fileParserManager = new FileParserManager(
         BrevilabsClient.getInstance(),
-        this.app.vault,
-        true,
-        project
+        this.app.vault
       );
       await this.loadProjectContext(project);
 
@@ -275,10 +271,7 @@ export default class ProjectManager {
   }
 
   private async loadNextProjectMessage() {
-    // Notify ChatUIState about the project switch
-    // This will trigger ChatManager to switch to the correct message repository
-    // and update the UI with the appropriate messages
-    await this.plugin.chatUIState.handleProjectSwitch();
+    // ChatManager handles message repository switching internally during project switches
   }
 
   private async loadProjectContext(
@@ -834,9 +827,7 @@ modified: ${stat ? new Date(stat.mtime).toISOString() : "unknown"}`;
 
     this.fileParserManager = new FileParserManager(
       BrevilabsClient.getInstance(),
-      this.app.vault,
-      true,
-      project
+      this.app.vault
     );
 
     // Reason: reorder so files with existing cache references are processed first.

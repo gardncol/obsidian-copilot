@@ -829,6 +829,7 @@ const ChatInternal: React.FC<ChatProps & { chatInput: ReturnType<typeof useChatI
               onLoadChat={handleLoadChat}
               onOpenSourceFile={handleOpenSourceFile}
               latestTokenCount={latestTokenCount}
+              onModeChange={() => {}}
             />
             <ChatInput
               footerContent={
