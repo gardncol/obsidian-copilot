@@ -1,16 +1,10 @@
 import type { AgentSessionManager } from "@/agentMode";
-import React from "react";
 // Deep import (not the barrel): these run on the load path for every
 // platform, and the barrel pulls Node-only modules that crash mobile.
 import { isNativeChatId, parseNativeChatId } from "@/utils/nativeChatId";
 import { BrevilabsClient } from "@/LLMProviders/brevilabsClient";
-import ProjectManager from "@/LLMProviders/projectManager";
-import {
-  CustomModel,
-  getCurrentProject,
-  setSelectedTextContexts,
-  getSelectedTextContexts,
-} from "@/aiParams";
+import ChainOwner from "@/LLMProviders/chainOwner";
+import { CustomModel, setSelectedTextContexts, getSelectedTextContexts } from "@/aiParams";
 import { NoteSelectedTextContext, SelectedTextContext } from "@/types/message";
 import { registerCommands } from "@/commands";
 import CopilotView from "@/components/CopilotView";
@@ -21,7 +15,7 @@ import { LoadChatHistoryModal } from "@/components/modals/LoadChatHistoryModal";
 
 import { registerContextMenu, registerSymposiumFileMenu } from "@/commands/contextMenu";
 import { CustomCommandRegister } from "@/commands/customCommandRegister";
-import { migrateCommands, suggestDefaultCommands } from "@/commands/migrator";
+import { migrateCommands } from "@/commands/migrator";
 import { migrateSystemPromptsFromSettings } from "@/system-prompts/migration";
 import { SystemPromptRegister } from "@/system-prompts/systemPromptRegister";
 import { ProjectRegister } from "@/projects/projectRegister";
@@ -80,12 +74,10 @@ import { didMiyoSyncedRootsChange, shouldSurfaceMiyoResync } from "@/miyo/miyoUt
 import { type MiyoMutationSession, resetMiyoMutations } from "@/miyo/miyoResync";
 import { ensureCopilotSubfolders, getEffectiveConversationsFolder } from "@/settings/copilotFolder";
 import { buildUpgradeRelocationEntries } from "@/settings/upgradeNotice";
-import { UpgradeRelocationNotice } from "@/settings/UpgradeRelocationNotice";
 import { dehydrateDeviceProfile, hydrateDeviceProfile } from "@/settings/deviceProfiles";
 import { getDeviceId } from "@/utils/deviceId";
 import { isDesktopRuntime } from "@/utils/desktopRuntime";
 import { installRendererEventsShim } from "@/utils/rendererEventsShim";
-import { ProjectContextCache } from "@/cache/projectContextCache";
 import { ContextProcessor } from "@/contextProcessor";
 import { CustomCommandManager } from "@/commands/customCommandManager";
 import { ChatManagerChatUIState } from "@/state/ChatUIState";
@@ -110,6 +102,14 @@ import {
   ViewCreator,
   WorkspaceLeaf,
 } from "obsidian";
+import {
+  formatStartupMigrationSummary,
+  runStartupMigrationSummary,
+  shouldClearCredentialRecovery,
+  shouldClearFolderRelocation,
+  type StartupMigrationItem,
+  type StartupMigrationTask,
+} from "@/services/startupMigration";
 import { ChatHistoryItem } from "@/components/chat-components/ChatHistoryPopover";
 import {
   extractChatLastAccessedAtMs,
@@ -135,7 +135,7 @@ import {
 
 export default class CopilotPlugin extends Plugin {
   // Plugin components
-  projectManager: ProjectManager;
+  chainOwner: ChainOwner;
   brevilabsClient: BrevilabsClient;
   userMessageHistory: string[] = [];
   vectorStoreManager: VectorStoreManager;
@@ -179,6 +179,8 @@ export default class CopilotPlugin extends Plugin {
   private lastSelectionSignature?: string;
   private webSelectionTracker?: WebSelectionTracker;
   private readonly chatHistoryLastAccessedAtManager = new RecentUsageManager<string>();
+  private startupMigrationItems: StartupMigrationItem[] = [];
+
   async onload(): Promise<void> {
     // Patch Node's `events.setMaxListeners` so the Claude Agent SDK's call with
     // a web-realm AbortSignal stops throwing in Electron's renderer. No-ops on
@@ -253,6 +255,7 @@ export default class CopilotPlugin extends Plugin {
     // when OpenCode first enumerates models. Awaited for deterministic ordering;
     // it's a fast, one-time, no-op for already-migrated/fresh vaults.
     await runSettingsMigrations(this.modelManagement);
+    const isLegacyUpgrade = getSettings().upgradedToV8FromLegacy;
     this.addSettingTab(new CopilotSettingTab(this.app, this));
 
     // Core plugin initialization
@@ -260,9 +263,8 @@ export default class CopilotPlugin extends Plugin {
     // Initialize built-in tools with app access
     initializeBuiltinTools(this.app);
 
-    // Seed the ProjectContextCache and ContextProcessor singletons with `app`
-    // before anything reaches for them via the no-arg getInstance().
-    ProjectContextCache.getInstance(this.app);
+    // Seed the ContextProcessor singleton with `app` before anything reaches
+    // for it via the no-arg getInstance().
     ContextProcessor.getInstance(this.app);
     CustomCommandManager.getInstance(this.app);
     logFileManager.setApp(this.app);
@@ -275,7 +277,7 @@ export default class CopilotPlugin extends Plugin {
     // signature re-proves itself. The network re-validation below overrides
     // with the server's token.
     void verifyCachedEntitlement();
-    void checkIsPaidUser(this.app);
+    if (!isLegacyUpgrade) void checkIsPaidUser(this.app, { trigger: "startup" });
     // Entitlement tokens expire (~14 days), and the gates honor that expiry even
     // mid-session. Without a refresh, an Obsidian window left open past `exp`
     // loses self-host — which silently reroutes web search and document parsing
@@ -283,11 +285,14 @@ export default class CopilotPlugin extends Plugin {
     // Each /license call mints a fresh token, so re-validating daily keeps an
     // online session current; offline users still lapse at `exp`, as intended.
     this.registerInterval(
-      window.setInterval(() => void checkIsPaidUser(this.app), ENTITLEMENT_REFRESH_INTERVAL_MS)
+      window.setInterval(
+        () => void checkIsPaidUser(this.app, { trigger: "refresh" }),
+        ENTITLEMENT_REFRESH_INTERVAL_MS
+      )
     );
 
-    // Initialize ProjectManager
-    this.projectManager = ProjectManager.getInstance(this.app, this);
+    // Initialize the owner of the shared Quick Chat chain
+    this.chainOwner = ChainOwner.getInstance(this.app, this.modelManagement);
 
     // Initialize Agent Mode coordinator (desktop only — ACP needs subprocess
     // support). Gate on `isDesktopRuntime()`, not `Platform.isDesktopApp`:
@@ -334,7 +339,7 @@ export default class CopilotPlugin extends Plugin {
 
     // Initialize ChatUIState with new architecture
     const messageRepo = new MessageRepository();
-    const chainManager = this.projectManager.getCurrentChainManager();
+    const chainManager = this.chainOwner.getCurrentChainManager();
     const chatManager = new ChatManager(messageRepo, chainManager, this.fileParserManager, this);
     this.chatUIState = new ChatManagerChatUIState(chatManager);
 
@@ -440,43 +445,12 @@ export default class CopilotPlugin extends Plugin {
     this.projectRegister = new ProjectRegister(this.app);
 
     this.app.workspace.onLayoutReady(() => {
-      // Reason: projects must initialize after vault file tree is indexed (onLayoutReady),
-      // not in onload(). Otherwise getAbstractFileByPath() returns null for non-hidden
-      // folders and the adapter fallback creates synthetic TFiles that crash vault.read().
-      // This matches the system-prompts initialization pattern.
-      this.projectRegister.initialize().catch((error) => {
-        logError("[Projects] ProjectRegister initialization failed", error);
-        new Notice("Failed to load projects. Check console for details.");
+      // Migration sources initialize independently, but presentation waits until
+      // all of them settle so an upgrade produces one complete summary.
+      void this.runStartupMigrations(isLegacyUpgrade).catch((error) => {
+        logError("Failed to finish startup migrations", error);
+        new Notice("Copilot could not finish startup migration. Reload Obsidian to retry.");
       });
-
-      // Initialize custom commands
-      void this.customCommandRegister
-        .initialize()
-        .then(() => migrateCommands(this.app))
-        .then(() => suggestDefaultCommands(this.app));
-
-      // Initialize system prompts (independent from custom commands)
-      void this.systemPromptRegister
-        .initialize()
-        .then(() => migrateSystemPromptsFromSettings(this.app));
-
-      void this.notifyLegacyUpgradeRelocation();
-
-      // A Copilot root change can leave Miyo's server-side exclusions stale
-      // without anything prompting at the time: one arriving via settings sync
-      // never passes through the settings UI at all, and the UI itself only
-      // points at the Miyo tab. Only a REAL roots change prompts — a receipt
-      // from another device with equal roots stays quiet; the Miyo tab's on-load
-      // verification self-heals it. No `enableMiyo` gate: shouldSurfaceMiyoResync
-      // already treats a non-empty receipt as evidence of a past registration,
-      // and a user who disconnected in Copilot can still be exposed via Relay.
-      const startupSettings = getSettings();
-      if (
-        didMiyoSyncedRootsChange(startupSettings) &&
-        shouldSurfaceMiyoResync(this.app, startupSettings)
-      ) {
-        new Notice("Miyo search needs a resync — open the Miyo settings tab.", 8000);
-      }
     });
 
     // Initialize automatic selection handler
@@ -486,36 +460,150 @@ export default class CopilotPlugin extends Plugin {
     this.initWebSelectionWatcher();
   }
 
-  /**
-   * One-time guidance for users upgrading a legacy (v1-v7) vault whose Copilot
-   * data needs relocating (a sub-folder was customized, or the root itself
-   * moved). v4 consolidated every data folder under a single derived root, so
-   * Copilot now reads and writes the derived locations while their old files
-   * stay put. This shows them the old→new paths
-   * and asks them to move files manually; per the maintainer decision it never
-   * moves files itself. The flag is cleared afterwards (whether or not the notice
-   * is shown) so the check runs once. A failed clear-write only repeats the
-   * one-time check on the next restart, which is idempotent.
-   */
-  private async notifyLegacyUpgradeRelocation(): Promise<void> {
-    if (!getSettings().upgradedToV8FromLegacy) return;
+  /** Collect one-time manual folder moves without opening a separate modal. */
+  private async collectLegacyUpgradeRelocation(): Promise<StartupMigrationItem | null> {
+    if (!getSettings().upgradedToV8FromLegacy) return null;
 
     const entries = buildUpgradeRelocationEntries(getSettings());
     if (entries.length > 0) {
-      // Pre-create the derived sub-folders so the destinations the notice points
-      // at already exist when the user goes to move their files there.
+      // Pre-create destinations, while leaving user files untouched as before.
       await ensureCopilotSubfolders(this.app.vault, getSettings());
-      new ConfirmModal(
-        this.app,
-        () => {},
-        React.createElement(UpgradeRelocationNotice, { entries }),
-        "",
-        "OK",
-        ""
-      ).open();
+    }
+    if (entries.length === 0) {
+      updateSetting("upgradedToV8FromLegacy", false);
+      return null;
+    }
+    return {
+      id: "folders",
+      title: "Copilot folders",
+      status: "action-required",
+      summary: "Copilot now keeps its files under one folder. Existing files were not moved.",
+      details: entries.map(
+        ({ label, oldPath, newPath }) => `${label}: move ${oldPath} to ${newPath}.`
+      ),
+    };
+  }
+
+  /** Run all layout-dependent migration work before presenting one summary. */
+  private async runStartupMigrations(isLegacyUpgrade: boolean): Promise<void> {
+    const initialSettings = getSettings();
+    const needsLicenseReentry =
+      isLegacyUpgrade && initialSettings.isPaidUser === true && !initialSettings.plusLicenseKey;
+    const task = (
+      result: Promise<StartupMigrationItem | null>,
+      failure: StartupMigrationItem,
+      notice?: string
+    ): StartupMigrationTask => {
+      return {
+        result,
+        failure: isLegacyUpgrade ? failure : null,
+        onFailure: (error) => {
+          logError(`${failure.title} startup migration failed`, error);
+          if (!isLegacyUpgrade && notice) new Notice(notice);
+        },
+      };
+    };
+
+    const projectTask = task(
+      this.projectRegister.initialize(),
+      {
+        id: "projects",
+        title: "Projects",
+        status: "error",
+        summary: "Projects could not be loaded or migrated. Reload Obsidian to retry.",
+      },
+      "Failed to load projects. Check console for details."
+    );
+    const commandsTask = task(
+      this.customCommandRegister.initialize().then(() => migrateCommands(this.app)),
+      {
+        id: "custom-commands",
+        title: "Custom commands",
+        status: "error",
+        summary: "Custom commands could not be loaded or migrated. Reload Obsidian to retry.",
+      }
+    );
+    const promptsTask = task(
+      this.systemPromptRegister.initialize().then(() => migrateSystemPromptsFromSettings(this.app)),
+      {
+        id: "system-prompt",
+        title: "System prompt",
+        status: "error",
+        summary: "System prompts could not be loaded or migrated. Reload Obsidian to retry.",
+      }
+    );
+    const relocationTask = task(this.collectLegacyUpgradeRelocation(), {
+      id: "folders",
+      title: "Copilot folders",
+      status: "error",
+      summary: "Folder destinations could not be prepared. Reload Obsidian to retry.",
+    });
+    const license: StartupMigrationItem | null = needsLicenseReentry
+      ? {
+          id: "copilot-license",
+          title: "Copilot license",
+          status: "action-required",
+          summary: "Copilot could not restore the previous paid status after the upgrade.",
+          details: ["Re-enter the license key in Copilot Settings to restore paid features."],
+        }
+      : null;
+    if (isLegacyUpgrade) {
+      void checkIsPaidUser(needsLicenseReentry ? undefined : this.app, { trigger: "startup" });
     }
 
-    updateSetting("upgradedToV8FromLegacy", false);
+    await runStartupMigrationSummary({
+      initialItems: this.startupMigrationItems,
+      tasks: [projectTask, commandsTask, promptsTask, relocationTask],
+      afterTasks: () => {
+        const startupSettings = getSettings();
+        if (
+          !didMiyoSyncedRootsChange(startupSettings) ||
+          !shouldSurfaceMiyoResync(this.app, startupSettings)
+        ) {
+          return [license];
+        }
+        if (!isLegacyUpgrade) {
+          new Notice("Miyo search needs a resync — open the Miyo settings tab.", 8000);
+          return [license];
+        }
+        return [
+          license,
+          {
+            id: "miyo",
+            title: "Miyo search",
+            status: "action-required",
+            summary: "Miyo search needs a resync after the Copilot folder update.",
+            details: ["Open the Miyo settings tab to resync."],
+          },
+        ];
+      },
+      present: (items) => {
+        new ConfirmModal(
+          this.app,
+          () => {},
+          formatStartupMigrationSummary(items),
+          "Copilot upgrade summary",
+          "Done",
+          ""
+        ).open();
+      },
+      acknowledge: (items) => {
+        this.startupMigrationItems = [];
+        const pendingCredentialRecovery = getSettings()._pendingCredentialRecovery;
+        if (
+          shouldClearCredentialRecovery(
+            items,
+            pendingCredentialRecovery?.deviceId,
+            getDeviceId(this.app)
+          )
+        ) {
+          updateSetting("_pendingCredentialRecovery", undefined);
+        }
+        if (shouldClearFolderRelocation(items)) {
+          updateSetting("upgradedToV8FromLegacy", false);
+        }
+      },
+    });
   }
 
   /**
@@ -535,7 +623,18 @@ export default class CopilotPlugin extends Plugin {
     }
   }
 
-  async onunload() {
+  onunload(): void {
+    // Obsidian never awaits onunload, so the async tail of teardown is
+    // fire-and-forget by nature; declaring onunload void makes that explicit.
+    // teardown() is invoked synchronously, so everything above its first
+    // `await` still runs before this call returns, and a failure partway
+    // through is logged instead of becoming an unhandled rejection.
+    this.teardown().catch((error) => {
+      logError("Copilot: plugin teardown failed during unload:", error);
+    });
+  }
+
+  private async teardown(): Promise<void> {
     // End the Miyo mutation lifecycle HERE, as the first statement: everything
     // above the first `await` runs before the next `onload()` can possibly
     // start, so this carries none of the late-continuation risk that keeps
@@ -546,11 +645,11 @@ export default class CopilotPlugin extends Plugin {
     resetMiyoMutations();
 
     // Best-effort flush of pending keychain/data.json writes.
-    // Reason: onunload() is void in Obsidian's type system, but awaiting here
-    // is no worse than fire-and-forget, and consistent with the log flush below.
-    // (The KeychainService singleton and the persistence module's own state
-    // reset at the START of the next onload — see the comment there for the
-    // late-write race that motivated it.)
+    // Reason: Obsidian does not await teardown, but awaiting here keeps the
+    // remaining steps ordered after the flush, consistent with the log flush
+    // below. (The KeychainService singleton and the persistence module's own
+    // state reset at the START of the next onload — see the comment there for
+    // the late-write race that motivated it.)
     await flushPersistence();
 
     // Clear all persistent selection highlights before unload
@@ -559,10 +658,6 @@ export default class CopilotPlugin extends Plugin {
 
     // Cleanup chat selection highlight controller
     this.chatSelectionHighlightController?.cleanup();
-
-    if (this.projectManager) {
-      this.projectManager.onunload();
-    }
 
     this.agentModelDiscoveryUnsubscriber?.();
     await this.agentSessionManager?.shutdown();
@@ -1094,6 +1189,7 @@ export default class CopilotPlugin extends Plugin {
     // through `this.saveData` would read the absent flat fields as "cleared"
     // and delete this device's `deviceProfiles` segment (GitHub #2539).
     const settings = await loadSettingsWithKeychain(
+      this.app,
       rawData,
       (d) => super.saveData(d),
       (raw) =>
@@ -1101,12 +1197,13 @@ export default class CopilotPlugin extends Plugin {
           exists: (path) => this.app.vault.adapter.exists(path),
           write: (path, contents) => this.app.vault.adapter.write(path, contents),
           rename: (from, to) => this.app.vault.adapter.rename(from, to),
-        })
+        }),
+      (item) => this.startupMigrationItems.push(item)
     );
     // Mirror this device's `agentMode.deviceProfiles` segment into the flat
     // agent fields the rest of the code reads (GitHub #2539). `saveData` below
     // performs the inverse on the way out.
-    setSettings(hydrateDeviceProfile(settings, getDeviceId()));
+    setSettings(hydrateDeviceProfile(settings, getDeviceId(this.app)));
   }
 
   /**
@@ -1121,7 +1218,7 @@ export default class CopilotPlugin extends Plugin {
    * snapshot via `super.saveData` (see `loadSettings`) so it isn't dehydrated.
    */
   async saveData(data: unknown): Promise<void> {
-    return super.saveData(dehydrateDeviceProfile(data as CopilotSettings, getDeviceId()));
+    return super.saveData(dehydrateDeviceProfile(data as CopilotSettings, getDeviceId(this.app)));
   }
 
   mergeActiveModels(
@@ -1160,7 +1257,7 @@ export default class CopilotPlugin extends Plugin {
       this.app,
       chatFiles,
       this.chatHistoryLastAccessedAtManager,
-      this.loadChatHistory.bind(this) as (file: TFile) => void
+      (file) => void this.loadChatHistory(file)
     ).open();
   }
 
@@ -1168,11 +1265,9 @@ export default class CopilotPlugin extends Plugin {
     const folderFiles = await listMarkdownFiles(this.app, getEffectiveConversationsFolder());
     if (folderFiles.length === 0) return [];
 
-    const currentProject = getCurrentProject();
-
     // Reason: pass all files to filterChatHistoryFiles which checks frontmatter projectId.
     // A prefix prefilter would miss renamed or legacy files that still have correct frontmatter.
-    return filterChatHistoryFiles(this.app, folderFiles, currentProject?.id);
+    return filterChatHistoryFiles(this.app, folderFiles);
   }
 
   async getChatHistoryItems(): Promise<ChatHistoryItem[]> {
@@ -1417,7 +1512,7 @@ export default class CopilotPlugin extends Plugin {
     if (getSettings().enableRecentConversations) {
       try {
         // Get the current chat model from the chain manager
-        const chainManager = this.projectManager.getCurrentChainManager();
+        const chainManager = this.chainOwner.getCurrentChainManager();
         const chatModel = chainManager.chatModelManager.getChatModel();
         this.userMemoryManager.addRecentConversation(this.chatUIState.getMessages(), chatModel);
       } catch (error) {

@@ -1,7 +1,7 @@
 import { CustomModel } from "@/aiParams";
 import { BREVILABS_MODELS_BASE_URL, EmbeddingModelProviders, ProviderInfo } from "@/constants";
 import { CustomError } from "@/error";
-import { logInfo } from "@/logger";
+import { logInfo, logWarn } from "@/logger";
 import { getModelKeyFromModel, getSettings, subscribeToSettingsChange } from "@/settings/model";
 import { err2String, safeFetch } from "@/utils";
 import { Embeddings } from "@langchain/core/embeddings";
@@ -79,7 +79,7 @@ export default class EmbeddingManager {
   getProviderConstructor(model: CustomModel): EmbeddingConstructorType {
     const constructor = EMBEDDING_PROVIDER_CONSTRUCTORS[model.provider as EmbeddingModelProviders];
     if (!constructor) {
-      console.warn(`Unknown provider: ${model.provider} for model: ${model.name}`);
+      logWarn(`Unknown provider: ${model.provider} for model: ${model.name}`);
       throw new Error(`Unknown provider: ${model.provider} for model: ${model.name}`);
     }
     return constructor;
@@ -97,7 +97,7 @@ export default class EmbeddingManager {
             model.provider as EmbeddingModelProviders
           )
         ) {
-          console.warn(`Unknown provider: ${model.provider} for embedding model: ${model.name}`);
+          logWarn(`Unknown provider: ${model.provider} for embedding model: ${model.name}`);
           return;
         }
         const constructor = this.getProviderConstructor(model);
@@ -154,7 +154,9 @@ export default class EmbeddingManager {
     // Check if model is believer-exclusive but user is not on believer plan
     if (customModel.believerExclusive) {
       const brevilabsClient = BrevilabsClient.getInstance();
-      const result = await brevilabsClient.validateLicenseKey();
+      const result = await brevilabsClient.validateLicenseKey(undefined, {
+        trigger: "model_gate",
+      });
       if (!result.plan || result.plan.toLowerCase() !== "believer") {
         new Notice("Believer-only model, please consider upgrading to Believer to access it.");
         throw new CustomError("Believer-only model selected but user is not on Believer plan");
@@ -209,6 +211,7 @@ export default class EmbeddingManager {
       [EmbeddingModelProviders.COPILOT_PLUS]: {
         modelName,
         apiKey: settings.plusLicenseKey,
+        headers: BrevilabsClient.getInstance().getPluginVersionHeaders(),
         timeout: 10000,
         batchSize: getSettings().embeddingBatchSize,
         configuration: {
@@ -219,6 +222,7 @@ export default class EmbeddingManager {
       [EmbeddingModelProviders.COPILOT_PLUS_JINA]: {
         model: modelName,
         apiKey: settings.plusLicenseKey,
+        headers: BrevilabsClient.getInstance().getPluginVersionHeaders(),
         timeout: 10000,
         batchSize: getSettings().embeddingBatchSize,
         dimensions: customModel.dimensions,

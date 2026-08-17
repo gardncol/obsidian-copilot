@@ -181,6 +181,28 @@ describe("planByokMigration — grouping, keys, base URLs", () => {
     );
     expect(byCatalog(plan, "openai")?.extras).toEqual({ openAIOrgId: "org-123" });
   });
+
+  it("preserves different legacy CORS choices as separate providers (https://github.com/logancyang/obsidian-copilot-preview/issues/313)", () => {
+    const plan = planByokMigration(
+      settingsWith([
+        model({
+          name: "streaming-model",
+          provider: ChatModelProviders.OPENAI_FORMAT,
+          baseUrl: "https://work.example.com/v1",
+          enableCors: false,
+        }),
+        model({
+          name: "cors-model",
+          provider: ChatModelProviders.OPENAI_FORMAT,
+          baseUrl: "https://work.example.com/v1",
+          enableCors: true,
+        }),
+      ])
+    );
+
+    expect(plan).toHaveLength(2);
+    expect(plan.map((descriptor) => descriptor.enableCors).sort()).toEqual([false, true]);
+  });
 });
 
 describe("planByokMigration — scope filters", () => {
@@ -214,7 +236,7 @@ describe("planByokMigration — scope filters", () => {
     expect(plan).toEqual([]);
   });
 
-  it("skips copilot-plus and github-copilot", () => {
+  it("skips copilot-plus and models left behind by a removed provider", () => {
     const plan = planByokMigration(
       settingsWith(
         [
@@ -223,9 +245,9 @@ describe("planByokMigration — scope filters", () => {
             provider: ChatModelProviders.COPILOT_PLUS,
             isBuiltIn: true,
           }),
-          model({ name: "gpt-5", provider: ChatModelProviders.GITHUB_COPILOT }),
+          model({ name: "gpt-5", provider: "github-copilot" }),
         ],
-        { plusLicenseKey: "lic", githubCopilotToken: "tok" }
+        { plusLicenseKey: "lic" }
       )
     );
     expect(plan).toEqual([]);
@@ -381,7 +403,7 @@ describe("executeByokMigration", () => {
     expect(setupProvider).toHaveBeenCalledTimes(2);
   });
 
-  it("skips a descriptor that duplicates an existing BYOK provider", async () => {
+  it("does not retrofit CORS onto an already-migrated matching provider (https://github.com/logancyang/obsidian-copilot-preview/issues/313)", async () => {
     const existing = byokProvider({
       providerType: "anthropic",
       baseUrl: "https://api.anthropic.com",
@@ -392,7 +414,11 @@ describe("executeByokMigration", () => {
       api,
       settingsWith(
         [
-          model({ name: "claude", provider: ChatModelProviders.ANTHROPIC }),
+          model({
+            name: "claude",
+            provider: ChatModelProviders.ANTHROPIC,
+            enableCors: true,
+          }),
           model({ name: "gpt-4o", provider: ChatModelProviders.OPENAI }),
         ],
         { anthropicApiKey: "k", openAIApiKey: "k" }

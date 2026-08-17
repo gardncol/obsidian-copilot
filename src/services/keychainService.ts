@@ -10,9 +10,10 @@ import {
 } from "@/services/settingsSecretTransforms";
 import { Notice } from "obsidian";
 import { md5 } from "@/utils/hash";
-// Reason: do NOT import logInfo/logWarn/logError here. The logger depends on
-// getSettings(), but this module runs during settings loading (before setSettings).
-// Use console.* directly for all logging in this file.
+// The logger is safe even though this module runs during settings loading
+// (before setSettings): getSettings() falls back to DEFAULT_SETTINGS, and log
+// entries buffer in memory until the app is attached to the log file manager.
+import { logError, logWarn } from "@/logger";
 
 /**
  * Fields that are sensitive but don't match the `isSensitiveKey()` heuristic.
@@ -320,6 +321,11 @@ export class KeychainService {
     this.storage.setSecret(id, value);
   }
 
+  /** Delete a top-level secret from the keychain. */
+  deleteSecret(settingsKey: string): void {
+    this.removeSecret(toKeychainId(this.vaultId, settingsKey));
+  }
+
   /** Retrieve a top-level secret from the keychain. Returns `null` if not found. */
   getSecret(settingsKey: string): string | null {
     const id = toKeychainId(this.vaultId, settingsKey);
@@ -387,7 +393,7 @@ export class KeychainService {
       try {
         keychainValue = this.getSecret(key);
       } catch (e) {
-        console.warn(`Keychain read failed for "${key}".`, e);
+        logWarn(`Keychain read failed for "${key}".`, e);
         hadFailures = true;
         continue;
       }
@@ -414,7 +420,7 @@ export class KeychainService {
     hadFailures = hadFailures || embeddingResult.hadFailures;
 
     if (hadFailures) {
-      console.warn("Keychain hydrate: some keychain reads failed — values left as-is.");
+      logWarn("Keychain hydrate: some keychain reads failed — values left as-is.");
     }
 
     return { settings: hydrated, hadFailures };
@@ -575,7 +581,7 @@ export class KeychainService {
     try {
       await saveData(toSave);
     } catch (error) {
-      console.error("forgetAllSecrets: saveData failed — aborting keychain clear", error);
+      logError("forgetAllSecrets: saveData failed — aborting keychain clear", error);
       new Notice(
         "Failed to remove API keys from data.json. Obsidian Keychain was NOT cleared. Please try again."
       );
@@ -636,7 +642,7 @@ export class KeychainService {
         try {
           keychainValue = this.getModelSecret(scope, identity, field);
         } catch (e) {
-          console.warn(`Keychain read failed for model "${identity}" field "${field}".`, e);
+          logWarn(`Keychain read failed for model "${identity}" field "${field}".`, e);
           hadFailures = true;
           continue;
         }

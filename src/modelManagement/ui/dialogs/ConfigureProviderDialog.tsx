@@ -37,6 +37,7 @@ import { byokProvidersAtom, configuredModelsAtom } from "@/modelManagement/state
 import type { ModelInfo, ProviderType } from "@/modelManagement/types/catalog";
 import type { ConfiguredModel, Provider } from "@/modelManagement/types/persisted";
 import type { ProviderDefinition, VerificationResult } from "@/modelManagement/types/runtime";
+import { CorsCompatibilitySetting } from "@/modelManagement/ui/components/CorsCompatibilitySetting";
 import { ModelChecklist } from "@/modelManagement/ui/components/ModelChecklist";
 import {
   ModelManagementProvider,
@@ -48,6 +49,7 @@ import { CheckCircle2, Loader2, XCircle } from "lucide-react";
 import { App, Notice } from "obsidian";
 import React, { useEffect, useMemo, useState } from "react";
 import { useModelCandidatePool } from "./useModelCandidatePool";
+import { safeAsyncHandler } from "@/utils/safeAsyncHandler";
 
 /**
  * Default API endpoints for SDK-native catalog providers that `models.dev`
@@ -222,6 +224,9 @@ const ConfigureProviderBody: React.FC<ConfigureProviderBodyProps> = ({
   const [baseUrl, setBaseUrl] = useState(() =>
     state.mode === "edit" ? (provider?.baseUrl ?? "") : ""
   );
+  const [enableCors, setEnableCors] = useState(() =>
+    state.mode === "edit" ? (provider?.enableCors ?? false) : false
+  );
   const [extras] = useState<Record<string, unknown>>(() =>
     state.mode === "edit" ? (provider?.extras ?? {}) : {}
   );
@@ -345,9 +350,10 @@ const ConfigureProviderBody: React.FC<ConfigureProviderBodyProps> = ({
         providerType,
         displayName,
         baseUrl: effectiveBaseUrl || undefined,
+        enableCors,
         apiKey: apiKey || undefined,
         requiresApiKey: state.source.requiresApiKey,
-        extras,
+        extras: Object.keys(extras).length > 0 ? extras : undefined,
         models: pool.buildSelectedModelInfos(),
       });
       onClose();
@@ -379,6 +385,7 @@ const ConfigureProviderBody: React.FC<ConfigureProviderBodyProps> = ({
         initialApiKey,
         displayName,
         effectiveBaseUrl,
+        enableCors,
         extras,
         existingModels,
         selectedWireIds: pool.selectedWireIds,
@@ -486,7 +493,7 @@ const ConfigureProviderBody: React.FC<ConfigureProviderBodyProps> = ({
               }}
               placeholder={state.mode === "edit" ? "No API key set" : "Paste your API key"}
             />
-            <Button variant="secondary" onClick={handleTest} disabled={testing}>
+            <Button variant="secondary" onClick={safeAsyncHandler(handleTest)} disabled={testing}>
               {testing ? <Loader2 className="tw-size-4 tw-animate-spin" /> : "Test"}
             </Button>
             {state.mode === "edit" && apiKey.length > 0 && (
@@ -520,6 +527,8 @@ const ConfigureProviderBody: React.FC<ConfigureProviderBodyProps> = ({
           />
         </FormField>
 
+        <CorsCompatibilitySetting checked={enableCors} onCheckedChange={setEnableCors} />
+
         <div className="tw-flex tw-flex-col tw-gap-2">
           <div className="tw-text-sm tw-font-medium tw-text-normal">Models</div>
           <SearchBar value={modelQuery} onChange={setModelQuery} placeholder="Search models..." />
@@ -543,7 +552,11 @@ const ConfigureProviderBody: React.FC<ConfigureProviderBodyProps> = ({
           <Button variant="secondary" onClick={onClose} disabled={saving}>
             Cancel
           </Button>
-          <Button variant="default" onClick={handleSaveNew} disabled={!canSave || saving}>
+          <Button
+            variant="default"
+            onClick={safeAsyncHandler(handleSaveNew)}
+            disabled={!canSave || saving}
+          >
             {saving ? <Loader2 className="tw-size-4 tw-animate-spin" /> : "Save"}
           </Button>
         </div>
@@ -556,7 +569,11 @@ const ConfigureProviderBody: React.FC<ConfigureProviderBodyProps> = ({
             <Button variant="secondary" onClick={onClose} disabled={saving}>
               Cancel
             </Button>
-            <Button variant="default" onClick={handleSaveEdit} disabled={!canSave || saving}>
+            <Button
+              variant="default"
+              onClick={safeAsyncHandler(handleSaveEdit)}
+              disabled={!canSave || saving}
+            >
               {saving ? <Loader2 className="tw-size-4 tw-animate-spin" /> : "Save"}
             </Button>
           </div>
@@ -588,6 +605,7 @@ interface SaveEditArgs {
   initialApiKey: string | null;
   displayName: string;
   effectiveBaseUrl: string;
+  enableCors: boolean;
   extras: Record<string, unknown>;
   existingModels: readonly ConfiguredModel[];
   selectedWireIds: ReadonlySet<string>;
@@ -611,6 +629,7 @@ async function saveProviderEdit({
   initialApiKey,
   displayName,
   effectiveBaseUrl,
+  enableCors,
   extras,
   existingModels,
   selectedWireIds,
@@ -628,7 +647,8 @@ async function saveProviderEdit({
   await api.providerRegistry.update(providerId, {
     displayName,
     baseUrl: effectiveBaseUrl || undefined,
-    extras,
+    enableCors,
+    extras: Object.keys(extras).length > 0 ? extras : undefined,
   });
 
   const deselectedIds = existingModels

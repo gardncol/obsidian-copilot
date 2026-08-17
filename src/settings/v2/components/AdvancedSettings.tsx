@@ -3,6 +3,10 @@ import { Button } from "@/components/ui/button";
 import { SettingItem } from "@/components/ui/setting-item";
 import { SettingSection } from "@/components/ui/setting-section";
 import { LegacyChatPromptsNotice } from "@/settings/v2/components/LegacyChatPromptsNotice";
+import {
+  confirmLegacyVaultIndexToggle,
+  LegacyVaultIndexSetting,
+} from "@/settings/v2/components/LegacyVaultIndexSetting";
 import { useApp } from "@/context";
 import { logFileManager } from "@/logFileManager";
 import { flushRecordedPromptPayloadToLog } from "@/LLMProviders/chainRunner/utils/promptPayloadRecorder";
@@ -27,6 +31,7 @@ import { ConfirmModal } from "@/components/modals/ConfirmModal";
 import { Notice } from "obsidian";
 import React, { useCallback, useEffect, useState } from "react";
 import { isDesktopRuntime } from "@/utils/desktopRuntime";
+import { safeAsyncHandler } from "@/utils/safeAsyncHandler";
 
 const DESKTOP_UNAVAILABLE_FRAME_LOG_PATH = "(Agent Mode frame logs are desktop-only)";
 
@@ -200,7 +205,7 @@ export const AdvancedSettings: React.FC = () => {
             <Button
               variant="destructive"
               size="sm"
-              onClick={handleForgetAllSecrets}
+              onClick={safeAsyncHandler(handleForgetAllSecrets)}
               disabled={forgetting || !keychainAvailable}
               title={
                 keychainAvailable
@@ -214,6 +219,20 @@ export const AdvancedSettings: React.FC = () => {
             </Button>
           </div>
         </SettingItem>
+
+        {/* The switch this restores (https://github.com/logancyang/obsidian-copilot-preview/issues/319)
+            is refused while Miyo owns the setting, because clearing it under a connected Miyo leaves
+            retrieval pointed at an index backend that can no longer refresh.
+
+            That refusal keys off the persisted `enableMiyo` intent rather than `shouldUseMiyo`,
+            which folds in `Platform.isMobile`. Miyo needs an explicit server URL on mobile, so a
+            phone syncing a desktop-configured vault would read "not Miyo", offer the switch, and
+            Sync the cleared flag back to that desktop. */}
+        <LegacyVaultIndexSetting
+          enabled={settings.enableSemanticSearchV3}
+          miyoManaged={settings.enableMiyo}
+          onToggle={(next) => confirmLegacyVaultIndexToggle(app, next)}
+        />
 
         <SettingItem
           type="switch"
@@ -280,7 +299,7 @@ export const AdvancedSettings: React.FC = () => {
             <Button
               variant="secondary"
               size="sm"
-              onClick={async () => {
+              onClick={safeAsyncHandler(async () => {
                 if (!isDesktopRuntime()) {
                   new Notice("Agent Mode frame logs are available on desktop only.");
                   return;
@@ -292,14 +311,14 @@ export const AdvancedSettings: React.FC = () => {
                 } catch {
                   new Notice("Failed to open Agent Mode frame log.");
                 }
-              }}
+              })}
             >
               Open
             </Button>
             <Button
               variant="secondary"
               size="sm"
-              onClick={async () => {
+              onClick={safeAsyncHandler(async () => {
                 if (!isDesktopRuntime()) {
                   new Notice("Agent Mode frame logs are available on desktop only.");
                   return;
@@ -312,7 +331,7 @@ export const AdvancedSettings: React.FC = () => {
                 } catch {
                   new Notice("Failed to clear Agent Mode frame log.");
                 }
-              }}
+              })}
             >
               Clear
             </Button>

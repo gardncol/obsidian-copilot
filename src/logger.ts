@@ -3,7 +3,10 @@ import { logFileManager } from "@/logFileManager";
 
 export function logInfo(...args: unknown[]) {
   if (getSettings().debug) {
-    console.log(...args);
+    // Obsidian's plugin review allows only warn, error, and debug on the console, so
+    // info-level output ships as console.debug. Chromium files that under "Verbose".
+    // eslint-disable-next-line no-restricted-syntax -- logInfo is the approved console boundary.
+    console.debug(...args);
   }
   // Always append to rolling file log
   void logFileManager.append("INFO", ...args);
@@ -12,6 +15,7 @@ export function logInfo(...args: unknown[]) {
 export function logError(...args: unknown[]) {
   // Always include stack traces by default; console logs still respect debug
   if (getSettings().debug) {
+    // eslint-disable-next-line no-restricted-syntax -- logError is the approved console.error boundary.
     console.error(...args);
   }
   void logFileManager.append("ERROR", ...args);
@@ -19,6 +23,7 @@ export function logError(...args: unknown[]) {
 
 export function logWarn(...args: unknown[]) {
   if (getSettings().debug) {
+    // eslint-disable-next-line no-restricted-syntax -- logWarn is the approved console.warn boundary.
     console.warn(...args);
   }
   void logFileManager.append("WARN", ...args);
@@ -30,31 +35,4 @@ export function logWarn(...args: unknown[]) {
  */
 export function logMarkdownBlock(lines: string[]): void {
   void logFileManager.appendMarkdownBlock(lines);
-}
-
-/**
- * Render a table in the dev console when debug is enabled.
- * Falls back to INFO log when console.table is unavailable.
- */
-export function logTable(rows: Array<Record<string, unknown>>, columns?: string[]): void {
-  if (getSettings().debug) {
-    try {
-      // @ts-ignore - console.table exists in Chromium runtime
-      if (typeof console.table === "function") {
-        // Provide columns if specified to control field order
-        if (Array.isArray(columns) && columns.length > 0) {
-          // @ts-ignore
-          console.table(rows, columns);
-        } else {
-          // @ts-ignore
-          console.table(rows);
-        }
-        return;
-      }
-    } catch {
-      // ignore and fall back
-    }
-  }
-  // Fallback: log compact JSON
-  logInfo("Table:", JSON.stringify(rows));
 }

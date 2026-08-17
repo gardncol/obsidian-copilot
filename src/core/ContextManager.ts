@@ -118,7 +118,6 @@ export class ContextManager {
       // Add active note if requested and not already in L2
       if (
         includeActiveNote &&
-        chainType !== ChainType.PROJECT_CHAIN &&
         activeNote &&
         !processedNotePaths.has(activeNote.path) &&
         !notes.some((note) => note.path === activeNote.path)
@@ -231,14 +230,7 @@ export class ContextManager {
       let finalProcessedMessage = processedUserMessage + contextPortion;
 
       // 10. Auto-compact if context exceeds threshold (tokens * 4 = chars estimate)
-      // Projects mode uses a fixed 800k token threshold
-      // TODO(logan): deprecate this threshold when Projects mode is out of alpha
-      const PROJECT_COMPACT_THRESHOLD = 1000000;
-      const tokenThreshold =
-        chainType === ChainType.PROJECT_CHAIN
-          ? PROJECT_COMPACT_THRESHOLD
-          : getSettings().autoCompactThreshold;
-      const charThreshold = tokenThreshold * 4;
+      const charThreshold = getSettings().autoCompactThreshold * 4;
 
       let wasCompacted = false;
       let compactedContextPortion = contextPortion;

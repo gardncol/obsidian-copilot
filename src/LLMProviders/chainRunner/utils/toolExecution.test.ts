@@ -116,6 +116,7 @@ describe("toolExecution", () => {
         result: "Error: plusTool requires an API key to be configured in settings.",
         success: false,
       });
+      expect(mockCheckIsPaidUser).toHaveBeenCalledWith(undefined, { trigger: "tool_call" });
       expect(mockCallTool).not.toHaveBeenCalled();
     });
 

@@ -55,6 +55,7 @@ import { useAtomValue } from "jotai";
 import { FileSearch, Files, Folder, MessageSquare } from "lucide-react";
 import { Notice } from "obsidian";
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { safeAsyncHandler } from "@/utils/safeAsyncHandler";
 
 interface AgentHomeProps {
   backend: AgentChatBackend;
@@ -251,6 +252,14 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     deleteChat: handleDeleteChat,
     openSourceFile: handleOpenSourceFile,
   } = useAgentHistoryControls(manager, plugin, activeProjectId);
+
+  // GlobalRecentChatsSection refreshes in an effect keyed to `onLoadHistory`,
+  // and a completed load stores a fresh items array that re-renders this
+  // component — so this wrapper must not change identity per render, or the
+  // effect re-arms with its own result and loops until the tab unmounts.
+  // `safeAsyncHandler` keeps one wrapper per handler identity, which holds here
+  // because `handleLoadChatHistory` only changes with the scope.
+  const handleLoadChatHistorySafely = safeAsyncHandler(handleLoadChatHistory);
 
   // Recent-list rows show a spinner for any chat whose backend turn is still
   // running in the background (the session keeps streaming when its tab is
@@ -521,12 +530,15 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
   // the choice also survives a full remount / reload. null = nothing picked yet
   // → the shelf resolves to its first selectable tab.
   const [globalShelfTab, setGlobalShelfTabState] = useState<string | null>(() =>
-    getHomeShelfTab(HOME_SHELF_TAB_STORAGE_KEY)
+    getHomeShelfTab(app, HOME_SHELF_TAB_STORAGE_KEY)
   );
-  const setGlobalShelfTab = useCallback((id: string) => {
-    setGlobalShelfTabState(id);
-    setHomeShelfTab(HOME_SHELF_TAB_STORAGE_KEY, id);
-  }, []);
+  const setGlobalShelfTab = useCallback(
+    (id: string) => {
+      setGlobalShelfTabState(id);
+      setHomeShelfTab(app, HOME_SHELF_TAB_STORAGE_KEY, id);
+    },
+    [app]
+  );
 
   // Chip-shelf sections for the landing. Each body renders lazily (only the open
   // section is mounted), so these render closures are cheap to recreate.
@@ -545,7 +557,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
             onUpdateTitle={handleUpdateChatTitle}
             onDeleteChat={handleDeleteChat}
             onOpenSourceFile={handleOpenSourceFile}
-            onLoadHistory={handleLoadChatHistory}
+            onLoadHistory={handleLoadChatHistorySafely}
             runningChatIds={runningChatIds}
             attentionChatIds={attentionChatIds}
             projectNamesById={projectNamesById}
@@ -599,7 +611,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       handleUpdateChatTitle,
       handleDeleteChat,
       handleOpenSourceFile,
-      handleLoadChatHistory,
+      handleLoadChatHistorySafely,
       runningChatIds,
       attentionChatIds,
       isRelevantNotesPaneOpen,
@@ -633,7 +645,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
             onUpdateTitle={handleUpdateChatTitle}
             onDeleteChat={handleDeleteChat}
             onOpenSourceFile={handleOpenSourceFile}
-            onLoadHistory={handleLoadChatHistory}
+            onLoadHistory={handleLoadChatHistorySafely}
             runningChatIds={runningChatIds}
             attentionChatIds={attentionChatIds}
           />
@@ -659,7 +671,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       handleUpdateChatTitle,
       handleDeleteChat,
       handleOpenSourceFile,
-      handleLoadChatHistory,
+      handleLoadChatHistorySafely,
       runningChatIds,
       attentionChatIds,
     ]
@@ -693,8 +705,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
           .updateProject(activeProjectId, updated)
           .catch((err) => logError("[AgentMode] save context changes failed", err));
       },
-      activeProject,
-      { enableLinks: true }
+      activeProject
     ).open();
   };
 

@@ -11,17 +11,19 @@ The safety rule is simple: review compliance must not change plugin behavior, pe
 - New Copilot-root values are checked against `app.vault.configDir`; persisted roots are not revalidated against a later config-directory change, which could silently relocate user data.
 - Forbidden source suppressions were replaced with types or narrower boundaries, not runtime rewrites.
 - The OpenCode Default effort row stays mounted. Unsupported models disable it with “Not supported” so the model list never shifts.
-- Provider networking, async handlers, DOM creation, settings search, and risky CSS warnings were deliberately not rewritten by this stack.
+- Safe element-owned DOM creation was migrated to Obsidian helpers. Provider networking, async handlers, document-owned DOM creation, settings search, and risky CSS warnings were deliberately not rewritten by this stack.
+- `src/logger.ts` is the only console boundary, and it calls only the methods upstream's `no-console` allows: `debug`, `warn`, `error`. Reaching for `console.log` or `console.table` there is not an option, because the upstream config also bans disabling `no-console` through `eslint-comments/no-restricted-disable`. `console.debug` is in the repo's own `no-restricted-syntax` logging boundary so callers cannot route around `logInfo()`.
+- Type-aware ESLint rules are switched off for every file that is not `.ts`/`.tsx`, scoped by excluding TypeScript rather than by listing non-TypeScript extensions. `eslint-plugin-obsidianmd` decides which files its type-aware rules apply to and that selection differs between versions, so an extension list falls out of date silently. A type-aware rule reaching an untyped target such as `manifest.json` or `LICENSE` fails to load, and ESLint aborts the whole gate rather than reporting findings.
 
 ## Gate stages
 
 | Stage                      | Responsibility                                                                                   |
 | -------------------------- | ------------------------------------------------------------------------------------------------ |
-| `review:obsidian:package`  | Select and validate stable or prerelease metadata plus repository release invariants             |
+| `review:obsidian:package`  | Validate metadata, release invariants, and runtime-only dependency replacement guidance          |
 | `review:obsidian:source`   | Scan source, gallery code, `package.json`, and `LICENSE` with the upstream Obsidian ESLint rules |
-| `review:obsidian:styles`   | Scan `src/styles/tailwind.css` and generated `styles.css`                                        |
+| `review:obsidian:styles`   | Scan all source/gallery CSS and generated `styles.css`                                           |
 | `review:obsidian:audit`    | Report production advisories and block critical ones                                             |
-| `review:obsidian:fixtures` | Prove each blocking review family is rejected                                                    |
+| `review:obsidian:fixtures` | Prove blockers are rejected and no tracked source is ignored                                     |
 
 The same command runs in pull-request CI and in the release workflow before packaging.
 
@@ -32,6 +34,10 @@ The same command runs in pull-request CI and in the release workflow before pack
 - Manifest schema findings block. Copy guidance (`descriptionFormat` and `noForbiddenWords`) stays warning-only to avoid changing public copy.
 - Repository checks cover only invariants missing upstream: version equality, mobile compatibility, package license declaration, and a nonempty `LICENSE`.
 - `eslint-plugin-obsidianmd` does not currently export its LICENSE flat config, so the pinned package's plain-text parser is used. Revisit this internal import on every plugin upgrade.
+
+## Dependency policy
+
+The package stage applies the upstream `depend/ban-dependencies` guidance to a virtual `package.json` containing production dependencies only. This catches runtime package replacement recommendations without falsely reporting packages used only by tests or development tooling. These findings remain warnings; production audit failures follow the separate audit policy below.
 
 ## Audit policy
 
@@ -47,19 +53,29 @@ npm audit --omit=dev --audit-level=critical
 
 Warnings remain for cases where automatic cleanup could change behavior or UI, including desktop Node imports, streaming `fetch`, async React callbacks, Obsidian DOM helpers, declarative settings search, `!important`, `:has()`, and manifest copy. Do not suppress them. Fix one warning family at a time with behavior-specific tests.
 
-Provider smoke tests for Jina, Bedrock streaming/non-streaming, and legacy GitHub Copilot models are needed only when their adapters or network boundaries change.
+### Permanent `fetch` disclosures
+
+`requestUrl` supports neither streaming responses nor AbortSignal, so the following call sites must keep `fetch` and carry a `// scorecard:` comment. Any remaining scorecard `fetch` warning must match this list:
+
+- `src/LLMProviders/BedrockChatModel.ts` — Bedrock SSE streaming.
+- `src/LLMProviders/ChatLMStudio.ts` — `window.fetch` fallback wrapped for LM Studio body sanitization in a streaming ChatOpenAI.
+
+Non-streaming JSON requests (for example the Jina and custom OpenAI embedding adapters) route through `safeFetchNoThrow`, which uses `requestUrl`.
+
+Provider smoke tests for Jina and Bedrock streaming/non-streaming are needed only when their adapters or network boundaries change.
 
 ## Maintenance checklist
 
 When updating review tooling:
 
-1. Upgrade one pinned review dependency at a time.
-2. Inspect the lockfile and preserve unrelated runtime resolutions.
-3. Classify new findings as blockers, safe mechanical warnings, or risky warnings.
-4. Add a rejection fixture for every new blocking family.
-5. Verify both stable and prerelease metadata paths.
-6. Never weaken an error merely to restore a green baseline.
-7. Run:
+1. Compare any hosted-review mismatch with the latest official Obsidian lint package releases.
+2. Upgrade one pinned review dependency at a time.
+3. Inspect the lockfile and preserve unrelated runtime resolutions.
+4. Classify new findings as blockers, safe mechanical warnings, or risky warnings.
+5. Add a regression fixture outside review source roots for every newly discovered family.
+6. Verify both stable and prerelease metadata paths.
+7. Never suppress, ignore, or weaken a rule merely to restore a green baseline.
+8. Run:
 
    ```bash
    npm run format
@@ -70,7 +86,7 @@ When updating review tooling:
    npm run build
    ```
 
-8. Confirm GitHub Actions passes from a clean checkout, then rerun the actual Obsidian community review.
+9. Confirm GitHub Actions passes from a clean checkout, then rerun the actual Obsidian community review.
 
 Never edit `styles.css` directly; regenerate it with `npm run build:tailwind`.
 

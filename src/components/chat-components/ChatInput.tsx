@@ -1,11 +1,4 @@
-import {
-  getCurrentProject,
-  subscribeToProjectChange,
-  useChainType,
-  useModelKey,
-  useProjectLoading,
-} from "@/aiParams";
-import { ChainType } from "@/chainType";
+import { useChainType, useModelKey } from "@/aiParams";
 import { Button } from "@/components/ui/button";
 import { ModelSelector, type ModelSelectorEntry } from "@/components/ui/ModelSelector";
 import { useSettingsValue } from "@/settings/model";
@@ -20,7 +13,7 @@ import {
 import { SelectedTextContext, WebTabContext } from "@/types/message";
 import { isAllowedFileForNoteContext } from "@/utils";
 import { getFileIdentityKey } from "@/utils/fileListUtils";
-import { ArrowUp, CornerDownLeft, Loader2, Square, X } from "lucide-react";
+import { ArrowUp, CornerDownLeft, Square, X } from "lucide-react";
 import { App, TFile, TFolder } from "obsidian";
 import React, {
   useCallback,
@@ -29,7 +22,6 @@ import React, {
   useMemo,
   useRef,
   useState,
-  useSyncExternalStore,
 } from "react";
 import { $getSelection, $isRangeSelection, LexicalEditor as LexicalEditorType } from "lexical";
 import { ContextControl } from "./ContextControl";
@@ -68,6 +60,8 @@ export interface ChatInputProps {
    * consolidate into a config object, not more props.
    */
   topRightAccessory?: React.ReactNode;
+  /** Optional row rendered inside the composer immediately above its controls. */
+  footerContent?: React.ReactNode;
   /** Overrides the default composer placeholder copy. */
   placeholder?: string;
   /** Forwarded to the editor's placeholder slot — see {@link LexicalEditor}. */
@@ -146,7 +140,6 @@ export interface ChatInputProps {
   };
   selectedTextContexts?: SelectedTextContext[];
   onRemoveSelectedText?: (id: string) => void;
-  showProgressCard: () => void;
   showIndexingCard?: () => void;
 
   /**
@@ -228,6 +221,7 @@ export interface ChatInputHandle {
 const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function ChatInput(
   {
     topRightAccessory,
+    footerContent,
     placeholder = DEFAULT_PLACEHOLDER,
     placeholderPrompts,
     inputMessage,
@@ -251,7 +245,6 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
     modePickerOverride,
     selectedTextContexts,
     onRemoveSelectedText,
-    showProgressCard,
     showIndexingCard,
     toolControls,
     onToolPillsChange,
@@ -277,7 +270,6 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
   const [currentModelKey, setCurrentModelKey] = useModelKey();
   const settings = useSettingsValue();
   const [currentChain] = useChainType();
-  const [isProjectLoading] = useProjectLoading();
   const [currentActiveNote, setCurrentActiveNote] = useState<TFile | null>(() => {
     const activeFile = app.workspace.getActiveFile();
     return isAllowedFileForNoteContext(activeFile) ? activeFile : null;
@@ -313,37 +305,6 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
         faviconUrl: pill.getFaviconUrl(),
       }));
     });
-  };
-
-  const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
-  const loadingMessages = [
-    "Loading the project context...",
-    "Processing context files...",
-    "If you have many files in context, this can take a while...",
-  ];
-
-  const subscribedProject = useSyncExternalStore(subscribeToProjectChange, getCurrentProject);
-  const selectedProject = currentChain === ChainType.PROJECT_CHAIN ? subscribedProject : null;
-
-  useEffect(() => {
-    if (!isProjectLoading) return;
-
-    const interval = window.setInterval(() => {
-      setLoadingMessageIndex((prev) => (prev + 1) % loadingMessages.length);
-    }, 3000);
-
-    return () => window.clearInterval(interval);
-  }, [isProjectLoading, loadingMessages.length]);
-
-  const getDisplayModelKey = (): string => {
-    if (
-      selectedProject &&
-      currentChain === ChainType.PROJECT_CHAIN &&
-      selectedProject.projectModelKey
-    ) {
-      return selectedProject.projectModelKey;
-    }
-    return currentModelKey;
   };
 
   const onSendMessage = () => {
@@ -762,8 +723,10 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
 
     const doc = containerRef.current?.doc;
     if (!doc) return;
-    doc.addEventListener("keydown", handleKeyDown);
-    return () => doc.removeEventListener("keydown", handleKeyDown);
+    // Capture edit cancellation before the composer contains Escape at its own boundary.
+    // https://github.com/logancyang/obsidian-copilot-preview/issues/302
+    doc.addEventListener("keydown", handleKeyDown, true);
+    return () => doc.removeEventListener("keydown", handleKeyDown, true);
   }, [editMode, onEditCancel]);
 
   useImperativeHandle(
@@ -828,7 +791,6 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
               contextFolders={contextFolders}
               contextWebTabs={mergedContextWebTabs}
               selectedTextContexts={selectedTextContexts}
-              showProgressCard={showProgressCard}
               showIndexingCard={showIndexingCard}
               onAddToContext={handleAddToContext}
               onRemoveFromContext={handleRemoveFromContext}
@@ -860,14 +822,6 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
           )}
 
           <div className="tw-relative">
-            {isProjectLoading && (
-              <div className="tw-absolute tw-inset-0 tw-z-modal tw-flex tw-items-center tw-justify-center tw-bg-primary tw-opacity-80 tw-backdrop-blur-sm">
-                <div className="tw-flex tw-items-center tw-gap-2">
-                  <Loader2 className="tw-size-4 tw-animate-spin" />
-                  <span className="tw-text-sm">{loadingMessages[loadingMessageIndex]}</span>
-                </div>
-              </div>
-            )}
             <LexicalEditor
               value={inputMessage}
               onChange={(value) => setInputMessage(value)}
@@ -892,7 +846,6 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
               onTagSelected={onTagSelected}
               placeholder={placeholder}
               placeholderPrompts={placeholderPrompts}
-              disabled={isProjectLoading}
               isCopilotPlus={isCopilotPlus}
               showTools={showAtMentionTools}
               currentActiveFile={currentActiveNote}
@@ -917,6 +870,8 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
           <div className="-tw-ml-4 tw-w-6 tw-shrink-0 tw-self-start">{topRightAccessory}</div>
         )}
       </div>
+
+      {footerContent}
 
       <div className="tw-flex tw-h-7 tw-justify-between tw-gap-1 tw-px-1">
         <div className="tw-flex tw-min-w-0 tw-flex-1 tw-items-center tw-gap-1">
@@ -949,17 +904,10 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
               variant="ghost2"
               size="fit"
               disabled={modelPickerOverride?.disabled ?? disableModelSwitch}
-              value={modelPickerOverride?.value ?? getDisplayModelKey()}
+              value={modelPickerOverride?.value ?? currentModelKey}
               models={modelPickerOverride?.models ?? settings.activeModels}
               apiKeySettings={modelPickerOverride ? undefined : settings}
-              onChange={
-                modelPickerOverride?.onChange ??
-                ((modelKey) => {
-                  if (currentChain !== ChainType.PROJECT_CHAIN) {
-                    setCurrentModelKey(modelKey);
-                  }
-                })
-              }
+              onChange={modelPickerOverride?.onChange ?? setCurrentModelKey}
               className="tw-min-w-0 tw-max-w-full tw-truncate"
             />
           )}

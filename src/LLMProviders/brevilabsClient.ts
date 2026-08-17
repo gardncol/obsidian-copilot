@@ -1,4 +1,4 @@
-import { BREVILABS_API_BASE_URL } from "@/constants";
+import { BREVILABS_API_BASE_URL, BREVILABS_MODELS_BASE_URL } from "@/constants";
 import { MissingPlusLicenseError } from "@/error";
 import { logInfo } from "@/logger";
 import { applyEntitlement, markPaidPendingEntitlement, turnOffPaid } from "@/plusUtils";
@@ -151,11 +151,52 @@ export interface Twitter4llmResponse {
   elapsed_time_ms: number;
 }
 
+/**
+ * `GET /usage` — the account's plan-cap utilization, for the usage meter.
+ *
+ * A window appears only when the plan caps it, and none appear when the counters
+ * cannot be read, so an absent window means "no meter" rather than "0% used".
+ * `usedPercent` is 0-100 and may exceed 100 while an account is served past its cap
+ * on purchased credit. `resetsAt` is epoch SECONDS.
+ */
+export interface UsageResponse {
+  used?: Record<string, { usedPercent?: number; resetsAt?: number } | null> | null;
+  dashboard_url?: string;
+}
+
+/** One entry of the models host's public `GET /models` listing. */
+export interface BrevilabsModelEntry {
+  id?: string;
+  label?: string;
+  /** Input context window as a display string: `1M`, `256K`. */
+  context_length?: string;
+}
+
+export interface BrevilabsModelsResponse {
+  data?: BrevilabsModelEntry[];
+}
+
 export interface LicenseResponse {
   is_valid: boolean;
   plan: string;
   /** Signed entitlement token (JWS). Absent when the server could not issue one. */
   entitlement?: string;
+}
+
+/** Why the plugin is revalidating a stored license. */
+export type LicenseCheckTrigger =
+  | "startup"
+  | "manual"
+  | "refresh"
+  | "legacy_chat_turn"
+  | "multi_agent_per_turn"
+  | "tool_call"
+  | "model_gate";
+
+/** Product context attached to each license validation request. */
+export interface LicenseCheckContext {
+  trigger: LicenseCheckTrigger;
+  [key: string]: unknown;
 }
 
 export class BrevilabsClient {
@@ -181,6 +222,10 @@ export class BrevilabsClient {
     this.pluginVersion = pluginVersion;
   }
 
+  getPluginVersionHeaders(): Record<string, string> {
+    return { "X-Client-Version": this.pluginVersion };
+  }
+
   private async makeRequest<T>(
     endpoint: string,
     body: Record<string, unknown>,
@@ -203,7 +248,7 @@ export class BrevilabsClient {
     }
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
-      "X-Client-Version": this.pluginVersion,
+      ...this.getPluginVersionHeaders(),
     };
     if (!excludeAuthHeader) {
       headers.Authorization = `Bearer ${getSettings().plusLicenseKey}`;
@@ -242,7 +287,7 @@ export class BrevilabsClient {
         headers: {
           "Content-Type": contentType,
           Authorization: `Bearer ${getSettings().plusLicenseKey}`,
-          "X-Client-Version": this.pluginVersion,
+          ...this.getPluginVersionHeaders(),
         },
         body,
         throw: false,
@@ -257,13 +302,13 @@ export class BrevilabsClient {
    * Validate the license key and update the entitlement flags (isPaidUser /
    * isPlusUser). A verified signed entitlement determines strict feature access;
    * otherwise a confirmed license remains paid while those features stay closed.
-   * @param context Optional context object containing the features that the user is using to validate the license key.
+   * @param context Required product context describing why the license key is being validated.
    * @returns true if the license key is valid, false if the license key is invalid, and undefined if
    * unknown error.
    */
   async validateLicenseKey(
-    app?: App,
-    context?: Record<string, unknown>
+    app: App | undefined,
+    context: LicenseCheckContext
   ): Promise<{ isValid: boolean | undefined; plan?: string }> {
     // Identity this response will belong to. Validations can overlap (startup,
     // a send-boundary re-check, the user pasting a different key), and every
@@ -346,6 +391,68 @@ export class BrevilabsClient {
     }
 
     return data;
+  }
+
+  /**
+   * Read the account's 5-hour and weekly cap utilization.
+   *
+   * Talks to the MODELS host, not the tools/license API the rest of this client uses.
+   * The caps are enforced by the model proxy on the request path, so their read side
+   * lives beside them; `api.brevilabs.com` has no such route and answers 404.
+   *
+   * Returns null instead of throwing: this feeds a meter, and a meter that cannot be
+   * drawn is not an error worth interrupting anyone over. The endpoint is read-only and
+   * consumes no quota, so it is safe to poll.
+   */
+  async getUsage(): Promise<UsageResponse | null> {
+    const licenseKey = getSettings().plusLicenseKey;
+    if (!licenseKey) return null;
+
+    try {
+      const response = await requestUrl({
+        url: `${BREVILABS_MODELS_BASE_URL}/usage`,
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${licenseKey}`,
+          ...this.getPluginVersionHeaders(),
+        },
+        throw: false,
+      });
+      if (response.status !== 200) {
+        logInfo(`[BrevilabsClient] usage read returned ${response.status}; no cap meters`);
+        return null;
+      }
+      return response.json as UsageResponse;
+    } catch (error) {
+      logInfo("[BrevilabsClient] usage read failed; no cap meters", error);
+      return null;
+    }
+  }
+
+  /**
+   * The models host's public catalog. Unauthenticated, and the only place the context
+   * window of a Copilot Plus model is published, so the usage meter can size its ring.
+   *
+   * Returns null rather than throwing, for the same reason as {@link getUsage}: this
+   * feeds a gauge, and a gauge that cannot be drawn is not an error worth raising.
+   */
+  async getModels(): Promise<BrevilabsModelsResponse | null> {
+    try {
+      const response = await requestUrl({
+        url: `${BREVILABS_MODELS_BASE_URL}/models`,
+        method: "GET",
+        headers: this.getPluginVersionHeaders(),
+        throw: false,
+      });
+      if (response.status !== 200) {
+        logInfo(`[BrevilabsClient] models read returned ${response.status}`);
+        return null;
+      }
+      return response.json as BrevilabsModelsResponse;
+    } catch (error) {
+      logInfo("[BrevilabsClient] models read failed", error);
+      return null;
+    }
   }
 
   async url4llm(url: string): Promise<Url4llmResponse> {

@@ -1,30 +1,34 @@
-# Copilot for Obsidian — Documentation
+# Copilot for Obsidian V4
 
-Welcome to the official documentation for **Copilot for Obsidian**, an AI-powered assistant plugin that brings the power of large language models directly into your note-taking workflow.
+Copilot V4 brings coding agents into your Obsidian vault. Start with Agent for longer work, or use Quick Chat and Quick Ask for smaller questions and edits.
 
-## Table of Contents
+## Start here
 
-| Document                                                    | What it covers                                                                  |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| [Getting Started](getting-started.md)                       | Installation, first-time setup, opening the chat panel, keyboard shortcuts      |
-| [Chat Interface](chat-interface.md)                         | Chat modes, sending messages, history, settings, auto-compact                   |
-| [LLM Providers](llm-providers.md)                           | All 16+ supported providers and how to set them up                              |
-| [Models](models-and-parameters.md)                          | Which chat models ship with Copilot, adding your own, and the default model     |
-| [Context and Mentions](context-and-mentions.md)             | Active note context, @-mentions, URLs, tags, and the web viewer                 |
-| [Custom Commands](custom-commands.md)                       | Creating and using preset prompts, template variables, Quick Command, Quick Ask |
-| [Vault Search and Indexing](vault-search-and-indexing.md)   | Lexical search, semantic search, index management, exclusions                   |
-| [Agent Mode and Tools](agent-mode-and-tools.md)             | Autonomous agent, all 13 tools, file editing, web search                        |
-| [Windows Setup for Agent Mode](agent-mode-windows-setup.md) | Installing Claude Code or Codex on Windows and connecting it to Agent Mode      |
-| [Projects](projects.md)                                     | Focused workspaces with isolated context, model, and chat history               |
-| [System Prompts](system-prompts.md)                         | Customizing AI behavior with built-in and custom system prompts                 |
-| [Copilot Plus and Self-Host](copilot-plus-and-self-host.md) | Copilot Plus features, memory system, self-host mode, Miyo                      |
-| [Troubleshooting and FAQ](troubleshooting-and-faq.md)       | Common errors, provider-specific issues, performance, FAQ                       |
+1. Install Copilot from Obsidian's Community Plugins.
+2. Open **Settings → Copilot → Basic → Agents**. Follow [Getting Started with Copilot V4](getting-started.md) to download managed opencode, auto-detect Claude Code, or connect Codex through `codex-acp`.
+3. Run **Open Copilot Agent Chat Window**. A ready default agent opens automatically; if **Select your agent** appears, choose an **Installed** agent and select **Start chat**.
 
-## Quick Start
+Windows users can also follow the [Windows Agent setup](agent-mode-windows-setup.md).
 
-1. Install Copilot from Obsidian Community Plugins
-2. Add an API key in Settings → Copilot → Basic → API Keys
-3. Open the chat panel with the robot icon in the left ribbon
-4. Start chatting!
+## Agent setup and workflows
 
-For a full walkthrough, see [Getting Started](getting-started.md).
+- [Agents in Copilot V4](agent-mode-and-tools.md) — Models, permissions, multi-agent answers, and Skills shared across opencode, Claude, and Codex.
+- [Agent Projects](projects.md) — Give ongoing work its own instructions, context, and chat history.
+- [Context and Mentions](context-and-mentions.md) — Add notes, selections, folders, URLs, and other agents to a request.
+- [How Agent Searches Your Vault](vault-search-and-indexing.md) — Local search, Miyo semantic search, scope, sync, and privacy.
+- [Instructions in Copilot V4](system-prompts.md) and [`AGENTS.md` examples](agents-md-examples.md) — Set durable guidance for your vault and projects.
+
+## Everyday tools
+
+- [Quick Chat](chat-interface.md) — Ask questions without starting an Agent task.
+- [Copilot Commands and Quick Ask](custom-commands.md) — Reuse prompts, run commands, or work with selected text in place.
+
+## Models and privacy
+
+- [Models in Copilot V4](models-and-parameters.md) — Choose models, defaults, modes, and reasoning effort.
+- [LLM Providers](llm-providers.md) — Use Copilot-hosted models, bring your own API key, or connect a local endpoint.
+- [Copilot Plus and Self-Host](copilot-plus-and-self-host.md) — Compare plans and understand where your data goes.
+
+## Help
+
+- [Troubleshooting and FAQ](troubleshooting-and-faq.md) — Fix common setup, model, Agent, search, and Quick Ask problems.
