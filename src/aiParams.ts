@@ -113,6 +113,20 @@ export const EMPTY_PROCESSING_SOURCES: readonly AgentInFlightSource[] = Object.f
  *  materialize step; read by AgentContextStatusIcon / AgentChatInput to show progress + gate send. */
 export const agentProjectContextLoadAtom = atom<Record<string, AgentProjectContextLoadState>>({});
 
+interface ProjectContextLoadState {
+  success: Array<string>;
+  failed: Array<FailedItem>;
+  processingFiles: Array<string>;
+  total: Array<string>;
+}
+
+export const projectContextLoadAtom = atom<ProjectContextLoadState>({
+  success: [],
+  failed: [],
+  processingFiles: [],
+  total: [],
+});
+
 interface IndexingProgressState {
   isActive: boolean;
   isPaused: boolean;
@@ -134,6 +148,8 @@ const indexingProgressAtom = atom<IndexingProgressState>({
 });
 
 const selectedTextContextsAtom = atom<SelectedTextContext[]>([]);
+const currentProjectAtom = atom<ProjectConfig | null>(null);
+const projectLoadingAtom = atom<boolean>(false);
 
 export interface ProjectConfig {
   id: string;
@@ -220,6 +236,7 @@ export interface CustomModel {
 
   plusExclusive?: boolean;
   believerExclusive?: boolean;
+  projectEnabled?: boolean;
   capabilities?: ModelCapability[];
   displayName?: string;
 
@@ -278,6 +295,36 @@ export function useChainType() {
   });
 }
 
+export function setCurrentProject(project: ProjectConfig | null) {
+  settingsStore.set(currentProjectAtom, project);
+}
+
+export function getCurrentProject(): ProjectConfig | null {
+  return settingsStore.get(currentProjectAtom);
+}
+
+export function subscribeToProjectChange(
+  callback: (project: ProjectConfig | null) => void
+): () => void {
+  return settingsStore.sub(currentProjectAtom, () => {
+    callback(settingsStore.get(currentProjectAtom));
+  });
+}
+
+export function setProjectLoading(loading: boolean) {
+  settingsStore.set(projectLoadingAtom, loading);
+}
+
+export function useProjectLoading() {
+  return useAtom(projectLoadingAtom, {
+    store: settingsStore,
+  });
+}
+
+export function isProjectMode() {
+  return getChainType() === ChainType.PROJECT_CHAIN;
+}
+
 export function setSelectedTextContexts(contexts: SelectedTextContext[]) {
   settingsStore.set(selectedTextContextsAtom, contexts);
 }
@@ -298,6 +345,35 @@ export function clearSelectedTextContexts() {
 
 export function useSelectedTextContexts() {
   return useAtom(selectedTextContextsAtom, {
+    store: settingsStore,
+  });
+}
+
+/**
+ * Sets the project context load state in the atom.
+ */
+export function setProjectContextLoadState(state: ProjectContextLoadState) {
+  settingsStore.set(projectContextLoadAtom, state);
+}
+
+/**
+ * Updates a specific field in the project context load state.
+ */
+export function updateProjectContextLoadState<K extends keyof ProjectContextLoadState>(
+  key: K,
+  valueFn: (prev: ProjectContextLoadState[K]) => ProjectContextLoadState[K]
+) {
+  settingsStore.set(projectContextLoadAtom, (prev) => ({
+    ...prev,
+    [key]: valueFn(prev[key]),
+  }));
+}
+
+/**
+ * Hook to get the project context load state from the atom.
+ */
+export function useProjectContextLoad() {
+  return useAtom(projectContextLoadAtom, {
     store: settingsStore,
   });
 }
