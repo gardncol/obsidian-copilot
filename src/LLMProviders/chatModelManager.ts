@@ -7,8 +7,7 @@ import {
   ModelCapability,
   ProviderInfo,
 } from "@/constants";
-import { logError, logInfo } from "@/logger";
-import { isPaidEnabled } from "@/plusUtils";
+import { logError, logInfo, logWarn } from "@/logger";
 import {
   CopilotSettings,
   getModelKeyFromModel,
@@ -17,9 +16,7 @@ import {
 } from "@/settings/model";
 import {
   err2String,
-  findCustomModel,
   getModelInfo,
-  ModelInfo,
   safeFetch,
   safeFetchNoThrow,
   shouldUseGitHubCopilotResponsesApi,
@@ -41,6 +38,7 @@ import { ChatLMStudio } from "./ChatLMStudio";
 import { BedrockChatModel, type BedrockChatModelFields } from "./BedrockChatModel";
 import { GitHubCopilotChatModel } from "@/LLMProviders/githubCopilot/GitHubCopilotChatModel";
 import { GitHubCopilotResponsesModel } from "@/LLMProviders/githubCopilot/GitHubCopilotResponsesModel";
+import { BrevilabsClient } from "./brevilabsClient";
 import type { SafetySetting } from "@google/generative-ai";
 
 const GOOGLE_SAFETY_SETTINGS_BLOCK_NONE: SafetySetting[] = [
@@ -153,11 +151,11 @@ export default class ChatModelManager {
     [ChatModelProviders.COPILOT_PLUS]: () => getSettings().plusLicenseKey,
     [ChatModelProviders.MISTRAL]: () => getSettings().mistralApiKey,
     [ChatModelProviders.DEEPSEEK]: () => getSettings().deepseekApiKey,
-    [ChatModelProviders.AMAZON_BEDROCK]: () => getSettings().amazonBedrockApiKey,
     [ChatModelProviders.SILICONFLOW]: () => getSettings().siliconflowApiKey,
     [ChatModelProviders.GITHUB_COPILOT]: () =>
       getSettings().githubCopilotToken || getSettings().githubCopilotAccessToken,
     [ChatModelProviders.OLLAMA_CLOUD]: () => getSettings().ollamaCloudApiKey,
+    [ChatModelProviders.AMAZON_BEDROCK]: () => getSettings().amazonBedrockApiKey,
   } as const;
 
   private constructor() {
@@ -175,31 +173,6 @@ export default class ChatModelManager {
     return ChatModelManager.instance;
   }
 
-  private static readonly REASONING_MODEL_TEMPERATURE = 1;
-
-  /**
-   * Determines the appropriate temperature for a model
-   * @returns temperature value or undefined if temperature should not be set
-   */
-  private getTemperatureForModel(
-    modelInfo: ModelInfo,
-    customModel: CustomModel,
-    settings: CopilotSettings
-  ): number | undefined {
-    // Thinking-enabled models don't accept temperature
-    if (modelInfo.isThinkingEnabled) {
-      return undefined;
-    }
-
-    // O-series and GPT-5 models require temperature = 1
-    if (modelInfo.isOSeries || modelInfo.isGPT5) {
-      return ChatModelManager.REASONING_MODEL_TEMPERATURE;
-    }
-
-    // All other models use configured temperature
-    return customModel.temperature ?? settings.temperature;
-  }
-
   private async getModelConfig(
     customModel: CustomModel,
     allowLegacyCredentialFallback: boolean = true
@@ -209,20 +182,25 @@ export default class ChatModelManager {
     const modelName = customModel.name;
     const modelInfo = getModelInfo(modelName);
     const { isThinkingEnabled, usesAdaptiveThinking } = modelInfo;
-    const resolvedTemperature = this.getTemperatureForModel(modelInfo, customModel, settings);
-    const maxTokens = customModel.maxTokens ?? settings.maxTokens;
+    // Copilot sets no output limit. This stays undefined unless the model
+    // carries one of its own, and an undefined limit is left out of the
+    // request, so the provider writes whatever the context window allows.
+    // https://github.com/logancyang/obsidian-copilot-preview/issues/312
+    const maxTokens = customModel.maxTokens;
+    const openAIFormatIsKeyless = customModel.requiresApiKey === false;
 
-    // Base config - temperature will be handled by provider-specific methods
+    // No temperature is sent. Copilot exposes no way to choose one, and providers
+    // disagree on which values a model accepts: the Moonshot Kimi line rejects
+    // anything but 1, OpenAI's reasoning models reject anything but 1, and
+    // Anthropic's thinking models reject the parameter outright. Omitting it lets
+    // each provider apply its own default instead of Copilot guessing per family.
+    // https://github.com/logancyang/obsidian-copilot/issues/2959
     const baseConfig: Omit<ModelConfig, "maxTokens" | "maxCompletionTokens"> = {
       modelName: modelName,
       streaming: customModel.stream ?? true,
       maxRetries: 3,
       maxConcurrency: 3,
       enableCors: customModel.enableCors,
-      // Add temperature for normal models (will be overridden by special configs if needed)
-      ...(!isThinkingEnabled && resolvedTemperature !== undefined
-        ? { temperature: resolvedTemperature }
-        : {}),
     };
 
     const providerConfig: {
@@ -237,15 +215,10 @@ export default class ChatModelManager {
         ),
         configuration: {
           baseURL: customModel.baseUrl,
-          fetch: customModel.enableCors ? safeFetch : undefined,
+          fetch: customModel.enableCors ? safeFetchNoThrow : undefined,
           organization: customModel.openAIOrgId || settings.openAIOrgId,
         },
-        ...this.getOpenAISpecialConfig(
-          modelName,
-          customModel.maxTokens ?? settings.maxTokens,
-          customModel.temperature ?? settings.temperature,
-          customModel
-        ),
+        ...this.getOpenAISpecialConfig(modelName, maxTokens, customModel),
       },
       [ChatModelProviders.ANTHROPIC]: {
         anthropicApiKey: await this.resolveApiKey(
@@ -260,7 +233,7 @@ export default class ChatModelManager {
           defaultHeaders: {
             "anthropic-dangerous-direct-browser-access": "true",
           },
-          fetch: customModel.enableCors ? safeFetch : undefined,
+          fetch: customModel.enableCors ? safeFetchNoThrow : undefined,
         },
         ...(isThinkingEnabled && {
           // Opus 4.7+ defaults thinking.display to "omitted" so thinking summaries
@@ -304,14 +277,9 @@ export default class ChatModelManager {
                 allowLegacyCredentialFallback
               ),
             },
-            fetch: customModel.enableCors ? safeFetch : undefined,
+            fetch: customModel.enableCors ? safeFetchNoThrow : undefined,
           },
-          ...this.getOpenAISpecialConfig(
-            modelName,
-            customModel.maxTokens ?? settings.maxTokens,
-            customModel.temperature ?? settings.temperature,
-            customModel
-          ),
+          ...this.getOpenAISpecialConfig(modelName, maxTokens, customModel),
         };
       })(),
       [ChatModelProviders.COHEREAI]: {
@@ -323,7 +291,7 @@ export default class ChatModelManager {
         ),
         configuration: {
           baseURL: customModel.baseUrl || ProviderInfo[ChatModelProviders.COHEREAI].host,
-          fetch: customModel.enableCors ? safeFetch : undefined,
+          fetch: customModel.enableCors ? safeFetchNoThrow : undefined,
         },
       },
       [ChatModelProviders.GOOGLE]: {
@@ -356,7 +324,7 @@ export default class ChatModelManager {
         ),
         configuration: {
           baseURL: customModel.baseUrl || "https://openrouter.ai/api/v1",
-          fetch: customModel.enableCors ? safeFetch : undefined,
+          fetch: customModel.enableCors ? safeFetchNoThrow : undefined,
           defaultHeaders: {
             "HTTP-Referer": "https://obsidiancopilot.com",
             "X-Title": "Obsidian Copilot",
@@ -392,9 +360,9 @@ export default class ChatModelManager {
         headers: {
           Authorization: `Bearer ${customModel.apiKey || "default-key"}`,
         },
-        // Route through Obsidian's requestUrl (safeFetch) to bypass CORS / mixed-content
+        // Route through Obsidian's requestUrl (safeFetchNoThrow) to bypass CORS / mixed-content
         // restrictions — required on mobile (WKWebView) when calling http:// Ollama hosts.
-        fetch: customModel.enableCors ? safeFetch : undefined,
+        fetch: customModel.enableCors ? safeFetchNoThrow : undefined,
         // Enable thinking for models with REASONING capability (e.g., qwen3, deepseek-r1)
         // Thinking content goes to additional_kwargs.reasoning_content
         think: customModel.capabilities?.includes(ModelCapability.REASONING) ?? false,
@@ -425,7 +393,7 @@ export default class ChatModelManager {
         streamUsage: customModel.streamUsage ?? false,
         configuration: {
           baseURL: customModel.baseUrl || "http://localhost:1234/v1",
-          fetch: customModel.enableCors ? safeFetch : undefined,
+          fetch: customModel.enableCors ? safeFetchNoThrow : undefined,
         },
         // Enable reasoning extraction for models with REASONING capability
         enableReasoning: customModel.capabilities?.includes(ModelCapability.REASONING) ?? false,
@@ -438,23 +406,25 @@ export default class ChatModelManager {
       },
       [ChatModelProviders.OPENAI_FORMAT]: {
         modelName: modelName,
-        apiKey: await this.resolveApiKey(
-          customModel.apiKey,
-          settings.openAIApiKey,
-          allowLegacyCredentialFallback
-        ),
+        apiKey: openAIFormatIsKeyless
+          ? undefined
+          : await this.resolveApiKey(
+              customModel.apiKey,
+              settings.openAIApiKey,
+              allowLegacyCredentialFallback
+            ),
         streamUsage: customModel.streamUsage ?? false,
         configuration: {
           baseURL: customModel.baseUrl,
           fetch: customModel.enableCors ? safeFetch : undefined,
-          defaultHeaders: { "dangerously-allow-browser": "true" },
+          // The OpenAI SDK accepts an explicit null to omit its default auth
+          // header while still constructing a client for a keyless endpoint.
+          // https://github.com/logancyang/obsidian-copilot/issues/2895
+          defaultHeaders: openAIFormatIsKeyless
+            ? { Authorization: null, "dangerously-allow-browser": "true" }
+            : { "dangerously-allow-browser": "true" },
         },
-        ...this.getOpenAISpecialConfig(
-          modelName,
-          customModel.maxTokens ?? settings.maxTokens,
-          customModel.temperature ?? settings.temperature,
-          customModel
-        ),
+        ...this.getOpenAISpecialConfig(modelName, maxTokens, customModel),
       },
       [ChatModelProviders.SILICONFLOW]: {
         modelName: modelName,
@@ -465,14 +435,9 @@ export default class ChatModelManager {
         ),
         configuration: {
           baseURL: customModel.baseUrl || ProviderInfo[ChatModelProviders.SILICONFLOW].host,
-          fetch: customModel.enableCors ? safeFetch : undefined,
+          fetch: customModel.enableCors ? safeFetchNoThrow : undefined,
         },
-        ...this.getOpenAISpecialConfig(
-          modelName,
-          customModel.maxTokens ?? settings.maxTokens,
-          customModel.temperature ?? settings.temperature,
-          customModel
-        ),
+        ...this.getOpenAISpecialConfig(modelName, maxTokens, customModel),
       },
       [ChatModelProviders.COPILOT_PLUS]: {
         modelName: modelName,
@@ -483,7 +448,8 @@ export default class ChatModelManager {
         ),
         configuration: {
           baseURL: BREVILABS_MODELS_BASE_URL,
-          fetch: safeFetch,
+          fetch: safeFetchNoThrow,
+          defaultHeaders: BrevilabsClient.getInstance().getPluginVersionHeaders(),
         },
         // Reasoning is opt-in: forward the user's per-model effort pick only for
         // REASONING-capable models, and gate enableReasoning on an EXPLICIT effort.
@@ -509,7 +475,7 @@ export default class ChatModelManager {
         ),
         configuration: {
           baseURL: customModel.baseUrl || ProviderInfo[ChatModelProviders.MISTRAL].host,
-          fetch: customModel.enableCors ? safeFetch : undefined,
+          fetch: customModel.enableCors ? safeFetchNoThrow : undefined,
         },
       },
       [ChatModelProviders.DEEPSEEK]: {
@@ -521,7 +487,7 @@ export default class ChatModelManager {
         ),
         configuration: {
           baseURL: customModel.baseUrl || ProviderInfo[ChatModelProviders.DEEPSEEK].host,
-          fetch: customModel.enableCors ? safeFetch : undefined,
+          fetch: customModel.enableCors ? safeFetchNoThrow : undefined,
         },
       },
       [ChatModelProviders.AMAZON_BEDROCK]: {} as BedrockChatModelFields,
@@ -537,36 +503,13 @@ export default class ChatModelManager {
       },
     };
 
-    let selectedProviderConfig =
+    const selectedProviderConfig =
       providerConfig[customModel.provider as keyof typeof providerConfig] || {};
-
-    if ((customModel.provider as ChatModelProviders) === ChatModelProviders.AMAZON_BEDROCK) {
-      selectedProviderConfig = await this.buildBedrockConfig(
-        customModel,
-        modelName,
-        settings,
-        maxTokens,
-        resolvedTemperature,
-        allowLegacyCredentialFallback
-      );
-    }
-
-    // Get provider-specific parameters (like topP, frequencyPenalty) that the provider supports
-    const providerSpecificParams = this.getProviderSpecificParams(
-      customModel.provider as ChatModelProviders,
-      customModel
-    );
-
-    // LangChain 0.6.6 handles token configuration for special models internally
-    const tokenConfig = {
-      maxTokens,
-    };
 
     const finalConfig = {
       ...baseConfig,
       ...selectedProviderConfig,
-      ...providerSpecificParams,
-      ...tokenConfig,
+      ...(maxTokens === undefined ? {} : { maxTokens }),
     };
 
     return finalConfig as ModelConfig;
@@ -582,28 +525,20 @@ export default class ChatModelManager {
 
   /**
    * Adds special configuration for OpenAI models that support reasoning
-   * LangChain 0.6.6+ handles most of the token/temperature logic internally
+   * LangChain 0.6.6+ handles most of the token logic internally
    *
    * NOTE: GPT-5 models require Responses API for verbosity parameter to work.
    * The useResponsesApi flag is set automatically in createModelInstance() for GPT-5.
    */
   private getOpenAISpecialConfig(
     modelName: string,
-    maxTokens: number,
-    _temperature: number | undefined,
+    maxTokens: number | undefined,
     customModel?: CustomModel
   ): Record<string, unknown> {
-    const settings = getSettings();
     const modelInfo = getModelInfo(modelName);
-    const resolvedTemperature = this.getTemperatureForModel(
-      modelInfo,
-      customModel || ({} as CustomModel),
-      settings
-    );
 
     const config: Record<string, unknown> = {
-      maxTokens,
-      temperature: resolvedTemperature,
+      ...(maxTokens === undefined ? {} : { maxTokens }),
     };
 
     // Add reasoning parameters for O-series and GPT-5 models
@@ -649,7 +584,7 @@ export default class ChatModelManager {
     allowLegacyCredentialFallback: boolean
   ): Promise<BedrockChatModelFields> {
     const apiKeySource =
-      customModel.apiKey || (allowLegacyCredentialFallback ? settings.amazonBedrockApiKey : "");
+      customModel.apiKey || (allowLegacyCredentialFallback ? settings.amazonBedrockApiKey : undefined);
     if (!apiKeySource) {
       throw new Error(
         "Amazon Bedrock API key is not configured. Provide a key in Settings > Copilot > BYOK or the model definition."
@@ -756,7 +691,7 @@ export default class ChatModelManager {
     allModels.forEach((model) => {
       if (model.enabled) {
         if (!Object.values(ChatModelProviders).includes(model.provider as ChatModelProviders)) {
-          console.warn(`Unknown provider: ${model.provider} for model: ${model.name}`);
+          logWarn(`Unknown provider: ${model.provider} for model: ${model.name}`);
           return;
         }
 
@@ -781,12 +716,11 @@ export default class ChatModelManager {
     model: CustomModel,
     allowLegacyCredentialFallback: boolean = true
   ): boolean {
-    if ((model.provider as ChatModelProviders) === ChatModelProviders.AMAZON_BEDROCK) {
-      const settings = getSettings();
-      const apiKey =
-        model.apiKey || (allowLegacyCredentialFallback ? settings.amazonBedrockApiKey : "");
-      // Region defaults to us-east-1 if not specified, so API key is the only requirement
-      return Boolean(apiKey);
+    if (
+      model.requiresApiKey === false &&
+      (model.provider as ChatModelProviders) === ChatModelProviders.OPENAI_FORMAT
+    ) {
+      return true;
     }
 
     const getDefaultApiKey = this.providerApiKeyMap[model.provider as ChatModelProviders];
@@ -802,7 +736,7 @@ export default class ChatModelManager {
       model.provider as ChatModelProviders
     ] as unknown as ChatConstructorType;
     if (!constructor) {
-      console.warn(`Unknown provider: ${model.provider} for model: ${model.name}`);
+      logWarn(`Unknown provider: ${model.provider} for model: ${model.name}`);
       throw new Error(`Unknown provider: ${model.provider} for model: ${model.name}`);
     }
     return constructor;
@@ -817,86 +751,6 @@ export default class ChatModelManager {
 
   getActiveModel(): CustomModel | null {
     return ChatModelManager.activeModel;
-  }
-
-  /**
-   * Helper to validate a model config has valid credentials and meets entitlement requirements.
-   * Does NOT check believerExclusive - that's validated at usage time, not selection time.
-   */
-  private isModelConfigValid(model: CustomModel, settings: CopilotSettings): boolean {
-    const modelKey = getModelKeyFromModel(model);
-    const modelInfo = ChatModelManager.modelMap[modelKey];
-
-    // Check if model exists in map and has API key
-    if (!modelInfo || !modelInfo.hasApiKey) {
-      return false;
-    }
-
-    // Check Copilot Plus entitlement requirements (bypassed in self-host mode)
-    if (model.plusExclusive && !isPaidEnabled()) {
-      return false;
-    }
-
-    return true;
-  }
-
-  /**
-   * Resolves the active chat model for temperature override operations.
-   * Uses a single source of truth: getModelKey() -> findCustomModel()
-   * Falls back to first valid model in settings.activeModels if current selection is invalid.
-   *
-   * Note: believerExclusive models are trusted if explicitly selected by the user,
-   * but skipped in fallback to avoid selecting them for non-Believer users.
-   */
-  private resolveModelForTemperatureOverride(): CustomModel {
-    const settings = getSettings();
-
-    // Try to get the user's currently selected model
-    try {
-      const currentModelKey = getModelKey();
-      if (currentModelKey) {
-        const model = findCustomModel(currentModelKey, settings.activeModels);
-
-        // Validate it (trust believerExclusive if user selected it)
-        if (this.isModelConfigValid(model, settings)) {
-          return model;
-        }
-      }
-    } catch {
-      // Model not found or invalid, fall through to fallback
-    }
-
-    // Fallback: Find first valid model in settings.activeModels
-    // Skip believerExclusive models in fallback to avoid selecting them for non-Believer users
-    for (const model of settings.activeModels) {
-      if (model.enabled && !model.believerExclusive && this.isModelConfigValid(model, settings)) {
-        return model;
-      }
-    }
-
-    // No valid model found
-    throw new Error(
-      "No valid chat model available for temperature override. " +
-        "Please check your API key settings and ensure at least one model is properly configured."
-    );
-  }
-
-  /**
-   * langchain 1.0 TypeScript doesn't support temperature override in BaseChatModelCallOptions,
-   * so we need to create a new model instance with the specified temperature.
-   */
-  async getChatModelWithTemperature(temperature: number): Promise<BaseChatModel> {
-    const modelConfig = ChatModelManager.activeModel ?? this.resolveModelForTemperatureOverride();
-
-    // Create a temporary model config with overridden temperature
-    const modelWithTempOverride: CustomModel = {
-      ...modelConfig,
-      temperature,
-    };
-
-    return ChatModelManager.activeModelSource === "bridged"
-      ? await this.createModelInstanceFromBridged(modelWithTempOverride)
-      : await this.createModelInstance(modelWithTempOverride);
   }
 
   async setChatModel(model: CustomModel): Promise<void> {
