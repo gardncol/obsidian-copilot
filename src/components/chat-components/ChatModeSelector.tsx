@@ -2,22 +2,18 @@ import { ChainType } from "@/chainType";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { DropdownMenu, DropdownMenuTrigger } from "@radix-ui/react-dropdown-menu";
-import { ChevronDown, Sparkles, SquareArrowOutUpRight } from "lucide-react";
+import { ChevronDown, Sparkles } from "lucide-react";
 import React from "react";
 
 interface ChatModeSelectorProps {
   selectedChain: ChainType;
-  isPaidUser: boolean;
   onModeChange: (chainType: ChainType) => void;
-  onPlusUpsell: () => void;
   defaultOpen?: boolean;
 }
 
 export function ChatModeSelector({
   selectedChain,
-  isPaidUser,
   onModeChange,
-  onPlusUpsell,
   defaultOpen,
 }: ChatModeSelectorProps) {
   return (
@@ -29,7 +25,7 @@ export function ChatModeSelector({
           ) : (
             <div className="tw-flex tw-items-center tw-gap-1">
               <Sparkles className="tw-size-4" />
-              copilot plus
+              agent mode
             </div>
           )}
           <ChevronDown className="tw-mt-0.5 tw-size-5" />
@@ -39,19 +35,12 @@ export function ChatModeSelector({
         <DropdownMenuItem onSelect={() => onModeChange(ChainType.LLM_CHAIN)}>
           chat (free)
         </DropdownMenuItem>
-        {isPaidUser ? (
-          <DropdownMenuItem onSelect={() => onModeChange(ChainType.COPILOT_PLUS_CHAIN)}>
-            <div className="tw-flex tw-items-center tw-gap-1">
-              <Sparkles className="tw-size-4" />
-              copilot plus
-            </div>
-          </DropdownMenuItem>
-        ) : (
-          <DropdownMenuItem onSelect={onPlusUpsell}>
-            copilot plus
-            <SquareArrowOutUpRight className="tw-size-3" />
-          </DropdownMenuItem>
-        )}
+        <DropdownMenuItem onSelect={() => onModeChange(ChainType.COPILOT_PLUS_CHAIN)}>
+          <div className="tw-flex tw-items-center tw-gap-1">
+            <Sparkles className="tw-size-4" />
+            agent mode
+          </div>
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

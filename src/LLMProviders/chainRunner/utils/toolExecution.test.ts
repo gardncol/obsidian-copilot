@@ -1,7 +1,8 @@
 import { createLangChainTool } from "@/tools/createLangChainTool";
 import { ToolRegistry, type ToolMetadata } from "@/tools/ToolRegistry";
 import { logInfo } from "@/logger";
-import { checkIsPaidUser, isSelfHostModeValid } from "@/plusUtils";
+import { isSelfHostModeValid } from "@/plusUtils";
+import * as settingsModule from "@/settings/model";
 import { z } from "zod";
 import {
   deduplicateSources,
@@ -16,11 +17,30 @@ jest.mock("@/plusUtils", () => ({
   checkIsPaidUser: jest.fn(),
   isSelfHostModeValid: jest.fn().mockReturnValue(false),
 }));
+jest.mock("@/settings/model", () => ({
+  getSettings: jest.fn(),
+}));
 
-const mockCheckIsPaidUser = checkIsPaidUser as jest.MockedFunction<typeof checkIsPaidUser>;
 const mockIsSelfHostModeValid = isSelfHostModeValid as jest.MockedFunction<
   typeof isSelfHostModeValid
 >;
+
+function mockApiKeySettings(overrides: Record<string, string> = {}) {
+  (settingsModule.getSettings as jest.Mock).mockReturnValue({
+    openAIApiKey: "",
+    openRouterAiApiKey: "",
+    anthropicApiKey: "",
+    googleApiKey: "",
+    mistralApiKey: "",
+    deepseekApiKey: "",
+    xaiApiKey: "",
+    huggingfaceApiKey: "",
+    cohereApiKey: "",
+    siliconflowApiKey: "",
+    ollamaCloudApiKey: "",
+    ...overrides,
+  });
+}
 
 function registerTool<T extends ReturnType<typeof createLangChainTool>>(
   tool: T,
@@ -62,7 +82,6 @@ describe("toolExecution", () => {
       ]);
 
       expect(result).toEqual({ toolName: "echo", result: "Result: test", success: true });
-      expect(mockCheckIsPaidUser).not.toHaveBeenCalled();
     });
 
     it("hands the original user message to a tool that requires it", async () => {
@@ -142,7 +161,7 @@ describe("toolExecution", () => {
       expect(result.result).toMatch(/^Error: /);
     });
 
-    it("blocks a plus-only tool for a non-plus user without running it", async () => {
+    it("blocks a plus-only tool when no API key is configured", async () => {
       const func = jest.fn().mockResolvedValue("Should not execute");
       const plusTool = registerTool(
         createLangChainTool({
@@ -153,20 +172,19 @@ describe("toolExecution", () => {
         }),
         { isPlusOnly: true }
       );
-      mockCheckIsPaidUser.mockResolvedValueOnce(false);
+      mockApiKeySettings({});
 
       const result = await executeSequentialToolCall({ name: "plusTool", args: {} }, [plusTool]);
 
       expect(result).toEqual({
         toolName: "plusTool",
-        result: "Error: plusTool requires a Copilot Plus subscription",
+        result: "Error: plusTool requires an API key to be configured in settings.",
         success: false,
       });
-      expect(mockCheckIsPaidUser).toHaveBeenCalledWith(undefined, { trigger: "tool_call" });
       expect(func).not.toHaveBeenCalled();
     });
 
-    it("runs a plus-only tool for a plus user", async () => {
+    it("runs a plus-only tool when an API key is configured", async () => {
       const plusTool = registerTool(
         createLangChainTool({
           name: "plusTool",
@@ -176,7 +194,7 @@ describe("toolExecution", () => {
         }),
         { isPlusOnly: true }
       );
-      mockCheckIsPaidUser.mockResolvedValueOnce(true);
+      mockApiKeySettings({ openRouterAiApiKey: "test-key" });
 
       const result = await executeSequentialToolCall({ name: "plusTool", args: {} }, [plusTool]);
 
@@ -187,7 +205,7 @@ describe("toolExecution", () => {
       });
     });
 
-    it("runs a plus-only tool for a non-plus user in a valid self-host setup", async () => {
+    it("runs a plus-only tool with an Ollama Cloud key alone", async () => {
       const plusTool = registerTool(
         createLangChainTool({
           name: "plusTool",
@@ -197,8 +215,7 @@ describe("toolExecution", () => {
         }),
         { isPlusOnly: true }
       );
-      mockCheckIsPaidUser.mockResolvedValueOnce(false);
-      mockIsSelfHostModeValid.mockReturnValue(true);
+      mockApiKeySettings({ ollamaCloudApiKey: "test-key" });
 
       const result = await executeSequentialToolCall({ name: "plusTool", args: {} }, [plusTool]);
 

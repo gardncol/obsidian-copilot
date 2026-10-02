@@ -14,7 +14,6 @@ import {
   MessageContent,
 } from "@/imageProcessing/imageProcessor";
 import { logInfo, logWarn } from "@/logger";
-import { checkIsPaidUser } from "@/plusUtils";
 import { getSettings } from "@/settings/model";
 import {
   getEffectiveUserPrompt,
@@ -645,26 +644,6 @@ Include your extracted terms as: [SALIENT_TERMS: term1, term2, term3]`;
 
     const thinkStreamer = new ThinkBlockStreamer(updateCurrentAiMessage, excludeThinking);
     let sources: { title: string; path: string; score: number; explanation?: unknown }[] = [];
-
-    const isPaidUser = await checkIsPaidUser(this.chainManager.app, {
-      trigger: "legacy_chat_turn",
-      isCopilotPlus: true,
-    });
-    if (!isPaidUser) {
-      await this.handleError(new Error("Invalid license key"), (message) =>
-        thinkStreamer.processErrorChunk(message)
-      );
-      const errorResponse = thinkStreamer.close().content;
-
-      return this.handleResponse(
-        errorResponse,
-        userMessage,
-        abortController,
-        addMessage,
-        updateCurrentAiMessage,
-        undefined
-      );
-    }
 
     try {
       logInfo("==== Step 1: Planning tools ====");

@@ -15,56 +15,38 @@ describe("ChatModeSelector", () => {
   });
 
   describe("ChatModeSelector()", () => {
-    it("offers Free Chat and paid Copilot Plus without Vault QA https://github.com/Brevilabs/obsidian-copilot-private/issues/286", () => {
+    it("offers free chat and agent mode without any license gate", () => {
       const onModeChange = jest.fn();
+      const onPlusUpsell = jest.fn();
       render(
         <ChatModeSelector
           selectedChain={ChainType.LLM_CHAIN}
-          isPaidUser
           onModeChange={onModeChange}
-          onPlusUpsell={jest.fn()}
           defaultOpen
         />
       );
 
       expect(screen.getAllByText("chat (free)")).toHaveLength(2);
-      expect(screen.getByText("copilot plus")).toBeTruthy();
-      expect(screen.queryByText(/vault QA/i)).toBeNull();
+      expect(screen.getByText("agent mode")).toBeTruthy();
+      expect(screen.queryByText(/copilot plus/i)).toBeNull();
 
-      fireEvent.click(screen.getByText("copilot plus"));
+      fireEvent.click(screen.getByText("agent mode"));
       expect(onModeChange).toHaveBeenCalledWith(ChainType.COPILOT_PLUS_CHAIN);
+      expect(onPlusUpsell).not.toHaveBeenCalled();
     });
 
-    it("switches from Copilot Plus back to Free Chat https://github.com/Brevilabs/obsidian-copilot-private/issues/286", () => {
+    it("switches from agent mode back to free chat", () => {
       const onModeChange = jest.fn();
       render(
         <ChatModeSelector
           selectedChain={ChainType.COPILOT_PLUS_CHAIN}
-          isPaidUser
           onModeChange={onModeChange}
-          onPlusUpsell={jest.fn()}
           defaultOpen
         />
       );
 
       fireEvent.click(screen.getByText("chat (free)"));
       expect(onModeChange).toHaveBeenCalledWith(ChainType.LLM_CHAIN);
-    });
-
-    it("keeps the Copilot Plus upsell for free users https://github.com/Brevilabs/obsidian-copilot-private/issues/286", () => {
-      const onPlusUpsell = jest.fn();
-      render(
-        <ChatModeSelector
-          selectedChain={ChainType.LLM_CHAIN}
-          isPaidUser={false}
-          onModeChange={jest.fn()}
-          onPlusUpsell={onPlusUpsell}
-          defaultOpen
-        />
-      );
-
-      fireEvent.click(screen.getByText("copilot plus"));
-      expect(onPlusUpsell).toHaveBeenCalledTimes(1);
     });
   });
 });

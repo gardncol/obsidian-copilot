@@ -18,7 +18,6 @@ import {
 import { CustomCommandChatModal } from "@/commands/CustomCommandChatModal";
 import { ApplyCustomCommandModal } from "@/components/modals/ApplyCustomCommandModal";
 import { YoutubeTranscriptModal } from "@/components/modals/YoutubeTranscriptModal";
-import { checkIsPaidUser } from "@/plusUtils";
 import type CopilotPlugin from "@/main";
 import { MiyoRequestError } from "@/miyo/MiyoClient";
 import { requestMiyoIndexRefresh } from "@/miyo/miyoIndex";
@@ -375,12 +374,6 @@ export function registerCommands(plugin: CopilotPlugin, publish: PublishFile) {
   });
 
   addCommand(plugin, COMMAND_IDS.DOWNLOAD_YOUTUBE_SCRIPT, async () => {
-    const isPaidUser = await checkIsPaidUser(plugin.app, { trigger: "tool_call" });
-    if (!isPaidUser) {
-      new Notice("Download YouTube Script (plus) is a Copilot Plus feature");
-      return;
-    }
-
     const modal = new YoutubeTranscriptModal(plugin.app);
     modal.open();
   });

@@ -58,7 +58,8 @@ export async function executeSequentialToolCall(
         getSettings().xaiApiKey ||
         getSettings().huggingfaceApiKey ||
         getSettings().cohereApiKey ||
-        getSettings().siliconflowApiKey
+        getSettings().siliconflowApiKey ||
+        getSettings().ollamaCloudApiKey
       );
       if (!hasApiKey) {
         return {
