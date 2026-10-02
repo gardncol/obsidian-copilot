@@ -14,12 +14,10 @@ function createModel(): ChatOpenRouter {
   return new ChatOpenRouter({
     modelName: "test-model",
     apiKey: "test-key",
-    // The jest environment has no global fetch; the stub keeps client construction inert.
     configuration: { fetch: jest.fn() as unknown as typeof fetch },
   });
 }
 
-/** Access the private message converter without spinning up a real stream. */
 function convertMessages(messages: unknown[]): OpenAI.ChatCompletionMessageParam[] {
   return (
     createModel() as unknown as {
@@ -28,10 +26,6 @@ function convertMessages(messages: unknown[]): OpenAI.ChatCompletionMessageParam
   ).toOpenRouterMessages(messages as BaseMessage[]);
 }
 
-/**
- * Reproduce a streamed assistant turn: run each raw OpenRouter delta through the
- * private chunk builder and aggregate the chunks the way callers of `stream()` do.
- */
 function aggregateStreamedDeltas(deltas: Array<Record<string, unknown>>): AIMessageChunk {
   const model = createModel() as unknown as {
     buildMessageChunk: (config: {
@@ -145,6 +139,39 @@ describe("ChatOpenRouter", () => {
         const result = convertMessages([new AIMessage({ content: "done" })]);
 
         expect(result).toEqual([{ role: "assistant", content: "done" }]);
+      });
+    });
+
+    describe("invocationParams()", () => {
+      function paramsFor(fields: Record<string, unknown>): Record<string, unknown> {
+        const model = new ChatOpenRouter({
+          modelName: "test-model",
+          apiKey: "test-key",
+          configuration: { fetch: jest.fn() as unknown as typeof fetch },
+          ...fields,
+        });
+        return (
+          model as unknown as { invocationParams: () => Record<string, unknown> }
+        ).invocationParams();
+      }
+
+      it("sets a reasoning budget without inventing an output limit to go with it (https://github.com/logancyang/obsidian-copilot-preview/issues/312)", () => {
+        const params = paramsFor({ enableReasoning: true });
+
+        expect(params.reasoning).toEqual({ max_tokens: 1024 });
+        expect(params.max_tokens).toBeUndefined();
+      });
+
+      it("passes an explicit output limit through when it sets a reasoning budget", () => {
+        const params = paramsFor({ enableReasoning: true, maxTokens: 8192 });
+
+        expect(params.max_tokens).toBe(8192);
+      });
+
+      it("sets an effort rather than a budget when an effort is configured", () => {
+        const params = paramsFor({ enableReasoning: true, reasoningEffort: "high" });
+
+        expect(params.reasoning).toEqual({ effort: "high" });
       });
     });
   });

@@ -11,41 +11,15 @@ interface Props {
   binaryName: string;
   placeholder: string;
   initialPath: string;
-  /** Whether `initialPath` is a saved override rather than a resolved default. */
   hasPersistedPath?: boolean;
-  /** Optional hint surfaced when auto-detect finds nothing. */
   notFoundHint?: string;
-  /** Validate & persist on Apply. Returns null on success, error message on failure. */
   onSave: (path: string) => Promise<string | null>;
-  /**
-   * Clear the persisted custom path. When provided, the Apply button becomes a
-   * Clear button once a usable path is applied (see `showClear` below).
-   */
   onClear?: () => void | Promise<void>;
-  /** When true, a successful auto-detect immediately invokes `onSave`. */
   persistOnAutoDetect?: boolean;
-  /**
-   * Custom detector. Used when the backend has a richer install lookup than
-   * a generic `which`/`where` PATH search — e.g. Claude knows about
-   * `~/.local/bin/claude`, Volta, asdf, NVM. Falls back to
-   * {@link detectBinary} when omitted.
-   */
   detect?: () => Promise<string | null>;
-  /**
-   * Directories the detector searched, listed under the "not found" hint so
-   * users can self-diagnose. Defaults to {@link detectionSearchDirs} (what the
-   * generic `which`/`where` path actually searches) when omitted.
-   */
   searchedDirs?: () => string[];
 }
 
-/**
- * Shared "binary path" setting row used by every Agent Mode backend that
- * spawns a local executable. Owns the Input + Auto-detect + Apply UX with
- * busy/error state. Callers parameterize the binary name, placeholder, and
- * persistence callback; the surrounding `<SettingItem>` (title/description)
- * stays in the backend-specific panel.
- */
 export const BinaryPathSetting: React.FC<Props> = ({
   binaryName,
   placeholder,
@@ -62,6 +36,14 @@ export const BinaryPathSetting: React.FC<Props> = ({
   const [error, setError] = React.useState<string | null>(null);
   const [searched, setSearched] = React.useState<string[]>([]);
   const [busy, setBusy] = React.useState(false);
+  const mounted = React.useRef(false);
+
+  React.useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   React.useEffect(() => {
     // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- sync the editable draft when the persisted path changes underneath us (e.g. auto-detect from another panel); a key-prop remount would drop in-flight edits
@@ -101,12 +83,15 @@ export const BinaryPathSetting: React.FC<Props> = ({
     setSearched([]);
     try {
       const found = detect ? await detect() : await detectBinary(binaryName);
+      // Leaving this control abandons detection; a late result must not overwrite
+      // a managed installation selected in the meantime.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/398
+      if (!mounted.current) return;
       if (!found) {
         setError(
           notFoundHint ??
             `${binaryName} not found on PATH. Install it or paste a custom path manually.`
         );
-        // Without a custom detector we know exactly which dirs were searched.
         const dirs = searchedDirs ?? (detect ? undefined : detectionSearchDirs);
         setSearched(dirs?.() ?? []);
         return;
@@ -128,8 +113,6 @@ export const BinaryPathSetting: React.FC<Props> = ({
     }
   }, [binaryName, busy, notFoundHint, onSave, persistOnAutoDetect, detect, searchedDirs]);
 
-  // A resolved default is already usable but cannot be cleared because no override
-  // exists. Editing it reveals Apply; a matching persisted override reveals Clear.
   const draftMatchesInitial = pathInput.trim() === initialPath.trim();
   const showClear = Boolean(onClear) && hasPersistedPath && draftMatchesInitial;
   const showApply = !draftMatchesInitial || initialPath.trim() === "";

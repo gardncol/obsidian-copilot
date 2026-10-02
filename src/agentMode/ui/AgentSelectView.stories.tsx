@@ -113,7 +113,8 @@ export const CodexError: StoryObj<AgentSelectViewProps> = {
       {
         ...CODEX,
         status: "error",
-        statusMessage: "Could not read the Codex binary at /usr/local/bin/codex-acp.",
+        statusMessage:
+          "Could not read the Codex binary at C:\\Users\\example\\AppData\\Local\\organizationworkspacewithaverylongunbrokenidentifier012345678901234567890123456789\\customagentruntime\\codex-acp.exe.",
       },
     ],
     selectedId: "codex",
@@ -136,4 +137,30 @@ export const LongAgentName: StoryObj<AgentSelectViewProps> = {
     ],
   },
   render: AgentSelectStory,
+};
+
+export const ClaudeSignInRequired: StoryObj<AgentSelectViewProps> = {
+  args: {
+    rows: [
+      { ...OPENCODE, status: "installed" },
+      { ...CLAUDE, status: "signed-out", statusMessage: "Claude not signed in" },
+      CODEX,
+    ],
+    selectedId: "claude",
+  },
+  render: AgentSelectStory,
+};
+
+export const LaunchPending: StoryObj<AgentSelectViewProps> = {
+  args: {
+    rows: [
+      { ...OPENCODE, status: "error", statusMessage: "Agent launch failed." },
+      { ...CLAUDE, status: "installed" },
+      CODEX,
+    ],
+    selectedId: "claude",
+    ctaLabel: "Starting…",
+    footerNote: "Wait for the current agent launch to finish.",
+    ctaDisabled: true,
+  },
 };

@@ -1,36 +1,77 @@
 # Testing Guide
 
-How to test the Copilot plugin across three layers — unit, integration, and
-end-to-end. Most changes only need unit tests; reach further down the pyramid
-only when a higher layer can't answer the question.
+How to test the Copilot plugin with unit and end-to-end tests. Most changes only
+need unit tests; use end-to-end tests when unit tests can't answer the question.
 
 ## Test pyramid
 
-| Layer       | Command                             | When to use                                                                                                                                                           |
-| ----------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Unit        | `npm run test`                      | Pure logic. Fast. Mocks the Obsidian API. Default for any code change that doesn't touch Obsidian itself.                                                             |
-| Integration | `npm run test:integration`          | LLM-provider HTTP calls. Requires API keys in `.env.test`.                                                                                                            |
-| E2E         | `obsidian` CLI against a real vault | Anything that needs the live React tree, the real Obsidian DOM, or actual settings persistence — UI regressions, settings round-trips, plugin lifecycle, perf checks. |
+| Layer | Command                             | When to use                                                                                                                                                           |
+| ----- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Unit  | `npm run test`                      | Pure logic. Fast. Mocks the Obsidian API. Default for any code change that doesn't touch Obsidian itself.                                                             |
+| E2E   | `obsidian` CLI against a real vault | Anything that needs the live React tree, the real Obsidian DOM, or actual settings persistence — UI regressions, settings round-trips, plugin lifecycle, perf checks. |
 
 ## Unit tests
 
-- Jest with TypeScript support. `npm run test` runs the unit suite (excludes
-  integration tests); run a single test with `npm test -- -t "test name"`.
+- Jest with TypeScript support. `npm run test` runs the unit suite; run a
+  single test with `npm test -- -t "test name"`.
 - Mock the Obsidian API for plugin testing.
 - Test files live adjacent to the implementation (`.test.ts`).
 - Use `@testing-library/react` for component testing.
 - For how to structure code so it's unit-testable — dependency injection, pure
   leaf modules, the litmus test — see [`STYLE_GUIDE.md`](./STYLE_GUIDE.md).
 
-## Integration tests
+### Test design workflow
 
-`npm run test:integration` exercises real LLM-provider HTTP calls and requires
-API keys in `.env.test`.
+Unit tests are executable specifications. A developer or agent should be able to
+read the `describe`/`it` outline and explain what the module does, how its public
+operations affect observable state or output, and which constraints it preserves.
+A green suite alone does not establish that the intended behavior is covered.
+
+When adding or changing behavior:
+
+1. **Write the behavioral outline first.** Derive cases from the required contract.
+   For each affected callable, establish its normal use before adding relevant
+   boundary, failure, and regression cases. If an existing suite only covers edge
+   cases, add the missing normal behavior. Avoid copying implementation branches
+   into tests or inventing cases for unsupported states.
+2. **Name the condition and outcome.** Read each `describe` plus `it` as a sentence.
+   State what changes or is returned and when. Avoid names such as "works",
+   "handles updates", or "publishes once" that leave the behavior unexplained.
+   Keep required issue URLs, but make the description understandable without
+   opening the issue.
+3. **Make the body demonstrate the claim.** Use concrete inputs and meaningful
+   fixture names, with clear arrange, act, and assert sections. Keep one behavioral
+   scenario per case; multiple assertions may establish that scenario. Assert
+   observable results. Call counts are useful when notification or interaction is
+   part of the contract, but do not substitute for checking the promised state or
+   output. Helpers should remove setup noise while leaving decisive inputs and
+   outcomes visible.
+4. **Red, green, refactor.** Run the new test before implementing the behavior or
+   fix. Confirm it fails because the promised behavior is missing or wrong, not
+   because setup, imports, or mocks are broken. Make the smallest production change
+   that passes, then improve the code while keeping tests green. When adding
+   coverage for behavior that already works, temporarily break that behavior
+   locally to verify the test detects it, then restore it. Do not claim a red phase
+   that was not observed.
+5. **Review the outline and the assertions.** Read the test names without their
+   bodies: can a newcomer explain the affected module's contract? Then inspect
+   each body: would it fail if the named behavior broke? Fix gaps in coverage or
+   assertions; renaming a weak test alone is insufficient.
+
+For example, a `select()` suite should explain selection before deduplication:
+
+- `it("makes the chosen chat the context source for Relevant Notes", ...)`
+- `it("switches the context source to another chat before notifying subscribers", ...)`
+- `it("does not notify subscribers again when the same chat context object is reselected", ...)`
+
+This workflow applies Uncle Bob's guidance that tests should read as specifications
+and express intent clearly before making them pass. See
+[Robert C. Martin, "Test First"](https://blog.cleancoder.com/uncle-bob/2013/09/23/Test-first.html).
 
 ## End-to-end testing (Obsidian CLI)
 
 E2E via the CLI is the slowest and most fragile layer — reach for it only when
-the unit/integration layers can't answer the question.
+unit tests can't answer the question.
 
 A field guide for coding agents driving the Copilot plugin through the Obsidian
 desktop CLI. Everything here was validated against Obsidian `1.12.7` with the
@@ -398,7 +439,7 @@ path (from `app.vault.adapter.basePath`) and then call
 
 ## Component gallery workflow
 
-Use the component gallery whenever a feature adds or changes a user-visible React component or a meaningful visual state. A story is not required for non-visual backend, data, or tooling changes. Gallery verification complements callable-level unit coverage; it does not replace it.
+Use the component gallery whenever a feature adds or changes a user-visible React component or a meaningful visual state. A story is not required for non-visual backend, data, or tooling changes. Gallery verification complements callable-level unit coverage; it does not replace it. See the [bounded review coverage inventory](../GALLERY_REVIEW_COVERAGE.md) for representative settings, open-menu, permission-diff and transition checks, plus remaining gaps.
 
 ### Authoring stories
 
@@ -439,7 +480,7 @@ Deploy to the non-production test vault configured by `COPILOT_TEST_VAULT_PATH` 
 
 The gallery's stylesheet is built by concatenating `src/styles/tailwind.css` into its own source, so it carries a near-complete copy of the production stylesheet — and Obsidian injects every enabled plugin's `styles.css` document-wide. Both copies land in the same cascade at equal specificity, so a gallery copy built from an older `src/styles/tailwind.css` outranks the deployed production rules and the plugin's own views render pre-change behavior.
 
-`npm run test:vault` keeps the two in step: when the vault's gallery plugin resolves to the worktree being deployed, it rebuilds and reloads the gallery too. It cannot do that when the deployed gallery belongs to a different worktree — `gallery:vault` symlinks its whole source directory, so the live stylesheet is owned by whichever worktree deployed it last. In that case the deployment warns and names the owning path; run `npm run gallery:vault` from that worktree or disable the gallery plugin while testing.
+`npm run test:vault` keeps the two in step: whenever the vault has a gallery plugin installed, it rebuilds the gallery from the worktree being deployed and relinks it there, then reloads it. `gallery:vault` symlinks its whole source directory, so this also repairs a link left dangling by a deleted worktree; if the vault has no gallery plugin, the step is skipped.
 
 If a CSS change appears to have no effect, check for the same selector twice in the inspector before suspecting the change itself.
 

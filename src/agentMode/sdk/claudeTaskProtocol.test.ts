@@ -1,8 +1,6 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeBackgroundTaskStateMachine } from "./claudeTaskProtocol";
 
-// These fixtures mirror carriers captured from Claude Code 2.1.206. Keeping
-// the carrier shapes visible makes each test read as one protocol transcript.
 interface ToolResultFixture {
   id: string;
   content?: unknown;
@@ -394,39 +392,6 @@ describe("claudeTaskProtocol", () => {
         expect(acknowledged.resultActions).toEqual(new Map());
         expect(taskOnlyProgress.updates).toEqual([]);
         expect(started.updates).toEqual([{ toolCallId: "background", status: "in_progress" }]);
-      });
-
-      it("uses an explicit task binding to select an acknowledgement from multiple launches", () => {
-        const protocol = new ClaudeBackgroundTaskStateMachine();
-        observeTool(protocol, "launch-a", "Agent");
-        observeTool(protocol, "launch-b", "Task");
-
-        const started = acceptMessage(
-          protocol,
-          systemMessage({
-            subtype: "task_started",
-            task_id: "task-a",
-            tool_use_id: "launch-b",
-          })
-        );
-
-        const acknowledged = acceptMessage(
-          protocol,
-          userMessage(
-            [
-              { id: "launch-a", content: "first result" },
-              { id: "launch-b", content: "second result" },
-            ],
-            {
-              isAsync: true,
-              status: "async_launched",
-              agentId: "task-a",
-            }
-          )
-        );
-
-        expect(started.updates).toEqual([{ toolCallId: "launch-b", status: "in_progress" }]);
-        expect(acknowledged.resultActions).toEqual(new Map([["launch-b", { kind: "omit" }]]));
       });
 
       it("preserves an earlier pending terminal report when a later patch has no output", () => {

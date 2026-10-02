@@ -1,10 +1,5 @@
 import type { CustomModel } from "@/aiParams";
-import {
-  ChatModelProviders,
-  EmbeddingModelProviders,
-  ProviderInfo,
-  ProviderSettingsKeyMap,
-} from "@/constants";
+import { ChatModelProviders, ProviderInfo, ProviderSettingsKeyMap } from "@/constants";
 import type { Provider, SettingKeyProviders } from "@/constants";
 import type { CopilotSettings } from "@/settings/model";
 
@@ -14,7 +9,6 @@ export type ModelApiKeySettings = Pick<
   CopilotSettings,
   | "anthropicApiKey"
   | "openAIApiKey"
-  | "azureOpenAIApiKey"
   | "googleApiKey"
   | "groqApiKey"
   | "openRouterAiApiKey"
@@ -23,7 +17,6 @@ export type ModelApiKeySettings = Pick<
   | "plusLicenseKey"
   | "mistralApiKey"
   | "deepseekApiKey"
-  | "amazonBedrockApiKey"
   | "siliconflowApiKey"
 >;
 
@@ -31,9 +24,7 @@ const PROVIDERS_WITHOUT_API_KEYS: ReadonlySet<Provider> = new Set([
   ChatModelProviders.OPENAI_FORMAT,
   ChatModelProviders.OLLAMA,
   ChatModelProviders.LM_STUDIO,
-  ChatModelProviders.AZURE_OPENAI,
-  EmbeddingModelProviders.COPILOT_PLUS,
-  EmbeddingModelProviders.COPILOT_PLUS_JINA,
+  ChatModelProviders.COPILOT_PLUS,
 ]);
 
 export function getProviderLabel(provider: string, model?: CustomModel): string {
@@ -41,12 +32,6 @@ export function getProviderLabel(provider: string, model?: CustomModel): string 
   return baseLabel + (model?.believerExclusive && baseLabel === "Copilot" ? "(Believer)" : "");
 }
 
-/**
- * Check whether a model has the credential its provider requires without reading plugin state.
- *
- * @param model - Model whose provider and optional per-model key determine credential requirements.
- * @param settings - Caller-owned settings snapshot used for provider credentials.
- */
 export function checkModelApiKey(
   model: CustomModel,
   settings: Readonly<ModelApiKeySettings>
@@ -55,19 +40,6 @@ export function checkModelApiKey(
   errorNotice?: string;
 } {
   const provider = model.provider as ChatModelProviders;
-  if (provider === ChatModelProviders.AMAZON_BEDROCK) {
-    const apiKey = model.apiKey || settings.amazonBedrockApiKey;
-    if (!apiKey) {
-      return {
-        hasApiKey: false,
-        errorNotice:
-          "Amazon Bedrock API key is missing. Please add a key in Settings > Copilot > BYOK or update the model configuration.",
-      };
-    }
-
-    return { hasApiKey: true };
-  }
-
   const knownProvider = Object.prototype.hasOwnProperty.call(ProviderInfo, provider);
   const needsApiKey = knownProvider && !PROVIDERS_WITHOUT_API_KEYS.has(provider);
   const settingsKey = ProviderSettingsKeyMap[

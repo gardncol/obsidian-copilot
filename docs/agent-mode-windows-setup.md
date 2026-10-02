@@ -1,71 +1,59 @@
-# Windows Setup for Agent
+# Windows setup for Agent Chat
 
-Copilot Agent runs in the Obsidian desktop app. On Windows, start with **opencode** unless you already use Claude Code or Codex.
+Agent Chat runs in the Obsidian desktop app. On Windows, start with **opencode** unless you already use Claude Code or Codex.
 
 ## 1. Install opencode with Copilot
 
-1. Open **Settings → Copilot → Basic** and scroll to **Agents**.
+1. Open [**Settings → Copilot → Basic → Agents**](settings.md#basic).
 2. Open the **opencode** tab.
-3. Click **Download opencode**. Copilot downloads the correct Windows executable and keeps it outside your vault.
+3. Open **Configure**, choose **Managed by Copilot**, then select **Download & install**. Copilot downloads and manages the Windows executable outside your vault.
 4. When the status shows **Ready**, choose a **Default model** and set **Default backend** to **opencode**.
 
-No PowerShell command or PATH setup is needed for the managed installation.
+The managed installation does not require a PowerShell command or PATH changes.
 
-Already have opencode? Click **I already have it**. Copilot checks common Windows install locations. If it cannot find your copy, click **Configure**, choose **My own binary**, then use **Auto-detect** or paste the absolute path to `opencode.exe` and click **Apply**. Custom installs must be opencode 1.16.0 or newer.
+If opencode is already installed, open **Configure**, choose **My own binary**, then select **Auto-detect** or enter the absolute path to `opencode.exe` and select **Apply**.
 
-## 2. Use Claude Code instead
+If Copilot reports that your opencode version is unsupported, update opencode and run detection again.
 
-Claude uses the Claude Code installation and login already on your computer. Copilot requires Claude Code 2.1.206 or newer.
+## 2. Connect Claude Code
 
-1. Open **Settings → Copilot → Basic → Agents → Claude** and click **Configure**.
-2. If Claude Code is installed, click **Auto-detect** under **Claude Code binary**.
-3. If it is not installed, run the **Install it** command shown in the dialog from PowerShell:
+The Claude backend uses the Claude Code installation and account already on your computer.
 
-```powershell
-irm https://gist.githubusercontent.com/logancyang/7a87eb38d91015eac567521f8cc9c729/raw/install-claude-agent-mode-windows.ps1 | iex
-```
+1. Open **Settings → Copilot → Basic → Agents → Claude** and select **Configure**.
+2. If Claude Code is installed, select **Auto-detect** under **Claude Code binary**.
+3. If it is not installed, copy the current **Install it** command from the dialog and run it in PowerShell.
+4. Return to **Configure Claude** and select **Auto-detect** again. If detection still fails, enter the absolute path to `claude.exe` and select **Apply**.
+5. If the dialog shows **Sign in**, select it and complete the browser login.
 
-4. Return to **Configure Claude** and click **Auto-detect**. If detection still fails, paste the absolute path to `claude.exe` and click **Apply**.
-5. If the dialog shows **Sign in**, click it and complete the browser login. The equivalent PowerShell command is:
+You can also start the Claude Code login from PowerShell:
 
 ```powershell
 claude auth login --claudeai
 ```
 
-Copilot inherits Claude Code's credentials; there is no API key to paste into this dialog. If Copilot reports that the detected version is unsupported, rerun the installer to update Claude Code and detect it again.
+Copilot uses Claude Code's credentials. Do not add an Anthropic API key to this dialog. If Copilot reports that the installed version is unsupported, update Claude Code and detect it again.
 
-## 3. Use Codex instead
+## 3. Connect Codex
 
-Codex needs both the Codex CLI and the native `codex-acp.exe` adapter.
+For manual installations, the Codex backend needs a supported `@agentclientprotocol/codex-acp` adapter, which includes a compatible Codex CLI. Copilot checks compatibility in **Configure**. Managed downloads use Windows `tar.exe` to extract ZIP files. See [Codex installation details](agent-mode-and-tools.md#codex).
 
-1. Open **Settings → Copilot → Basic → Agents → Codex** and click **Configure**.
-2. Run the **Install it** command shown in **Configure Codex** from PowerShell:
+1. Open **Settings → Copilot → Basic → Agents → Codex** and select **Configure**.
+2. Under **Managed by Copilot**, choose **Download & install**. Copilot downloads a verified native adapter and its Codex runtime. You do not need Node.js or npm.
+3. Click **Sign in** and complete authentication in your browser. If the browser does not open, click **Open sign-in page**. Return to Obsidian to see the signed-in status.
+4. To use your own supported adapter, choose **My own binary** and Auto-detect it or enter its path. Copilot keeps your binary and credentials when you uninstall managed downloads.
 
-```powershell
-irm https://gist.githubusercontent.com/logancyang/380ef4dbf9f98900771da76eca3d21e6/raw/install-codex-agent-mode-windows.ps1 | iex
-```
+You can also choose **Sign in to Codex** on the Agent Chat status card. For terminal login, run your configured adapter with `cli login` using the same `CODEX_HOME` as Copilot.
 
-The script installs the Codex CLI, starts its login, downloads the matching Windows `codex-acp.exe`, and copies the adapter path to your clipboard.
+## Share Skills across agents
 
-3. Return to **Configure Codex** and click **Auto-detect** under **codex-acp binary**. If detection fails, paste the copied `codex-acp.exe` path and click **Apply**.
-4. If sign-in did not finish, run:
+Open [**Settings → Copilot → Skills**](settings.md#skills) and toggle the opencode, Claude, or Codex icons for each Skill. Copilot keeps one shared copy and creates folder links into `.opencode/skills/`, `.claude/skills/`, and `.agents/skills/`.
 
-```powershell
-codex login
-```
+Windows may block creation of these links. Enable **Windows Settings → Privacy & security → For developers → Developer Mode**, or run Obsidian with administrator access, then toggle the affected agent off and on in the **Skills** tab.
 
-Configure the path to `codex-acp.exe`, not `codex.exe` or a `.cmd` launcher. Copilot inherits the Codex CLI login; leave **Environment variables** empty unless you intentionally need an override.
+If a sync service replaces a folder link and a Skill disappears from an agent, toggle that agent off and on again to recreate the link.
 
-## Share skills across agents
+## Open Agent Chat
 
-Open **Settings → Copilot → Skills** and toggle the opencode, Claude, or Codex icons for each skill. Copilot keeps one shared copy and creates folder links into `.opencode/skills/`, `.claude/skills/`, and `.agents/skills/`.
+Select the **Agent Chat** ribbon icon or run **Open Copilot Agent Chat Window** from the command palette. Choose an installed agent and select **Start chat**.
 
-If the Skills tab shows **Windows needs Developer Mode for multi-agent fanout**, enable **Windows Settings → Privacy & security → For developers → Developer Mode**. Administrator access is the other option. Then toggle the affected agent off and on to recreate its link.
-
-If a sync service replaces a folder link and a skill disappears from an agent, toggle that agent off and on again in the **Skills** tab.
-
-## Open Agent
-
-Run **Open Copilot Agent Chat Window** from the command palette, or use the Agent ribbon icon. Choose an installed agent and click **Start chat**.
-
-For models, permissions, projects, and multi-agent use, see [Agents in Copilot V4](agent-mode-and-tools.md).
+For models, effort, permissions, Projects, and multi-agent answers, see [Agent Chat](agent-mode-and-tools.md).

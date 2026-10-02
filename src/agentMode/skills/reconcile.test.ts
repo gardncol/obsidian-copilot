@@ -7,16 +7,6 @@ jest.mock("@/logger", () => ({
   logError: jest.fn(),
 }));
 
-/**
- * In-memory FS tailored to the reconcile pass. Stores three kinds of nodes:
- *
- * - `dir`  — real directory.
- * - `file` — regular file (only used as filler).
- * - `link` — symlink/junction with an absolute target.
- *
- * Provides the {@link ReconcileFs} surface plus debug accessors. Ancestor
- * directories are auto-synthesized on insert.
- */
 type Node = { kind: "dir" } | { kind: "file" } | { kind: "link"; target: string };
 
 interface TestFs extends ReconcileFs {
@@ -95,9 +85,6 @@ function mkFs(initial: Record<string, Node> = {}): TestFs {
       if (n === undefined || n.kind !== "file") {
         throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
       }
-      // Test fixtures store files as `{ kind: "file" }` markers without
-      // content — return an empty string. None of the reconcile cases
-      // need real file contents (it's symlink-only).
       return "";
     },
     async writeFile(p, _content) {
@@ -138,207 +125,146 @@ function mkSkill(name: string, enabledAgents: Skill["enabledAgents"] = []): Skil
   };
 }
 
+const CLAUDE_FOO = "/vault/.claude/skills/foo";
+const canonicalFoo = {
+  [`${CANONICAL}/foo`]: { kind: "dir" },
+  [`${CANONICAL}/foo/SKILL.md`]: { kind: "file" },
+} as const;
+
+const run = (fs: ReconcileFs, skills: Skill[]) =>
+  reconcile({ skills, canonicalAbsRoot: CANONICAL, agentDirsAbs: AGENT_DIRS_ABS, fs });
+
 describe("reconcile", () => {
-  it("creates a missing symlink for an enabled agent", async () => {
-    const fs = mkFs({
-      [`${CANONICAL}/foo`]: { kind: "dir" },
-      [`${CANONICAL}/foo/SKILL.md`]: { kind: "file" },
-    });
-    const skills = [mkSkill("foo", ["claude"])];
+  describe("reconcile()", () => {
+    it("creates a symlink to the canonical skill for an enabled agent with no link yet", async () => {
+      const fs = mkFs({ ...canonicalFoo });
 
-    const report = await reconcile({
-      skills,
-      canonicalAbsRoot: CANONICAL,
-      agentDirsAbs: AGENT_DIRS_ABS,
-      fs,
+      const report = await run(fs, [mkSkill("foo", ["claude"])]);
+
+      expect(report.created).toContain(CLAUDE_FOO);
+      expect(report.errors).toEqual([]);
+      expect(fs.__dump()[CLAUDE_FOO]).toEqual({ kind: "link", target: `${CANONICAL}/foo` });
     });
 
-    expect(report.created).toContain("/vault/.claude/skills/foo");
-    expect(report.errors).toEqual([]);
-    const link = fs.__dump()["/vault/.claude/skills/foo"];
-    expect(link).toEqual({ kind: "link", target: `${CANONICAL}/foo` });
-  });
+    it("leaves a link that already points at the canonical skill unchanged", async () => {
+      const fs = mkFs({
+        ...canonicalFoo,
+        [CLAUDE_FOO]: { kind: "link", target: `${CANONICAL}/foo` },
+      });
 
-  it("repairs a symlink pointing at the wrong target", async () => {
-    const fs = mkFs({
-      [`${CANONICAL}/foo`]: { kind: "dir" },
-      [`${CANONICAL}/foo/SKILL.md`]: { kind: "file" },
-      "/vault/.claude/skills/foo": { kind: "link", target: "/somewhere/else" },
-    });
-    const skills = [mkSkill("foo", ["claude"])];
+      const report = await run(fs, [mkSkill("foo", ["claude"])]);
 
-    const report = await reconcile({
-      skills,
-      canonicalAbsRoot: CANONICAL,
-      agentDirsAbs: AGENT_DIRS_ABS,
-      fs,
+      expect(report).toEqual({ created: [], removedOrphans: [], errors: [] });
     });
 
-    expect(report.errors).toEqual([]);
-    const link = fs.__dump()["/vault/.claude/skills/foo"];
-    expect(link).toEqual({ kind: "link", target: `${CANONICAL}/foo` });
-    expect(report.created).toContain("/vault/.claude/skills/foo");
-  });
+    it("repoints a symlink that targets the wrong location", async () => {
+      const fs = mkFs({
+        ...canonicalFoo,
+        [CLAUDE_FOO]: { kind: "link", target: "/somewhere/else" },
+      });
 
-  it("removes an orphan link pointing into the canonical store", async () => {
-    const fs = mkFs({
-      [`${CANONICAL}/alive`]: { kind: "dir" },
-      [`${CANONICAL}/alive/SKILL.md`]: { kind: "file" },
-      "/vault/.claude/skills/alive": { kind: "link", target: `${CANONICAL}/alive` },
-      // Orphan: link basename has no matching managed skill.
-      "/vault/.claude/skills/orphan": { kind: "link", target: `${CANONICAL}/orphan` },
-    });
-    const skills = [mkSkill("alive", ["claude"])];
+      const report = await run(fs, [mkSkill("foo", ["claude"])]);
 
-    const report = await reconcile({
-      skills,
-      canonicalAbsRoot: CANONICAL,
-      agentDirsAbs: AGENT_DIRS_ABS,
-      fs,
+      expect(report.errors).toEqual([]);
+      expect(report.created).toContain(CLAUDE_FOO);
+      expect(fs.__dump()[CLAUDE_FOO]).toEqual({ kind: "link", target: `${CANONICAL}/foo` });
     });
 
-    expect(report.removedOrphans).toContain("/vault/.claude/skills/orphan");
-    expect(fs.__dump()["/vault/.claude/skills/orphan"]).toBeUndefined();
-    // The alive link is left alone.
-    expect(fs.__dump()["/vault/.claude/skills/alive"]).toEqual({
-      kind: "link",
-      target: `${CANONICAL}/alive`,
-    });
-  });
+    it("does not replace a real directory occupying an enabled agent's slot", async () => {
+      const fs = mkFs({
+        ...canonicalFoo,
+        [CLAUDE_FOO]: { kind: "dir" },
+        [`${CLAUDE_FOO}/SKILL.md`]: { kind: "file" },
+      });
 
-  it("removes a managed link when that skill is no longer enabled for the agent", async () => {
-    const fs = mkFs({
-      [`${CANONICAL}/foo`]: { kind: "dir" },
-      [`${CANONICAL}/foo/SKILL.md`]: { kind: "file" },
-      "/vault/.claude/skills/foo": { kind: "link", target: `${CANONICAL}/foo` },
-      "/vault/.opencode/skills/foo": { kind: "link", target: `${CANONICAL}/foo` },
-    });
-    const skills = [mkSkill("foo", ["claude"])];
+      const report = await run(fs, [mkSkill("foo", ["claude"])]);
 
-    const report = await reconcile({
-      skills,
-      canonicalAbsRoot: CANONICAL,
-      agentDirsAbs: AGENT_DIRS_ABS,
-      fs,
+      expect(report.created).toEqual([]);
+      expect(fs.__dump()[CLAUDE_FOO]).toEqual({ kind: "dir" });
+      expect(fs.__dump()[`${CLAUDE_FOO}/SKILL.md`]).toEqual({ kind: "file" });
     });
 
-    expect(report.removedOrphans).toContain("/vault/.opencode/skills/foo");
-    expect(fs.__dump()["/vault/.claude/skills/foo"]).toEqual({
-      kind: "link",
-      target: `${CANONICAL}/foo`,
-    });
-    expect(fs.__dump()["/vault/.opencode/skills/foo"]).toBeUndefined();
-  });
+    it("removes a link into the canonical store whose skill no longer exists", async () => {
+      const fs = mkFs({
+        [`${CANONICAL}/alive`]: { kind: "dir" },
+        [`${CANONICAL}/alive/SKILL.md`]: { kind: "file" },
+        "/vault/.claude/skills/alive": { kind: "link", target: `${CANONICAL}/alive` },
+        "/vault/.claude/skills/orphan": { kind: "link", target: `${CANONICAL}/orphan` },
+      });
 
-  it("leaves unrelated links untouched during orphan cleanup", async () => {
-    const fs = mkFs({
-      [`${CANONICAL}/foo`]: { kind: "dir" },
-      [`${CANONICAL}/foo/SKILL.md`]: { kind: "file" },
-      "/vault/.claude/skills/foo": { kind: "link", target: `${CANONICAL}/foo` },
-      "/vault/.claude/skills/external": { kind: "link", target: "/elsewhere/external" },
-    });
-    const skills = [mkSkill("foo", ["claude"])];
+      const report = await run(fs, [mkSkill("alive", ["claude"])]);
 
-    const report = await reconcile({
-      skills,
-      canonicalAbsRoot: CANONICAL,
-      agentDirsAbs: AGENT_DIRS_ABS,
-      fs,
+      expect(report.removedOrphans).toContain("/vault/.claude/skills/orphan");
+      expect(fs.__dump()["/vault/.claude/skills/orphan"]).toBeUndefined();
+      expect(fs.__dump()["/vault/.claude/skills/alive"]).toEqual({
+        kind: "link",
+        target: `${CANONICAL}/alive`,
+      });
     });
 
-    expect(report.removedOrphans).not.toContain("/vault/.claude/skills/external");
-    expect(fs.__dump()["/vault/.claude/skills/external"]).toEqual({
-      kind: "link",
-      target: "/elsewhere/external",
-    });
-  });
+    it("removes the link of an agent the skill is no longer enabled for and keeps the enabled agent's link", async () => {
+      const fs = mkFs({
+        ...canonicalFoo,
+        [CLAUDE_FOO]: { kind: "link", target: `${CANONICAL}/foo` },
+        "/vault/.opencode/skills/foo": { kind: "link", target: `${CANONICAL}/foo` },
+      });
 
-  it("never touches a real directory sitting in an agent path", async () => {
-    const fs = mkFs({
-      [`${CANONICAL}/foo`]: { kind: "dir" },
-      [`${CANONICAL}/foo/SKILL.md`]: { kind: "file" },
-      "/vault/.claude/skills/bar": { kind: "dir" },
-      "/vault/.claude/skills/bar/SKILL.md": { kind: "file" },
-    });
-    const skills = [mkSkill("foo", ["claude"])];
+      const report = await run(fs, [mkSkill("foo", ["claude"])]);
 
-    const report = await reconcile({
-      skills,
-      canonicalAbsRoot: CANONICAL,
-      agentDirsAbs: AGENT_DIRS_ABS,
-      fs,
+      expect(report.removedOrphans).toContain("/vault/.opencode/skills/foo");
+      expect(fs.__dump()[CLAUDE_FOO]).toEqual({ kind: "link", target: `${CANONICAL}/foo` });
+      expect(fs.__dump()["/vault/.opencode/skills/foo"]).toBeUndefined();
     });
 
-    // The real dir is untouched.
-    expect(fs.__dump()["/vault/.claude/skills/bar"]).toEqual({ kind: "dir" });
-    expect(fs.__dump()["/vault/.claude/skills/bar/SKILL.md"]).toEqual({ kind: "file" });
-    expect(report.removedOrphans).not.toContain("/vault/.claude/skills/bar");
-  });
+    it("keeps links that point outside the canonical store", async () => {
+      const fs = mkFs({
+        ...canonicalFoo,
+        [CLAUDE_FOO]: { kind: "link", target: `${CANONICAL}/foo` },
+        "/vault/.claude/skills/external": { kind: "link", target: "/elsewhere/external" },
+      });
 
-  it("reports EPERM on creation as an error without crashing", async () => {
-    const fs = mkFs({
-      [`${CANONICAL}/foo`]: { kind: "dir" },
-      [`${CANONICAL}/foo/SKILL.md`]: { kind: "file" },
-    });
-    fs.__setSymlinkBlocked(true);
-    const skills = [mkSkill("foo", ["claude"])];
+      const report = await run(fs, [mkSkill("foo", ["claude"])]);
 
-    const report = await reconcile({
-      skills,
-      canonicalAbsRoot: CANONICAL,
-      agentDirsAbs: AGENT_DIRS_ABS,
-      fs,
+      expect(report.removedOrphans).not.toContain("/vault/.claude/skills/external");
+      expect(fs.__dump()["/vault/.claude/skills/external"]).toEqual({
+        kind: "link",
+        target: "/elsewhere/external",
+      });
     });
 
-    expect(report.created).toEqual([]);
-    expect(report.errors).toHaveLength(1);
-    expect(report.errors[0].path).toBe("/vault/.claude/skills/foo");
-    expect(report.errors[0].reason).toBe("eperm");
-    // No link landed.
-    expect(fs.__dump()["/vault/.claude/skills/foo"]).toBeUndefined();
-  });
+    it("never removes a real directory sitting in an agent path", async () => {
+      const fs = mkFs({
+        ...canonicalFoo,
+        "/vault/.claude/skills/bar": { kind: "dir" },
+        "/vault/.claude/skills/bar/SKILL.md": { kind: "file" },
+      });
 
-  it("leaves links pointing outside the canonical store alone", async () => {
-    const fs = mkFs({
-      [`${CANONICAL}/foo`]: { kind: "dir" },
-      [`${CANONICAL}/foo/SKILL.md`]: { kind: "file" },
-      "/vault/.claude/skills/foo": { kind: "link", target: `${CANONICAL}/foo` },
-      // User-owned link to somewhere else — reconciliation must not touch it.
-      "/vault/.claude/skills/userOwned": { kind: "link", target: "/elsewhere/x" },
-    });
-    const skills = [mkSkill("foo", ["claude"])];
+      const report = await run(fs, [mkSkill("foo", ["claude"])]);
 
-    const report = await reconcile({
-      skills,
-      canonicalAbsRoot: CANONICAL,
-      agentDirsAbs: AGENT_DIRS_ABS,
-      fs,
+      expect(fs.__dump()["/vault/.claude/skills/bar"]).toEqual({ kind: "dir" });
+      expect(fs.__dump()["/vault/.claude/skills/bar/SKILL.md"]).toEqual({ kind: "file" });
+      expect(report.removedOrphans).not.toContain("/vault/.claude/skills/bar");
     });
 
-    expect(report.removedOrphans).not.toContain("/vault/.claude/skills/userOwned");
-    expect(fs.__dump()["/vault/.claude/skills/userOwned"]).toEqual({
-      kind: "link",
-      target: "/elsewhere/x",
-    });
-  });
+    it("reports an eperm error without creating a link when symlink creation is not permitted", async () => {
+      const fs = mkFs({ ...canonicalFoo });
+      fs.__setSymlinkBlocked(true);
 
-  it("handles a missing agent directory by skipping the reverse sweep for that agent", async () => {
-    const fs = mkFs({
-      [`${CANONICAL}/foo`]: { kind: "dir" },
-      [`${CANONICAL}/foo/SKILL.md`]: { kind: "file" },
-    });
-    // No `.claude/skills` directory at all.
-    const skills = [mkSkill("foo", [])];
+      const report = await run(fs, [mkSkill("foo", ["claude"])]);
 
-    const report = await reconcile({
-      skills,
-      canonicalAbsRoot: CANONICAL,
-      agentDirsAbs: AGENT_DIRS_ABS,
-      fs,
+      expect(report.created).toEqual([]);
+      expect(report.errors).toHaveLength(1);
+      expect(report.errors[0].path).toBe(CLAUDE_FOO);
+      expect(report.errors[0].reason).toBe("eperm");
+      expect(fs.__dump()[CLAUDE_FOO]).toBeUndefined();
     });
 
-    expect(report.created).toEqual([]);
-    expect(report.removedOrphans).toEqual([]);
-    expect(report.errors).toEqual([]);
+    it("returns an empty report when no agent directory exists and no agent is enabled", async () => {
+      const fs = mkFs({ ...canonicalFoo });
+
+      const report = await run(fs, [mkSkill("foo", [])]);
+
+      expect(report).toEqual({ created: [], removedOrphans: [], errors: [] });
+    });
   });
 });

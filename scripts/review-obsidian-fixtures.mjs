@@ -14,8 +14,6 @@ const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const reviewSourceRoots = ["src", "dev/gallery"];
 const reviewSourceExtensions = new Set([".cjs", ".js", ".jsx", ".mjs", ".ts", ".tsx"]);
 
-// Negative examples must not be real source files because the authenticated
-// community reviewer scans them without the repository's local ignore rules.
 const invalidSourceFixture = `import "node:fs";
 export { promisify } from "node:util";
 const path = require("path");
@@ -52,21 +50,9 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-/**
- * Prove the review config keeps an untyped target out of type-aware rule scope.
- *
- * ESLint aborts the entire run when a rule cannot load, so a type-aware rule
- * that reaches a file carrying no type information silences the whole gate
- * rather than failing it. Force such a rule on ahead of the repository's own
- * config blocks and confirm those blocks still switch it off.
- *
- * @param {string} filePath - Repository-relative untyped review target.
- */
 async function expectOutsideTypeAwareScope(filePath) {
   const eslint = new ESLint({
     cwd: repositoryRoot,
-    // The forced rule must sit ahead of the repository's blocks, which rules
-    // out overrideConfig (applied last) and the config file (loaded first).
     overrideConfigFile: true,
     baseConfig: [{ rules: { "obsidianmd/no-plugin-as-component": "error" } }, ...reviewConfig],
   });
@@ -95,7 +81,6 @@ async function lintSourceFixture(code, filePath) {
     overrideConfig: {
       languageOptions: {
         parserOptions: {
-          // CI single-run programs otherwise replace lintText input with the anchor file on disk.
           disallowAutomaticSingleRunInference: true,
         },
       },
@@ -185,6 +170,78 @@ async function main() {
       (message) => message.ruleId !== "copilot/no-direct-node-imports"
     ),
     "browser polyfills or guarded/type-only Node access were rejected"
+  );
+  const issuelessComments = [
+    "// Explains the next line\nexport const a = 1;",
+    "/** Documents a without an issue */\nexport const a = 1;",
+    "export const a = 1; // trailing note",
+    "// global cache warms lazily\nexport const a = 1;",
+    "// eslint rejects the obvious shape here\nexport const a = 1;",
+    "// See https://github.com/logancyang/obsidian-copilot/pull/1\nexport const a = 1;",
+    "// See https://github.com/logancyang/obsidian-copilot/issues/12oops\nexport const a = 1;",
+    "export const a = 1; // trailing note\nexport const b = 2; // https://github.com/o/r/issues/1",
+    "// Explains the next line\nexport const a = 1; // https://github.com/o/r/issues/1",
+  ];
+  for (const code of issuelessComments) {
+    const result = await lintSourceFixture(code, "src/utils.ts");
+    assert(
+      result.messages.some((message) => message.ruleId === "copilot/issue-linked-comments"),
+      `issue-less comment was accepted: ${code}`
+    );
+  }
+  const allowedComments = [
+    "// Needed for https://github.com/logancyang/obsidian-copilot/issues/1\nexport const a = 1;",
+    "// A decision spanning lines\n// https://github.com/Brevilabs/obsidian-copilot-private/issues/1\nexport const a = 1;",
+    "// Tracked in https://github.com/logancyang/obsidian-copilot/issues/1.\nexport const a = 1;",
+    "// eslint-disable-next-line no-restricted-syntax -- fixture\nexport const a = 1;",
+    "// prettier-ignore\nexport const a = [1,2];",
+    "/* global activeWindow */\nexport const a = 1;",
+    "export function parse(text: string): unknown {\n  try {\n    return JSON.parse(text);\n  } catch {}\n  return undefined;\n}",
+  ];
+  for (const code of allowedComments) {
+    const result = await lintSourceFixture(code, "src/utils.ts");
+    assert(
+      result.messages.every(
+        (message) => !["copilot/issue-linked-comments", "no-empty"].includes(message.ruleId)
+      ),
+      `issue-linked comment, tool directive, or empty catch was rejected: ${code}`
+    );
+  }
+  const browserStorageAccesses = [
+    'localStorage.getItem("key")',
+    'sessionStorage.setItem("key", "value")',
+    "window.localStorage",
+    "globalThis.sessionStorage",
+    'window["localStorage"]',
+    "window?.sessionStorage",
+    "const { localStorage: storage } = window; void storage",
+    'const { ["sessionStorage"]: storage } = globalThis; void storage',
+  ];
+  for (const access of browserStorageAccesses) {
+    const result = await lintSourceFixture(`${access};`, "src/utils.ts");
+    assert(
+      result.messages.some(
+        (message) =>
+          message.ruleId === "no-restricted-syntax" &&
+          message.severity === 2 &&
+          message.message.includes("vault-scoped storage")
+      ),
+      `Browser storage access was not blocked: ${access}`
+    );
+  }
+  const vaultStorageResult = await lintSourceFixture(
+    `import type { App } from "obsidian";
+export function savePreference(app: App): unknown {
+  app.saveLocalStorage("key", "value");
+  return app.loadLocalStorage("key");
+}`,
+    "src/utils.ts"
+  );
+  assert(
+    !vaultStorageResult.messages.some((message) =>
+      message.message.includes("vault-scoped storage")
+    ),
+    "Obsidian vault-scoped storage was rejected"
   );
   const invalidLicenseResult = await lintSourceFixture(invalidLicenseFixture, "LICENSE");
   assert(

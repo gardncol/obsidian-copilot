@@ -1,8 +1,5 @@
-import {
-  CopilotPlusUsageReader,
-  parseContextLength,
-  planUsageFromCopilotPlusUsage,
-} from "./copilotPlusUsage";
+import { resetSettings, setSettings } from "@/settings/model";
+import { CopilotPlusUsageReader, planUsageFromCopilotPlusUsage } from "./copilotPlusUsage";
 
 jest.mock("@/logger", () => ({
   logInfo: jest.fn(),
@@ -25,6 +22,8 @@ describe("copilotPlusUsage", () => {
   beforeEach(() => {
     mockGetUsage.mockReset();
     mockGetModels.mockReset();
+    resetSettings();
+    setSettings({ copilotPlusCatalog: { models: [], defaultEnabledIds: [] } });
   });
 
   describe("planUsageFromCopilotPlusUsage()", () => {
@@ -80,103 +79,62 @@ describe("copilotPlusUsage", () => {
     ])(
       "reports %s unusable rather than clearing the meters (https://github.com/logancyang/obsidian-copilot-preview/issues/193)",
       (_label, snapshot) => {
-        // The endpoint omits a window both when the plan does not cap it and when the
-        // counters cannot be read. The two are indistinguishable, so neither may clear
-        // a meter the user is looking at.
         expect(planUsageFromCopilotPlusUsage(snapshot as never)).toEqual({ kind: "unavailable" });
       }
     );
   });
 
-  describe("parseContextLength()", () => {
-    it.each([
-      ["1M", 1_048_576],
-      ["256K", 262_144],
-      ["192k", 196_608],
-      ["8192", 8_192],
-      [" 64 K ", 65_536],
-    ])("reads %s as %i tokens (binary suffixes, as published)", (display, tokens) => {
-      expect(parseContextLength(display)).toBe(tokens);
-    });
-
-    it.each([
-      ["an unknown suffix", "1G"],
-      ["prose", "one million"],
-      ["a zero", "0"],
-      ["a negative", "-5K"],
-      ["a non-string", 200_000],
-      ["undefined", undefined],
-    ])("returns null for %s", (_label, display) => {
-      expect(parseContextLength(display)).toBeNull();
-    });
-  });
-
   describe("CopilotPlusUsageReader", () => {
-    it("reads plan usage through the Brevilabs client", async () => {
-      mockGetUsage.mockResolvedValue({ used: { weekly: { usedPercent: 21 } } });
+    describe("readPlanUsage()", () => {
+      it("reads plan usage through the Brevilabs client", async () => {
+        mockGetUsage.mockResolvedValue({ used: { weekly: { usedPercent: 21 } } });
 
-      const reading = await new CopilotPlusUsageReader().readPlanUsage();
+        const reading = await new CopilotPlusUsageReader().readPlanUsage();
 
-      expect(reading).toMatchObject({
-        kind: "usage",
-        planUsage: { windows: [expect.objectContaining({ id: "weekly", percent: 21 })] },
+        expect(reading).toMatchObject({
+          kind: "usage",
+          planUsage: { windows: [expect.objectContaining({ id: "weekly", percent: 21 })] },
+        });
       });
     });
 
-    it("answers context windows from one catalog fetch, shared across models and calls", async () => {
-      mockGetModels.mockResolvedValue({
-        data: [
-          { id: "gemini-3-pro", context_length: "1M" },
-          { id: "kimi-k2", context_length: "256K" },
-          { id: "no-window-published" },
-        ],
-      });
-      const reader = new CopilotPlusUsageReader();
-
-      await expect(reader.readContextWindow("gemini-3-pro")).resolves.toBe(1_048_576);
-      await expect(reader.readContextWindow("kimi-k2")).resolves.toBe(262_144);
-      await expect(reader.readContextWindow("no-window-published")).resolves.toBeNull();
-      await expect(reader.readContextWindow("not-in-catalog")).resolves.toBeNull();
-      expect(mockGetModels).toHaveBeenCalledTimes(1);
-    });
-
-    it("answers null for a null model id without touching the network", async () => {
-      // Null is the caller saying "not a Copilot Plus model" — its backend-specific
-      // prefix did not match — so there is nothing to look up.
-      await expect(new CopilotPlusUsageReader().readContextWindow(null)).resolves.toBeNull();
-      expect(mockGetModels).not.toHaveBeenCalled();
-    });
-
-    it("shares one in-flight fetch between concurrent callers", async () => {
-      let release!: (value: { data: { id: string; context_length: string }[] }) => void;
-      mockGetModels.mockReturnValue(new Promise((resolve) => (release = resolve)));
-      const reader = new CopilotPlusUsageReader();
-
-      const first = reader.readContextWindow("gemini-3-pro");
-      const second = reader.readContextWindow("kimi-k2");
-      release({
-        data: [
-          { id: "gemini-3-pro", context_length: "1M" },
-          { id: "kimi-k2", context_length: "256K" },
-        ],
+    describe("readContextWindow()", () => {
+      beforeEach(() => {
+        setSettings({
+          copilotPlusCatalog: {
+            models: [
+              { id: "gemini-3-pro", displayName: "Gemini 3 Pro", limits: { context: 1_048_576 } },
+              { id: "kimi-k2", displayName: "Kimi K2", limits: { context: 262_144 } },
+              { id: "no-window-published", displayName: "No Window" },
+            ],
+            defaultEnabledIds: [],
+          },
+        });
       });
 
-      await expect(first).resolves.toBe(1_048_576);
-      await expect(second).resolves.toBe(262_144);
-      expect(mockGetModels).toHaveBeenCalledTimes(1);
-    });
+      it("answers from the cached lineup without touching the network (https://github.com/Brevilabs/obsidian-copilot-private/issues/319)", async () => {
+        const reader = new CopilotPlusUsageReader();
 
-    it("retries after a failed catalog fetch instead of caching the failure (https://github.com/logancyang/obsidian-copilot-preview/issues/193)", async () => {
-      // One transient outage at the wrong moment must not strand the context ring on a
-      // bare token count for the rest of the session.
-      mockGetModels
-        .mockResolvedValueOnce(null)
-        .mockResolvedValue({ data: [{ id: "gemini-3-pro", context_length: "1M" }] });
-      const reader = new CopilotPlusUsageReader();
+        await expect(reader.readContextWindow("gemini-3-pro")).resolves.toBe(1_048_576);
+        await expect(reader.readContextWindow("kimi-k2")).resolves.toBe(262_144);
+        expect(mockGetModels).not.toHaveBeenCalled();
+      });
 
-      await expect(reader.readContextWindow("gemini-3-pro")).resolves.toBeNull();
-      await expect(reader.readContextWindow("gemini-3-pro")).resolves.toBe(1_048_576);
-      expect(mockGetModels).toHaveBeenCalledTimes(2);
+      it.each([
+        ["a model the lineup publishes no window for", "no-window-published"],
+        ["a model absent from the lineup", "not-in-catalog"],
+        ["a null id, meaning the caller's prefix did not match", null],
+      ])("answers null for %s", async (_case, modelId) => {
+        await expect(new CopilotPlusUsageReader().readContextWindow(modelId)).resolves.toBeNull();
+      });
+
+      it("answers null for every model before the first lineup has been cached", async () => {
+        setSettings({ copilotPlusCatalog: { models: [], defaultEnabledIds: [] } });
+
+        await expect(
+          new CopilotPlusUsageReader().readContextWindow("gemini-3-pro")
+        ).resolves.toBeNull();
+      });
     });
   });
 });

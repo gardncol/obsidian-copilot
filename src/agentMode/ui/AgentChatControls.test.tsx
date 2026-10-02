@@ -1,6 +1,5 @@
 import { AgentChatControls } from "@/agentMode/ui/AgentChatControls";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { PLUS_UTM_MEDIUMS } from "@/constants";
 import { navigateToPlusPage, useCanUseMultiAgent } from "@/plusUtils";
 import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
@@ -10,8 +9,6 @@ jest.mock("@/plusUtils", () => ({
   navigateToPlusPage: jest.fn(),
 }));
 
-// Autosave on so the Save-Chat button stays out of the way; this suite is about
-// the left slot's entitlement gate, not the right-side control cluster.
 jest.mock("@/settings/model", () => ({
   useSettingsValue: jest.fn().mockReturnValue({ autosaveChat: true }),
 }));
@@ -21,8 +18,6 @@ const mockUseCanUseMultiAgent = useCanUseMultiAgent as jest.MockedFunction<
 >;
 const mockNavigateToPlusPage = navigateToPlusPage as jest.MockedFunction<typeof navigateToPlusPage>;
 
-/** The control-bar buttons need a Radix `TooltipProvider` ancestor, which the
- * chat-view root supplies in the app. */
 function renderControls({ showMultiAgentUpsell = true } = {}) {
   return render(
     <TooltipProvider>
@@ -53,9 +48,6 @@ describe("AgentChatControls", () => {
       expect(screen.queryByText(UPSELL_COPY)).toBeNull();
     });
 
-    // The pre-conversation mounts (cold-start agent selection, not-ready
-    // fallback) render this bar with no props, where an upsell would pitch a
-    // second agent to a user without a working first one.
     it("withholds the upsell from a caller that does not opt in, even when unentitled", () => {
       mockUseCanUseMultiAgent.mockReturnValue(false);
       renderControls({ showMultiAgentUpsell: false });
@@ -69,7 +61,17 @@ describe("AgentChatControls", () => {
 
       fireEvent.click(screen.getByText(UPSELL_COPY));
 
-      expect(mockNavigateToPlusPage).toHaveBeenCalledWith(PLUS_UTM_MEDIUMS.MULTI_AGENT);
+      expect(mockNavigateToPlusPage).toHaveBeenCalledWith("multi_agent");
+    });
+
+    it("does not show a lone link control before a session exists https://github.com/logancyang/obsidian-copilot/issues/3271", () => {
+      mockUseCanUseMultiAgent.mockReturnValue(true);
+      render(
+        <TooltipProvider>
+          <AgentChatControls />
+        </TooltipProvider>
+      );
+      expect(screen.queryByTitle("Copy Chat Link")).toBeNull();
     });
   });
 });

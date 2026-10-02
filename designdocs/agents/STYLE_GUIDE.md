@@ -1,7 +1,7 @@
 # Style & Code Guide
 
 Detailed coding conventions for this repo. The cross-cutting principles in
-`AGENTS.md` (generalizable solutions, referential stability, comment-the-why,
+`AGENTS.md` (generalizable solutions, referential stability, issue-linked comments,
 no direct `console` calls) always apply; this guide carries the full detail behind the
 language, comment, styling, and code-structure rules.
 
@@ -40,8 +40,8 @@ carve-out, an extra `!@/...` negation for one module). Each carve-out
 silently redefines what the boundary means, invites the next one, and
 leaves the file somewhere its folder no longer describes. If none of the
 three options above works, the boundary itself is wrong — change the
-boundary deliberately, in its own reviewed change, with the contract
-comment updated to match.
+boundary deliberately, in its own reviewed change, with the layer rules
+in `src/agentMode/AGENTS.md` updated to match.
 
 ## React
 
@@ -55,47 +55,39 @@ comment updated to match.
 
 ## Comments
 
-The code is the source of truth for **what** the code does. Comments exist to
-carry the **why** — the things a reader cannot recover by reading the code.
+Comments are never compiled or tested, so they drift from the code and mislead the next reader,
+human or agent. Names, types, and tests carry **what** the code does; a GitHub issue carries the
+**why**.
 
-- **Comment the why, not the what.** Document non-obvious constraints,
-  invariants, gotchas, and "why this exists / why not the obvious alternative".
-  If a comment only restates what the next line plainly says, delete it.
-- **Write comments for a first-time reader of the current code.** A comment must
-  make sense without the PR, review discussion, or knowledge of an earlier
-  implementation. Explain the current invariant or constraint; do not narrate
-  what this change added, removed, preserved, or intentionally stopped doing.
-  Put change history in the PR description. When backward compatibility is
-  part of the current runtime contract, describe the persisted state being
-  supported and why that support is currently necessary.
-- **Document exported functions and public methods of exported classes when the
-  contract is not self-evident.** JSDoc is optional for a simple callable whose
-  purpose and parameters are already unambiguous. When JSDoc is needed, explain
-  why the callable exists and the goal it serves without narrating its concrete
-  implementation. Internal functions and non-public methods still default to
-  no doc block unless they carry a non-obvious constraint or invariant.
-- **Document every parameter in an included JSDoc block by meaning, not type.**
-  Include one `@param` tag per parameter and explain its role or relevant
-  semantics. TypeScript owns the type information, so never repeat it in
-  JSDoc. Add `@returns` only when the return value has semantics the signature
-  cannot express.
-- **Document every exported class with JSDoc.** Describe the state or lifecycle
-  the class owns, the responsibility it coordinates, and the boundary it does
-  not cross. The goal is to make the class's duty clear without requiring a
-  reader to inspect its methods or private fields.
-- **No milestone or plan-step references in code.** Never write `M1`/`M3`,
-  `§4.3`, "step 3 of the plan", "after milestone X lands", or similar. These are
-  scaffolding for whoever is _writing_ a branch and are meaningless to whoever _reviews or maintains_ the code later.
-- **No comments that rot.** Avoid "added for feature X" or "used by caller Y" —
-  those go stale as the code moves and belong in the PR description, not the
-  source.
+- **Every JavaScript/TypeScript comment links a GitHub issue.** A comment exists only to record a
+  tricky decision tied to a specific issue: one line of why plus the issue's full URL
+  (`https://github.com/OWNER/REPO/issues/N`). Short refs (`#123`, `owner/repo#123`) and PR links do
+  not count. A block of consecutive standalone `//` lines counts as one comment, so the URL may sit
+  on any of its lines. `copilot/issue-linked-comments` fails `npm run lint` on anything else.
+- **No JSDoc, banners, restated logic, or issue-less TODOs.** Express a callable's contract through
+  its name, parameter names, and types, and its behavior through tests. File an issue instead of
+  leaving a TODO.
+- **Write the line for a first-time reader of the current code.** State the constraint the code
+  still has, not what a change added or removed, and never milestone or plan-step references.
+- **Keep issue-linked comments true.** When you change code under one, re-read its issue and update
+  or delete the comment in the same change. Delete it once the constraint no longer applies.
+- **Tool directives are exempt.** `eslint-disable*` (with a `--` description), `@ts-expect-error`,
+  `prettier-ignore`, `@jest-environment`, `/// <reference>`, and bundler annotations such as
+  `@__PURE__` are instructions to tools, not prose.
+- **An empty `catch {}` needs no comment.** Ignoring the error is already explicit in the code.
 
 ## CSS & Styling
 
 - **NEVER edit `styles.css` directly** - This is a generated file
 - **Source file**: `src/styles/tailwind.css` - Edit this file for custom CSS
 - **Build process**: `npm run build:tailwind` compiles `src/styles/tailwind.css` → `styles.css`
-- **Tailwind classes**: Use Tailwind utility classes in components (see `tailwind.config.js` for available classes)
+- **Tailwind-first React styling**: Keep static styles on the React elements that own them. Do not create a component-specific selector family such as `.feature`, `.feature-copy`, and `.feature-actions` merely to replace Tailwind utilities in `className`. This hides the component's styling in a second file and leaves stale selectors, tests, and stories when the component changes.
+- **Choose styling in this order**:
+  1. Reuse or extend an existing shared component when the visual pattern already exists.
+  2. Use configured Tailwind utilities directly on React-owned JSX. See `tailwind.config.js` for available classes.
+  3. Extend `tailwind.config.js` when a missing token or utility will be reused.
+  4. Add a rule to `src/styles/tailwind.css` only when React does not own the target markup, an external integration requires a stable selector, or Tailwind cannot express the required selector or property. Put a short comment beside the rule naming that constraint. A long utility list is not a reason to add custom CSS.
+- **Test behavior, not styling hooks**: Do not keep one-off CSS classes so tests can find elements. Query by role, label, visible copy, or another user-facing contract. Use a `data-*` attribute only when no semantic query fits.
 - **No arbitrary font-size values**: Never use Tailwind's arbitrary-value syntax for typography (e.g. `tw-text-[10.5px]`, `tw-text-[13px]`). Stick to the configured `fontSize` tokens (`tw-text-ui-smaller`, `tw-text-ui-small`, `tw-text-xs`, `tw-text-smallest`, etc.) so type stays consistent with Obsidian's CSS variables. If none of the existing tokens fit, extend the `fontSize` scale in `tailwind.config.js` rather than hard-coding a pixel value at the call site.
 - **No inline `style={{ ... }}`**: Reserve the `style` prop for values that must change dynamically at runtime (computed positions, animated transforms). Static visual changes belong in Tailwind classes or the shared component (e.g. `Button` variants/sizes).
 - **Always wrap Tailwind class strings with `cn()`** (from `@/lib/utils`) whenever the classes live anywhere other than a literal `className=` attribute on a JSX element — variable assignments, ternaries, function returns, props passed to other components, etc. `eslint-plugin-tailwindcss` only lints classes it can statically see inside JSX `className` literals or inside calls to its registered callees (`cn`, `clsx`, `classnames`, `ctl`, `cva`). Use `cn()` for composition too — instead of a ternary between two whole class strings, merge a shared base with conditional fragments: `cn("tw-flex tw-text-sm", expandable && "tw-cursor-pointer")`.

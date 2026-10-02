@@ -13,12 +13,15 @@ let installState: ReturnType<BackendDescriptor["getInstallState"]> = {
   source: "custom",
 };
 let authState: BackendAuthUiState;
+let managedInstallState: ReturnType<NonNullable<BackendDescriptor["managedInstall"]>["getState"]>;
 
 jest.mock("@/agentMode/ui/useBackendDescriptor", () => ({
   // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks real hook exports
   useSessionBackendDescriptor: () => descriptor,
   // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks real hook exports
   useBackendInstallState: () => installState,
+  // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks real hook exports
+  useManagedInstallActionState: () => managedInstallState,
 }));
 
 jest.mock("@/agentMode/session/useBackendAuthState", () => ({
@@ -42,10 +45,16 @@ describe("AgentModeStatus", () => {
       installState = { kind: "ready", source: "custom" };
       authState = {
         status: null,
+        checking: false,
         signingIn: false,
+        signingOut: false,
+        signOut: jest.fn(),
         url: null,
         signIn: jest.fn(),
+        cancelSignIn: jest.fn(),
+        failed: false,
       };
+      managedInstallState = { kind: "idle" };
       jest.clearAllMocks();
     });
 
@@ -71,12 +80,14 @@ describe("AgentModeStatus", () => {
       expect(screen.queryByRole("button")).toBeNull();
     });
 
-    it("renders the actionable backend boot error instead of a generic retry label", () => {
+    it("renders the actionable backend boot error instead of a generic retry label (https://github.com/Brevilabs/obsidian-copilot-private/issues/410)", () => {
       const error =
         "Claude Code 2.1.205 is not supported. Copilot requires Claude Code 2.1.206 or newer. Update Claude Code with: npm install -g @anthropic-ai/claude-code";
       const manager = {
         subscribe: jest.fn(() => () => {}),
         getLastError: jest.fn(() => error),
+        hasHeldConfigChange: jest.fn(() => false),
+        isBackendRestartPending: jest.fn(() => false),
         getOrCreateActiveSession: jest.fn().mockResolvedValue({}),
       } as unknown as AgentSessionManager;
       const plugin = { app: {} } as unknown as CopilotPlugin;
@@ -84,13 +95,14 @@ describe("AgentModeStatus", () => {
       render(<AgentModeStatus manager={manager} plugin={plugin} onInstallClick={jest.fn()} />);
 
       expect(screen.getByRole("alert")).toBeTruthy();
+      expect(screen.getByText("Claude session error")).toBeTruthy();
       expect(screen.getByText(error)).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Retry" }));
       expect(manager.getOrCreateActiveSession).toHaveBeenCalledTimes(1);
       expect(screen.queryByText("Error — click Retry")).toBeNull();
     });
 
-    it("opens Claude configuration instead of retrying an incompatible version", () => {
+    it("opens Claude configuration instead of retrying an incompatible version (https://github.com/Brevilabs/obsidian-copilot-private/issues/410)", () => {
       const message =
         "Claude Code 2.1.205 is not supported. Copilot requires Claude Code 2.1.206 or newer.";
       installState = {
@@ -103,19 +115,22 @@ describe("AgentModeStatus", () => {
       const manager = {
         subscribe: jest.fn(() => () => {}),
         getLastError: jest.fn(() => `${message} Update with npm install`),
+        hasHeldConfigChange: jest.fn(() => false),
+        isBackendRestartPending: jest.fn(() => false),
         getOrCreateActiveSession: jest.fn(),
       } as unknown as AgentSessionManager;
       const plugin = { app: {} } as unknown as CopilotPlugin;
 
       render(<AgentModeStatus manager={manager} plugin={plugin} onInstallClick={jest.fn()} />);
 
+      expect(screen.getByText("Claude update required")).toBeTruthy();
       expect(screen.getByText(message)).toBeTruthy();
       expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
       fireEvent.click(screen.getByRole("button", { name: "Configure Claude" }));
       expect(descriptor.openInstallUI).toHaveBeenCalledWith(plugin);
     });
 
-    it("runs an available upgrade once and disables the action while it is busy", () => {
+    it("runs an available upgrade once and disables the action while it is busy (https://github.com/Brevilabs/obsidian-copilot-private/issues/410)", () => {
       installState = {
         kind: "incompatible",
         source: "managed",
@@ -123,31 +138,66 @@ describe("AgentModeStatus", () => {
         minVersion: "2.1.206",
         message: "Claude must be upgraded.",
       };
-      const upgrade = jest.fn(() => new Promise<void>(() => undefined));
-      descriptor = { ...descriptor, upgrade };
+      const run = jest.fn(() => new Promise<void>(() => undefined));
+      descriptor = {
+        ...descriptor,
+        managedInstall: {
+          getState: jest.fn(() => managedInstallState),
+          subscribe: jest.fn(() => () => {}),
+          run,
+        },
+      };
       const plugin = { app: {} } as unknown as CopilotPlugin;
 
-      render(<AgentModeStatus plugin={plugin} onInstallClick={jest.fn()} />);
+      const { rerender } = render(<AgentModeStatus plugin={plugin} onInstallClick={jest.fn()} />);
 
       fireEvent.click(screen.getByRole("button", { name: "Upgrade" }));
-      expect(upgrade).toHaveBeenCalledWith(plugin);
+      expect(run).toHaveBeenCalledWith(plugin);
+      managedInstallState = { kind: "running", label: "Downloading… 50%" };
+      rerender(<AgentModeStatus plugin={plugin} onInstallClick={jest.fn()} />);
       expect(screen.getByRole("button", { name: "Upgrading…" }).hasAttribute("disabled")).toBe(
         true
       );
+      expect(screen.getByText("Updating Claude…")).toBeTruthy();
+      expect(screen.getByText("Downloading… 50%")).toBeTruthy();
+
+      managedInstallState = { kind: "error", message: "npm unavailable" };
+      rerender(<AgentModeStatus plugin={plugin} onInstallClick={jest.fn()} />);
+      expect(screen.getByText("Claude update failed")).toBeTruthy();
+      expect(screen.getByText("npm unavailable")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      expect(run).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps the full setup error and its Configure action under a state-based summary (https://github.com/Brevilabs/obsidian-copilot-private/issues/410)", () => {
+      const message =
+        "Could not read /opt/local/custom-agent-runtime/bin/claude. Check the configured path.";
+      installState = { kind: "error", message };
+      const plugin = { app: {} } as unknown as CopilotPlugin;
+      render(<AgentModeStatus plugin={plugin} onInstallClick={jest.fn()} />);
+      expect(screen.getByText("Claude setup error")).toBeTruthy();
+      expect(screen.getByText(message).closest("details")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Configure Claude" }));
+      expect(descriptor.openInstallUI).toHaveBeenCalledWith(plugin);
     });
 
     it("preserves the sign-in action and linked browser fallback", () => {
       descriptor = { ...descriptor, auth: {} as BackendAuth };
       authState = {
         status: { signedIn: false },
+        checking: false,
         signingIn: false,
+        signingOut: false,
+        signOut: jest.fn(),
         url: null,
         signIn: jest.fn(),
+        cancelSignIn: jest.fn(),
+        failed: false,
       };
       const plugin = { app: {} } as unknown as CopilotPlugin;
       const { rerender } = render(<AgentModeStatus plugin={plugin} onInstallClick={jest.fn()} />);
 
-      fireEvent.click(screen.getByRole("button", { name: "Sign in to Claude" }));
+      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
       expect(authState.signIn).toHaveBeenCalledTimes(1);
 
       authState = {
@@ -161,6 +211,59 @@ describe("AgentModeStatus", () => {
       expect(screen.getByRole("link", { name: "Open sign-in page" }).getAttribute("href")).toBe(
         "https://example.com/sign-in"
       );
+    });
+
+    it("applies a held config change on demand instead of restarting the session under the user (https://github.com/Brevilabs/obsidian-copilot-private/issues/475)", () => {
+      const manager = {
+        subscribe: jest.fn(() => () => {}),
+        getLastError: jest.fn(() => null),
+        hasHeldConfigChange: jest.fn(() => true),
+        isBackendRestartPending: jest.fn(() => false),
+        applyHeldConfigChange: jest.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSessionManager;
+      const plugin = { app: {} } as unknown as CopilotPlugin;
+
+      render(<AgentModeStatus manager={manager} plugin={plugin} onInstallClick={jest.fn()} />);
+
+      expect(screen.getByText("Claude config has changed")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Reload" }));
+      expect(manager.applyHeldConfigChange).toHaveBeenCalledWith("claude");
+    });
+
+    it("reports a restart queued behind a running turn as in progress (https://github.com/Brevilabs/obsidian-copilot-private/issues/475)", () => {
+      const manager = {
+        subscribe: jest.fn(() => () => {}),
+        getLastError: jest.fn(() => null),
+        hasHeldConfigChange: jest.fn(() => true),
+        isBackendRestartPending: jest.fn(() => true),
+        applyHeldConfigChange: jest.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSessionManager;
+      const plugin = { app: {} } as unknown as CopilotPlugin;
+
+      render(<AgentModeStatus manager={manager} plugin={plugin} onInstallClick={jest.fn()} />);
+
+      const action = screen.getByRole("button", { name: "Reloading\u2026" });
+      expect(action.hasAttribute("disabled")).toBe(true);
+    });
+
+    it("Retry applies corrected config when a failed session has a held change (https://github.com/Brevilabs/obsidian-copilot-private/issues/475)", () => {
+      const manager = {
+        subscribe: jest.fn(() => () => {}),
+        getLastError: jest.fn(() => "Claude backend exited unexpectedly."),
+        getOrCreateActiveSession: jest.fn().mockResolvedValue({}),
+        hasHeldConfigChange: jest.fn(() => true),
+        isBackendRestartPending: jest.fn(() => false),
+        applyHeldConfigChange: jest.fn().mockResolvedValue(undefined),
+      } as unknown as AgentSessionManager;
+      const plugin = { app: {} } as unknown as CopilotPlugin;
+
+      render(<AgentModeStatus manager={manager} plugin={plugin} onInstallClick={jest.fn()} />);
+
+      expect(screen.getByText("Claude session error")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Reload" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      expect(manager.applyHeldConfigChange).toHaveBeenCalledWith("claude");
+      expect(manager.getOrCreateActiveSession).not.toHaveBeenCalled();
     });
   });
 });

@@ -1,17 +1,8 @@
-import { getChainType, subscribeToChainTypeChange, subscribeToModelKeyChange } from "@/aiParams";
-import { ChainType } from "@/chainType";
-import { VAULT_VECTOR_STORE_STRATEGY } from "@/constants";
-import { getSettings } from "@/settings/model";
+import { subscribeToChainTypeChange, subscribeToModelKeyChange } from "@/aiParams";
 import { App } from "obsidian";
 import ChainManager from "./chainManager";
 import type { ModelManagementApi } from "@/modelManagement";
 
-/**
- * Owns the single {@link ChainManager} the Quick Chat surfaces share, and
- * rebuilds its chain whenever the selected model or chain type changes. Holding
- * one instance keeps conversation memory continuous across mode switches — a
- * per-view chain manager would reset it on every toggle.
- */
 export default class ChainOwner {
   public static instance: ChainOwner;
   private readonly chainMangerInstance: ChainManager;
@@ -24,16 +15,7 @@ export default class ChainOwner {
     });
 
     subscribeToChainTypeChange(() => {
-      const settings = getSettings();
-      const shouldAutoIndex =
-        settings.enableSemanticSearchV3 &&
-        (settings.indexVaultToVectorStore as VAULT_VECTOR_STORE_STRATEGY) ===
-          VAULT_VECTOR_STORE_STRATEGY.ON_MODE_SWITCH &&
-        (getChainType() === ChainType.VAULT_QA_CHAIN ||
-          getChainType() === ChainType.COPILOT_PLUS_CHAIN);
-      void this.getCurrentChainManager().createChainWithNewModel({
-        refreshIndex: shouldAutoIndex,
-      });
+      void this.getCurrentChainManager().createChainWithNewModel();
     });
   }
 

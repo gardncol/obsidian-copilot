@@ -10,6 +10,7 @@ import { getSettings } from "@/settings/model";
 import { getEffectiveConversationsFolder } from "@/settings/copilotFolder";
 
 jest.mock("obsidian", () => ({
+  normalizePath: (path: string) => path,
   Notice: jest.fn(),
   TFile: jest.fn(),
 }));
@@ -23,6 +24,7 @@ jest.mock("@/settings/model", () => ({
 }));
 jest.mock("@/settings/copilotFolder", () => ({
   getEffectiveConversationsFolder: jest.fn(() => "test-folder"),
+  deriveConversationAttachmentsFolder: jest.fn((folder: string) => `${folder}/attachments`),
 }));
 jest.mock("@/utils", () => ({
   ensureFolderExists: jest.fn(async () => {}),
@@ -49,22 +51,24 @@ interface FakeFile {
   contents?: string;
 }
 
-/**
- * Build a minimal in-memory `app` mock that records files written via
- * `vault.create` / `vault.adapter.write` so a round-trip save/load test can
- * read what the previous step wrote without wiring real disk I/O.
- */
 function makeApp() {
   const files = new Map<string, FakeFile>();
   return {
     files,
     vault: {
+      createBinary: jest.fn(async (path: string, bytes: ArrayBuffer) => ({ path })),
+      getConfig: jest.fn(() => "attachments"),
+      createFolder: jest.fn(),
       getAbstractFileByPath: jest.fn((path: string) => files.get(path) ?? null),
       create: jest.fn(async (path: string, content: string) => {
         const basename = path.split("/").pop()!.replace(/\.md$/, "");
         const file = { path, basename, contents: content };
         files.set(path, file);
         return file;
+      }),
+      process: jest.fn(async (file: FakeFile, update: (content: string) => string) => {
+        file.contents = update(file.contents ?? "");
+        return file.contents;
       }),
       modify: jest.fn(async (file: FakeFile, content: string) => {
         file.contents = content;
@@ -74,6 +78,9 @@ function makeApp() {
         files.delete(file.path);
       }),
       adapter: {
+        list: jest.fn(async () => ({ files: [], folders: [] })),
+        readBinary: jest.fn(),
+        mkdir: jest.fn(),
         exists: jest.fn(async (path: string) => files.has(path)),
         read: jest.fn(async (path: string) => files.get(path)?.contents ?? ""),
         write: jest.fn(async (path: string, content: string) => {
@@ -118,136 +125,197 @@ describe("AgentChatPersistenceManager", () => {
     manager = new AgentChatPersistenceManager(app as unknown as App);
   });
 
-  it("round-trips messages, backendId, and label", async () => {
-    const messages = [makeMessage(USER_SENDER, "hello world"), makeMessage(AI_SENDER, "hi back")];
-    const saved = await manager.saveSession(messages, "claude", { label: "My chat" });
-    expect(saved).not.toBeNull();
-
-    const file = app.files.get(saved!.path)!;
-    const loaded = await manager.loadFile(file as unknown as TFile);
-    expect(loaded.backendId).toBe("claude");
-    expect(loaded.label).toBe("My chat");
-    expect(loaded.messages).toHaveLength(2);
-    expect(loaded.messages[0].sender).toBe(USER_SENDER);
-    expect(loaded.messages[0].message).toBe("hello world");
-    expect(loaded.messages[1].sender).toBe(AI_SENDER);
-    expect(loaded.messages[1].message).toBe("hi back");
+  afterEach(() => {
+    (readFrontmatterViaAdapter as jest.Mock).mockResolvedValue(null);
   });
 
-  it("writes under the folder captured at entry, not one a mid-save root change swaps in", async () => {
-    // Captured once at entry and threaded through ensure, filename generation,
-    // and the fallback path. Simulate a Copilot-root change landing after the
-    // save starts: the entry read returns the old folder, every later read the
-    // new one. The written path must stay under the old folder so ensure/create
-    // can't straddle two directories.
-    // Only override the entry read; later reads fall back to the default mock
-    // ("test-folder"). The written path must stay under the entry-captured
-    // "old-folder" so ensure/create can't straddle two directories.
-    const folderMock = jest.mocked(getEffectiveConversationsFolder);
-    folderMock.mockReturnValueOnce("old-folder");
-
-    const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude", {});
-
-    expect(saved).not.toBeNull();
-    expect(saved!.path.startsWith("old-folder/")).toBe(true);
-    expect(saved!.path).not.toContain("test-folder");
-  });
-
-  it("writes the built-in conversation tag independent of the persisted setting", async () => {
-    // Freeze check: a custom/stale defaultConversationTag must not reach new notes.
-    (getSettings as jest.Mock).mockReturnValueOnce({
-      defaultSaveFolder: "test-folder",
-      defaultConversationTag: "user-custom-tag",
-      defaultConversationNoteName: "{$date}_{$time}__{$topic}",
+  describe("saveSession()", () => {
+    it("preserves organizer links after native rehydration, reopening and later deletion (https://github.com/Brevilabs/obsidian-copilot-private/issues/533)", async () => {
+      const message = {
+        ...makeMessage(USER_SENDER, "image"),
+        content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AQID" } }],
+      };
+      const saved = await manager.saveSession([message], "claude");
+      const file = app.files.get(saved!.path)!;
+      Object.setPrototypeOf(file, TFile.prototype);
+      file.contents = file.contents!.replace(/!\[\]\([^)]+\)/, "![[organized.png]]");
+      const resumed = new AgentChatPersistenceManager(app as unknown as App);
+      await resumed.saveSession([JSON.parse(JSON.stringify(message))], "claude", {
+        existingPath: saved!.path,
+      });
+      expect(file.contents).toContain("![[organized.png]]");
+      file.contents = file.contents.replace(/\n/g, "\r\n");
+      const loaded = await resumed.loadFile(file as unknown as TFile);
+      expect(loaded.messages[0].message).not.toContain("copilot-image:");
+      file.contents = file.contents.replace("organized.png", "renamed.png");
+      loaded.messages[0].message = loaded.messages[0].message.replace("image", "edited text");
+      await resumed.saveSession(loaded.messages, "claude", { existingPath: saved!.path });
+      expect(file.contents).toContain("![[renamed.png]]");
+      await resumed.saveSession(loaded.messages, "claude", { existingPath: saved!.path });
+      expect(file.contents).toContain("![[renamed.png]]");
+      expect(file.contents).toContain("edited text");
+      expect(app.vault.createBinary).toHaveBeenCalledTimes(1);
     });
-    const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude", {});
-    const contents = app.files.get(saved!.path)!.contents!;
-    expect(contents).toContain("tags:\n  - copilot-conversation");
-    expect(contents).not.toContain("user-custom-tag");
-  });
 
-  it("serializes a mid-stream fan-out turn so an interrupted autosave isn't blank", async () => {
-    // A long fan-out turn whose composite body has NOT been written to `message`
-    // yet (still streaming), saved mid-turn (reload/close/crash). The live fanout
-    // must be serialized so the streamed per-agent text survives, not a blank bubble.
-    const fanoutMsg: AgentChatMessage = {
-      id: "msg-2",
-      sender: AI_SENDER,
-      message: "",
-      isVisible: true,
-      timestamp: { epoch: 2, display: "2026/01/01 12:00:00", fileName: "20260101_120000" },
-      fanout: {
-        answers: {
-          opencode: { backendId: "opencode", status: "running", text: "partial opencode answer" },
+    it("preserves host moves of reopened legacy links while accepting intentional embed edits (https://github.com/Brevilabs/obsidian-copilot-private/issues/533)", async () => {
+      const saved = await manager.saveSession(
+        [makeMessage(USER_SENDER, "image\n\n![[old.png]]")],
+        "claude"
+      );
+      const file = app.files.get(saved!.path)!;
+      Object.setPrototypeOf(file, TFile.prototype);
+      const loaded = await manager.loadFile(file as unknown as TFile);
+      app.files.delete(file.path);
+      file.path = "copilot-conversations/renamed-legacy.md";
+      app.files.set(file.path, file);
+      saved!.path = file.path;
+      file.contents = file.contents!.replace("old.png", "moved.png");
+      await manager.saveSession(loaded.messages, "claude", { existingPath: saved!.path });
+      expect(file.contents).toContain("![[moved.png]]");
+      loaded.messages[0].message = loaded.messages[0].message.replace("old.png", "intentional.png");
+      await manager.saveSession(loaded.messages, "claude", { existingPath: saved!.path });
+      expect(file.contents).toContain("![[intentional.png]]");
+      file.contents = file.contents.replace("intentional.png", "organized-edit.png");
+      await manager.saveSession(loaded.messages, "claude", { existingPath: saved!.path });
+      await manager.saveSession(loaded.messages, "claude", { existingPath: saved!.path });
+      expect(file.contents).toContain("![[organized-edit.png]]");
+      expect(app.vault.createBinary).not.toHaveBeenCalled();
+    });
+
+    it("saves uploaded image embeds beside the user message and preserves them on reload (https://github.com/logancyang/obsidian-copilot/issues/2900)", async () => {
+      const message = {
+        ...makeMessage(USER_SENDER, "Look at this"),
+        content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AQID" } }],
+      };
+      app.vault.createBinary.mockImplementation(async (path) => {
+        expect(app.vault.create).not.toHaveBeenCalled();
+        return { path };
+      });
+      const saved = await manager.saveSession(
+        [message, makeMessage(AI_SENDER, "An image")],
+        "claude"
+      );
+      const imagePath = app.vault.createBinary.mock.calls[0][0];
+      const file = app.files.get(saved!.path)!;
+      expect(file.contents).toContain(`![](/${imagePath})`);
+      expect(file.contents).toContain("**ai**: An image");
+      const loaded = await manager.loadFile(file as unknown as TFile);
+      expect(loaded.messages[0].message).toContain(`![](/${imagePath})`);
+      expect(message.message).toBe("Look at this");
+    });
+
+    it("preserves the existing transcript and reports failure when an image write fails (https://github.com/logancyang/obsidian-copilot/issues/2900)", async () => {
+      const messages = [makeMessage(USER_SENDER, "Original")];
+      const original = await manager.saveSession(messages, "claude");
+      const content = app.files.get(original!.path)!.contents;
+      app.vault.createBinary.mockRejectedValueOnce(new Error("disk full"));
+      const result = await manager.saveSession(
+        [
+          {
+            ...messages[0],
+            message: "Image",
+            content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AQID" } }],
+          },
+        ],
+        "claude",
+        { existingPath: original!.path }
+      );
+      expect(result).toBeNull();
+      expect(app.files.get(original!.path)!.contents).toBe(content);
+      expect(app.vault.modify).not.toHaveBeenCalled();
+      expect(app.vault.adapter.write).not.toHaveBeenCalled();
+    });
+
+    it("round-trips messages, backendId, and label", async () => {
+      const messages = [makeMessage(USER_SENDER, "hello world"), makeMessage(AI_SENDER, "hi back")];
+      const saved = await manager.saveSession(messages, "claude", { label: "My chat" });
+      expect(saved).not.toBeNull();
+
+      const file = app.files.get(saved!.path)!;
+      const loaded = await manager.loadFile(file as unknown as TFile);
+      expect(loaded.backendId).toBe("claude");
+      expect(loaded.label).toBe("My chat");
+      expect(loaded.messages).toHaveLength(2);
+      expect(loaded.messages[0].sender).toBe(USER_SENDER);
+      expect(loaded.messages[0].message).toBe("hello world");
+      expect(loaded.messages[1].sender).toBe(AI_SENDER);
+      expect(loaded.messages[1].message).toBe("hi back");
+    });
+
+    it("writes under the folder captured at entry, not one a mid-save root change swaps in", async () => {
+      const folderMock = jest.mocked(getEffectiveConversationsFolder);
+      folderMock.mockReturnValueOnce("old-folder");
+
+      const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude", {});
+
+      expect(saved).not.toBeNull();
+      expect(saved!.path.startsWith("old-folder/")).toBe(true);
+      expect(saved!.path).not.toContain("test-folder");
+    });
+
+    it("writes the built-in conversation tag independent of the persisted setting", async () => {
+      (getSettings as jest.Mock).mockReturnValueOnce({
+        defaultSaveFolder: "test-folder",
+        defaultConversationTag: "user-custom-tag",
+        defaultConversationNoteName: "{$date}_{$time}__{$topic}",
+      });
+      const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude", {});
+      const contents = app.files.get(saved!.path)!.contents!;
+      expect(contents).toContain("tags:\n  - copilot-conversation");
+      expect(contents).not.toContain("user-custom-tag");
+    });
+
+    it("serializes a mid-stream fan-out turn so an interrupted autosave isn't blank", async () => {
+      const fanoutMsg: AgentChatMessage = {
+        id: "msg-2",
+        sender: AI_SENDER,
+        message: "",
+        isVisible: true,
+        timestamp: { epoch: 2, display: "2026/01/01 12:00:00", fileName: "20260101_120000" },
+        fanout: {
+          answers: {
+            opencode: { backendId: "opencode", status: "running", text: "partial opencode answer" },
+          },
+          summary: { status: "streaming", text: "" },
         },
-        summary: { status: "streaming", text: "" },
-      },
-    };
-    const saved = await manager.saveSession(
-      [makeMessage(USER_SENDER, "q"), fanoutMsg],
-      "claude",
-      {}
-    );
-    const file = app.files.get(saved!.path)!;
-    const loaded = await manager.loadFile(file as unknown as TFile);
-    expect(loaded.messages[1].message).toContain("partial opencode answer");
-  });
-
-  it("escapes and round-trips a label containing quotes and backslashes", async () => {
-    const tricky = 'has "quotes" and \\backslashes\\';
-    const messages = [makeMessage(USER_SENDER, "hi")];
-    const saved = await manager.saveSession(messages, "opencode", { label: tricky });
-    expect(saved).not.toBeNull();
-    const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
-    expect(loaded.label).toBe(tricky);
-  });
-
-  it("strips control characters from labels so they can't break frontmatter", async () => {
-    const messages = [makeMessage(USER_SENDER, "hi")];
-    const saved = await manager.saveSession(messages, "opencode", {
-      label: "first\nsecond\rthird",
+      };
+      const saved = await manager.saveSession(
+        [makeMessage(USER_SENDER, "q"), fanoutMsg],
+        "claude",
+        {}
+      );
+      const file = app.files.get(saved!.path)!;
+      const loaded = await manager.loadFile(file as unknown as TFile);
+      expect(loaded.messages[1].message).toContain("partial opencode answer");
     });
-    const raw = app.files.get(saved!.path)!.contents!;
-    // The label line must remain a single key:value entry.
-    const labelLines = raw.split("\n").filter((l) => l.startsWith("agentLabel:"));
-    expect(labelLines).toHaveLength(1);
-    const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
-    expect(loaded.label).toBe("first second third");
-  });
 
-  it("throws on missing backendId instead of silently defaulting", async () => {
-    const path = "test-folder/agent__broken.md";
-    await app.vault.adapter.write(
-      path,
-      ["---", "epoch: 1735732800000", "mode: agent", "---", "", "**user**: hi"].join("\n")
-    );
-    await expect(
-      manager.loadFile({ path, basename: "agent__broken" } as unknown as TFile)
-    ).rejects.toThrow(/Missing backendId/);
-  });
+    it("escapes and round-trips a label containing quotes and backslashes", async () => {
+      const tricky = 'has "quotes" and \\backslashes\\';
+      const messages = [makeMessage(USER_SENDER, "hi")];
+      const saved = await manager.saveSession(messages, "opencode", { label: tricky });
+      expect(saved).not.toBeNull();
+      const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
+      expect(loaded.label).toBe(tricky);
+    });
 
-  it("assigns deterministic ids that depend only on message timestamp", async () => {
-    const messages = [
-      makeMessage(USER_SENDER, "first", 1700000000000),
-      makeMessage(AI_SENDER, "second", 1700000000001),
-    ];
-    const saved = await manager.saveSession(messages, "claude");
-    const file = app.files.get(saved!.path)!;
+    it("strips control characters from labels so they can't break frontmatter", async () => {
+      const messages = [makeMessage(USER_SENDER, "hi")];
+      const saved = await manager.saveSession(messages, "opencode", {
+        label: "first\nsecond\rthird",
+      });
+      const raw = app.files.get(saved!.path)!.contents!;
+      const labelLines = raw.split("\n").filter((l) => l.startsWith("agentLabel:"));
+      expect(labelLines).toHaveLength(1);
+      const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
+      expect(loaded.label).toBe("first second third");
+    });
 
-    const loadedA = await manager.loadFile(file as unknown as TFile);
-    const loadedB = await manager.loadFile(file as unknown as TFile);
-    // The key contract: same file + same content → same ids across reloads.
-    expect(loadedA.messages.map((m) => m.id)).toEqual(loadedB.messages.map((m) => m.id));
-    expect(loadedA.messages[0].id.startsWith("loaded-0-")).toBe(true);
-  });
+    it("returns null when given zero messages instead of writing an empty file", async () => {
+      const result = await manager.saveSession([], "opencode");
+      expect(result).toBeNull();
+      expect(app.files.size).toBe(0);
+    });
 
-  it("returns null when given zero messages instead of writing an empty file", async () => {
-    const result = await manager.saveSession([], "opencode");
-    expect(result).toBeNull();
-    expect(app.files.size).toBe(0);
-  });
-
-  describe("projectId scope round-trip", () => {
     it("round-trips a real projectId for a project-scoped chat", async () => {
       const messages = [makeMessage(USER_SENDER, "hi")];
       const saved = await manager.saveSession(messages, "claude", { projectId: "proj-123" });
@@ -260,35 +328,23 @@ describe("AgentChatPersistenceManager", () => {
       expect(loaded.projectId).toBe("proj-123");
     });
 
-    it("defaults an unscoped chat to GLOBAL_SCOPE and writes no projectId (hard contract)", async () => {
-      const messages = [makeMessage(USER_SENDER, "hi")];
-      const saved = await manager.saveSession(messages, "claude");
-      const raw = app.files.get(saved!.path)!.contents!;
-      expect(raw).not.toContain("projectId:");
+    it.each([
+      ["omitted", undefined],
+      ["GLOBAL_SCOPE", GLOBAL_SCOPE],
+      ["blank", "   "],
+    ])(
+      "writes no projectId frontmatter and loads as GLOBAL_SCOPE when projectId is %s",
+      async (_label, projectId) => {
+        const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude", {
+          projectId,
+        });
+        const raw = app.files.get(saved!.path)!.contents!;
+        expect(raw).not.toContain("projectId:");
 
-      const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
-      expect(loaded.projectId).toBe(GLOBAL_SCOPE);
-    });
-
-    it("treats an explicit GLOBAL_SCOPE like an unscoped chat (no projectId frontmatter)", async () => {
-      const messages = [makeMessage(USER_SENDER, "hi")];
-      const saved = await manager.saveSession(messages, "claude", { projectId: GLOBAL_SCOPE });
-      const raw = app.files.get(saved!.path)!.contents!;
-      expect(raw).not.toContain("projectId:");
-
-      const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
-      expect(loaded.projectId).toBe(GLOBAL_SCOPE);
-    });
-
-    it("treats a blank projectId option like an unscoped chat", async () => {
-      const messages = [makeMessage(USER_SENDER, "hi")];
-      const saved = await manager.saveSession(messages, "claude", { projectId: "   " });
-      const raw = app.files.get(saved!.path)!.contents!;
-      expect(raw).not.toContain("projectId:");
-
-      const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
-      expect(loaded.projectId).toBe(GLOBAL_SCOPE);
-    });
+        const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
+        expect(loaded.projectId).toBe(GLOBAL_SCOPE);
+      }
+    );
 
     it("normalizes a padded projectId option before writing frontmatter", async () => {
       const messages = [makeMessage(USER_SENDER, "hi")];
@@ -299,34 +355,6 @@ describe("AgentChatPersistenceManager", () => {
 
       const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
       expect(loaded.projectId).toBe("proj-123");
-    });
-
-    it("maps a legacy agent__ chat with no projectId frontmatter to GLOBAL_SCOPE", async () => {
-      const path = "test-folder/agent__legacy.md";
-      await app.vault.adapter.write(
-        path,
-        [
-          "---",
-          "epoch: 1735732800000",
-          "mode: agent",
-          "backendId: claude",
-          "---",
-          "",
-          "**user**: hi",
-        ].join("\n")
-      );
-      // Reason: the stored file carries `contents`, so loadFile's vault.read
-      // path returns the frontmatter (a bare {path} fixture would read empty).
-      const loaded = await manager.loadFile(app.files.get(path) as unknown as TFile);
-      expect(loaded.projectId).toBe(GLOBAL_SCOPE);
-    });
-  });
-
-  describe("usage frontmatter", () => {
-    afterEach(() => {
-      // Restore the default no-metadata behavior for the adapter helper so a
-      // per-test override (round-trip-on-omit) doesn't leak into other suites.
-      (readFrontmatterViaAdapter as jest.Mock).mockResolvedValue(null);
     });
 
     it("round-trips a SessionUsage snapshot through save/load", async () => {
@@ -352,14 +380,7 @@ describe("AgentChatPersistenceManager", () => {
       const messages = [makeMessage(USER_SENDER, "hi")];
       const usage = { usedTokens: 5000, contextWindow: 200_000, updatedAt: 1 };
       const first = await manager.saveSession(messages, "claude", { usage });
-      // `resolveExistingFile` gates on `instanceof TFile`; give the stored fake
-      // the mocked prototype so the resave takes the existing-file path (where
-      // usage round-trips) instead of treating it as a brand-new write.
       Object.setPrototypeOf(app.files.get(first!.path)!, TFile.prototype);
-      // Mirror production: `readExistingMeta` reads the prior file's frontmatter
-      // to round-trip fields the caller didn't re-supply. The default mock
-      // returns null (no metadata), so parse the stored file here — quote-strip
-      // matches the real adapter helper so the JSON value comes back intact.
       (readFrontmatterViaAdapter as jest.Mock).mockImplementation(async (_app, path: string) => {
         const raw = app.files.get(path)?.contents ?? "";
         const yaml = raw.match(/^---\n([\s\S]*?)\n---/)?.[1];
@@ -371,7 +392,6 @@ describe("AgentChatPersistenceManager", () => {
         }
         return fm;
       });
-      // A save with no usage option must not drop the stored snapshot.
       const second = await manager.saveSession(messages, "claude", {
         existingPath: first!.path,
       });
@@ -385,6 +405,51 @@ describe("AgentChatPersistenceManager", () => {
       expect(raw).not.toContain("usage:");
       const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
       expect(loaded.usage).toBeUndefined();
+    });
+  });
+
+  describe("loadFile()", () => {
+    it("throws on missing backendId instead of silently defaulting", async () => {
+      const path = "test-folder/agent__broken.md";
+      await app.vault.adapter.write(
+        path,
+        ["---", "epoch: 1735732800000", "mode: agent", "---", "", "**user**: hi"].join("\n")
+      );
+      await expect(
+        manager.loadFile({ path, basename: "agent__broken" } as unknown as TFile)
+      ).rejects.toThrow(/Missing backendId/);
+    });
+
+    it("assigns deterministic ids that depend only on message timestamp", async () => {
+      const messages = [
+        makeMessage(USER_SENDER, "first", 1700000000000),
+        makeMessage(AI_SENDER, "second", 1700000000001),
+      ];
+      const saved = await manager.saveSession(messages, "claude");
+      const file = app.files.get(saved!.path)!;
+
+      const loadedA = await manager.loadFile(file as unknown as TFile);
+      const loadedB = await manager.loadFile(file as unknown as TFile);
+      expect(loadedA.messages.map((m) => m.id)).toEqual(loadedB.messages.map((m) => m.id));
+      expect(loadedA.messages[0].id.startsWith("loaded-0-")).toBe(true);
+    });
+
+    it("maps a legacy agent__ chat with no projectId frontmatter to GLOBAL_SCOPE", async () => {
+      const path = "test-folder/agent__legacy.md";
+      await app.vault.adapter.write(
+        path,
+        [
+          "---",
+          "epoch: 1735732800000",
+          "mode: agent",
+          "backendId: claude",
+          "---",
+          "",
+          "**user**: hi",
+        ].join("\n")
+      );
+      const loaded = await manager.loadFile(app.files.get(path) as unknown as TFile);
+      expect(loaded.projectId).toBe(GLOBAL_SCOPE);
     });
 
     it("ignores malformed usage JSON instead of failing the load", async () => {

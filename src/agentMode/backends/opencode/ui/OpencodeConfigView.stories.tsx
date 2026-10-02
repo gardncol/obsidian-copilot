@@ -7,7 +7,7 @@ import {
 } from "@/agentMode/backends/opencode/ui/OpencodeConfigView";
 import React from "react";
 import {
-  OPENCODE_MIN_ACP_VERSION,
+  OPENCODE_MIN_VERSION,
   OPENCODE_PINNED_VERSION,
 } from "@/agentMode/backends/opencode/ui/opencodeVersion";
 import type { InstallState } from "@/agentMode/session/types";
@@ -33,16 +33,11 @@ const MANAGED: OpencodeManagedInfo = {
 const OUTDATED: InstallState = {
   kind: "incompatible",
   source: "managed",
-  currentVersion: "0.14.2",
-  minVersion: OPENCODE_MIN_ACP_VERSION,
-  message: `opencode v0.14.2 is not supported. Copilot requires opencode v${OPENCODE_MIN_ACP_VERSION} or newer.`,
+  currentVersion: "1.18.31",
+  minVersion: OPENCODE_MIN_VERSION,
+  message: `opencode v1.18.31 is not supported. Copilot requires opencode v${OPENCODE_MIN_VERSION} or newer.`,
 };
 
-/**
- * Every story renders through this stateful wrapper so the gallery can exercise
- * the source switch for real: `args.source` seeds the first render (keeping each
- * story's captured state), then clicking a segment swaps the visible branch.
- */
 const InteractiveConfigView: React.FC<Partial<OpencodeConfigViewProps>> = (props) => {
   const [source, setSource] = React.useState<OpencodeBinarySource>(props.source ?? "managed");
   return (
@@ -72,7 +67,6 @@ const meta = {
 } satisfies Meta<OpencodeConfigViewProps>;
 export default meta;
 
-/** First run: nothing installed, so the managed path offers a single download. */
 export const ManagedNotInstalled: StoryObj<OpencodeConfigViewProps> = {
   render: InteractiveConfigView,
 };
@@ -82,9 +76,10 @@ export const ManagedInstalling: StoryObj<OpencodeConfigViewProps> = {
   args: {
     managed: {
       ...MANAGED,
+      version: OPENCODE_PINNED_VERSION,
       run: {
         kind: "running",
-        label: "Downloading opencode-darwin-arm64.zip — 12.4 MB / 41.0 MB (30%)",
+        label: "Downloading opencode — 24.1 MB / 75.8 MB",
         percent: 30,
       },
     },
@@ -106,10 +101,6 @@ export const CustomPathApplied: StoryObj<OpencodeConfigViewProps> = {
   },
 };
 
-/**
- * Looking at the custom path before setting one, while the managed binary is the
- * one actually running — the case the "in use right now" note exists for.
- */
 export const CustomNotSetYet: StoryObj<OpencodeConfigViewProps> = {
   render: InteractiveConfigView,
   args: { source: "custom", state: { kind: "ready", source: "managed" }, activeSource: "managed" },

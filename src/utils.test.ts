@@ -1,6 +1,8 @@
 import * as Obsidian from "obsidian";
 import { TFile } from "obsidian";
 import {
+  checkLatestVersion,
+  isNewerVersion,
   extractNoteFiles,
   extractTemplateNoteFiles,
   formatDateTime,
@@ -11,17 +13,14 @@ import {
   noteHasProperty,
   getUtf8ByteLength,
   insertAtCursor,
-  isFolderMatch,
   processVariableNameForNotePath,
   removeThinkTags,
-  stringToFormattedDateTime,
   stripFrontmatter,
   truncateToByteLimit,
   withTimeout,
 } from "./utils";
 import { TimeoutError } from "./error";
 
-// Mock Obsidian's TFile class
 jest.mock("obsidian", () => {
   class MockTFile {
     path: string;
@@ -71,15 +70,14 @@ jest.mock("obsidian", () => {
     Vault: MockVault,
     MarkdownView: class MockMarkdownView {},
     Notice: class MockNotice {},
+    requestUrl: jest.fn(),
   };
 });
 
-// Mock the metadata cache
 const mockMetadataCache = {
   getFileCache: jest.fn(),
 };
 
-// Mock file metadata for different test cases
 const mockFileMetadata = {
   "test/test2/note1.md": {
     tags: [{ tag: "#inlineTag1" }, { tag: "#inlineTag2" }],
@@ -99,254 +97,275 @@ const mockFileMetadata = {
   },
 };
 
-// Mock the global app object
 const mockApp = {
   vault: new Obsidian.Vault(),
   metadataCache: mockMetadataCache,
 } as unknown as typeof window.app;
 
-describe("isFolderMatch", () => {
-  it("should return file from the folder name 1", async () => {
-    const match = isFolderMatch("test2/note3.md", "test2");
-    expect(match).toEqual(true);
-  });
-
-  it("should return file from the folder name 2", async () => {
-    const match = isFolderMatch("test/test2/note1.md", "test2");
-    expect(match).toEqual(true);
-  });
-
-  it("should return file from the folder name 3", async () => {
-    const match = isFolderMatch("test/test2/note1.md", "test");
-    expect(match).toEqual(true);
-  });
-
-  it("should not return file from the folder name 1", async () => {
-    const match = isFolderMatch("test/test2/note1.md", "tes");
-    expect(match).toEqual(false);
-  });
-
-  it("should return file from file name 1", async () => {
-    const match = isFolderMatch("test/test2/note1.md", "note1.md");
-    expect(match).toEqual(true);
-  });
-});
-
-describe("Vault", () => {
-  it("should return all markdown files", async () => {
-    const vault = new Obsidian.Vault();
-    const files = vault.getMarkdownFiles();
-    expect(files.map((f) => f.path)).toEqual([
-      "test/test2/note1.md",
-      "test/note2.md",
-      "test2/note3.md",
-      "note4.md",
-      "Note1.md",
-      "Note2.md",
-      "Note 1.md",
-      "Another Note.md",
-      "Note-1.md",
-      "Note_2.md",
-      "Note#3.md",
-    ]);
-  });
-});
-
-describe("getNotesFromPath", () => {
-  it("should return all markdown files", async () => {
-    const vault = new Obsidian.Vault();
-    const files = getNotesFromPath(vault, "/");
-    expect(files.map((f) => f.path)).toEqual([
-      "test/test2/note1.md",
-      "test/note2.md",
-      "test2/note3.md",
-      "note4.md",
-      "Note1.md",
-      "Note2.md",
-      "Note 1.md",
-      "Another Note.md",
-      "Note-1.md",
-      "Note_2.md",
-      "Note#3.md",
-    ]);
-  });
-
-  it("should return filtered markdown files 1", async () => {
-    const vault = new Obsidian.Vault();
-    const files = getNotesFromPath(vault, "test2");
-    expect(files.map((f) => f.path)).toEqual(["test/test2/note1.md", "test2/note3.md"]);
-  });
-
-  it("should return filtered markdown files 2", async () => {
-    const vault = new Obsidian.Vault();
-    const files = getNotesFromPath(vault, "test");
-    expect(files.map((f) => f.path)).toEqual(["test/test2/note1.md", "test/note2.md"]);
-  });
-
-  it("should return filtered markdown files 3", async () => {
-    const vault = new Obsidian.Vault();
-    const files = getNotesFromPath(vault, "note4.md");
-    expect(files.map((f) => f.path)).toEqual(["note4.md"]);
-  });
-
-  it("should return filtered markdown files 4", async () => {
-    const vault = new Obsidian.Vault();
-    const files = getNotesFromPath(vault, "/test");
-    expect(files.map((f) => f.path)).toEqual(["test/test2/note1.md", "test/note2.md"]);
-  });
-
-  it("should not return markdown files", async () => {
-    const vault = new Obsidian.Vault();
-    const files = getNotesFromPath(vault, "");
-    expect(files).toEqual([]);
-  });
-
-  it("should return only files from the specified subfolder path", async () => {
-    const vault = new Obsidian.Vault();
-    // Mock the getMarkdownFiles method to return our test structure
-    vault.getMarkdownFiles = jest
-      .fn()
-      .mockReturnValue([
-        { path: "folder/subfolder 1/eng/1.md" },
-        { path: "folder/subfolder 2/eng/3.md" },
-        { path: "folder/subfolder 1/eng/2.md" },
-        { path: "folder/other/note.md" },
-      ]);
-
-    const files = getNotesFromPath(vault, "folder/subfolder 1/eng");
-    expect(files).toEqual([
-      { path: "folder/subfolder 1/eng/1.md" },
-      { path: "folder/subfolder 1/eng/2.md" },
-    ]);
-  });
-
-  describe("processVariableNameForNotePath", () => {
-    it("should return the note md filename", () => {
-      const variableName = processVariableNameForNotePath("[[test]]");
-      expect(variableName).toEqual("test.md");
-    });
-
-    it("should return the note md filename with extra spaces 1", () => {
-      const variableName = processVariableNameForNotePath(" [[  test]]");
-      expect(variableName).toEqual("test.md");
-    });
-
-    it("should return the note md filename with extra spaces 2", () => {
-      const variableName = processVariableNameForNotePath("[[ test   ]] ");
-      expect(variableName).toEqual("test.md");
-    });
-
-    it("should return the note md filename with extra spaces 2", () => {
-      const variableName = processVariableNameForNotePath(" [[ test note   ]] ");
-      expect(variableName).toEqual("test note.md");
-    });
-
-    it("should return the note md filename with extra spaces 2", () => {
-      const variableName = processVariableNameForNotePath(" [[    test_note note   ]] ");
-      expect(variableName).toEqual("test_note note.md");
-    });
-
-    it("should return folder path with leading slash", () => {
-      const variableName = processVariableNameForNotePath("/testfolder");
-      expect(variableName).toEqual("/testfolder");
-    });
-
-    it("should return folder path without slash", () => {
-      const variableName = processVariableNameForNotePath("testfolder");
-      expect(variableName).toEqual("testfolder");
-    });
-
-    it("should return folder path with trailing slash", () => {
-      const variableName = processVariableNameForNotePath("testfolder/");
-      expect(variableName).toEqual("testfolder/");
-    });
-
-    it("should return folder path with leading spaces", () => {
-      const variableName = processVariableNameForNotePath("  testfolder ");
-      expect(variableName).toEqual("testfolder");
-    });
-  });
-});
-
-describe("getNotesFromTags", () => {
-  beforeAll(() => {
-    // @ts-ignore
-    window.app = mockApp;
-
-    // Setup metadata cache mock
-    mockMetadataCache.getFileCache.mockImplementation((file: TFile) => {
-      return mockFileMetadata[file.path as keyof typeof mockFileMetadata];
-    });
-  });
-
-  afterAll(() => {
-    // @ts-ignore
-    delete window.app;
-  });
-
-  beforeEach(() => {
-    mockMetadataCache.getFileCache.mockClear();
-  });
-
-  it("should return files with specified tags 1", async () => {
-    const tags = ["#tag1"];
-    const expectedPaths = ["test/test2/note1.md", "note4.md"];
-
-    const result = getNotesFromTags(mockApp, tags);
-    const resultPaths = result.map((fileWithTags) => fileWithTags.path);
-
-    expect(resultPaths).toEqual(expect.arrayContaining(expectedPaths));
-    expect(resultPaths.length).toEqual(expectedPaths.length);
-  });
-
-  it("should return an empty array if no files match the specified nonexistent tags", async () => {
-    const tags = ["#nonexistentTag"];
-    const expected: string[] = [];
-
-    const result = getNotesFromTags(mockApp, tags);
-
-    expect(result).toEqual(expected);
-  });
-
-  it("should handle multiple tags, returning files that match any of them", async () => {
-    const tags = ["#tag2", "#tag4"];
-    const expectedPaths = ["test/test2/note1.md", "test/note2.md", "note4.md"];
-
-    const result = getNotesFromTags(mockApp, tags);
-    const resultPaths = result.map((fileWithTags) => fileWithTags.path);
-
-    expect(resultPaths).toEqual(expect.arrayContaining(expectedPaths));
-    expect(resultPaths.length).toEqual(expectedPaths.length);
-  });
-
-  it("should handle both path and tags, returning files under the specified path with the specified tags", async () => {
-    const tags = ["#tag1"];
-    type TFileCtor = new (path: string) => TFile;
-    const noteFiles: TFile[] = [
-      new (TFile as unknown as TFileCtor)("test/test2/note1.md"),
-      new (TFile as unknown as TFileCtor)("test/note2.md"),
-    ];
-    const expectedPaths = ["test/test2/note1.md"];
-
-    const result = getNotesFromTags(mockApp, tags, noteFiles);
-    const resultPaths = result.map((fileWithTags) => fileWithTags.path);
-
-    expect(resultPaths).toEqual(expect.arrayContaining(expectedPaths));
-    expect(resultPaths.length).toEqual(expectedPaths.length);
-  });
-
-  it("should ignore inline tags and only consider frontmatter tags", async () => {
-    const tags = ["#inlineTag1"];
-    const result = getNotesFromTags(mockApp, tags);
-
-    expect(result).toEqual([]); // Should return empty since inline tags are ignored
-  });
-});
-
 describe("utils", () => {
+  describe("getNotesFromPath()", () => {
+    it("returns every markdown file for the root path", () => {
+      const files = getNotesFromPath(new Obsidian.Vault(), "/");
+      expect(files.map((f) => f.path)).toEqual([
+        "test/test2/note1.md",
+        "test/note2.md",
+        "test2/note3.md",
+        "note4.md",
+        "Note1.md",
+        "Note2.md",
+        "Note 1.md",
+        "Another Note.md",
+        "Note-1.md",
+        "Note_2.md",
+        "Note#3.md",
+      ]);
+    });
+
+    it("returns files under a folder at any depth", () => {
+      const files = getNotesFromPath(new Obsidian.Vault(), "test2");
+      expect(files.map((f) => f.path)).toEqual(["test/test2/note1.md", "test2/note3.md"]);
+    });
+
+    it("ignores a leading slash on the folder path", () => {
+      const files = getNotesFromPath(new Obsidian.Vault(), "/test");
+      expect(files.map((f) => f.path)).toEqual(["test/test2/note1.md", "test/note2.md"]);
+    });
+
+    it("returns a single file when the path is a file name", () => {
+      const files = getNotesFromPath(new Obsidian.Vault(), "note4.md");
+      expect(files.map((f) => f.path)).toEqual(["note4.md"]);
+    });
+
+    it("returns only files from the specified subfolder path", () => {
+      const vault = new Obsidian.Vault();
+      vault.getMarkdownFiles = jest
+        .fn()
+        .mockReturnValue([
+          { path: "folder/subfolder 1/eng/1.md" },
+          { path: "folder/subfolder 2/eng/3.md" },
+          { path: "folder/subfolder 1/eng/2.md" },
+          { path: "folder/other/note.md" },
+        ]);
+
+      const files = getNotesFromPath(vault, "folder/subfolder 1/eng");
+      expect(files).toEqual([
+        { path: "folder/subfolder 1/eng/1.md" },
+        { path: "folder/subfolder 1/eng/2.md" },
+      ]);
+    });
+
+    it("returns no files for an empty path", () => {
+      expect(getNotesFromPath(new Obsidian.Vault(), "")).toEqual([]);
+    });
+  });
+
+  describe("processVariableNameForNotePath()", () => {
+    it.each([
+      ["[[test]]", "test.md"],
+      [" [[  test]]", "test.md"],
+      ["[[ test   ]] ", "test.md"],
+      [" [[ test note   ]] ", "test note.md"],
+      [" [[    test_note note   ]] ", "test_note note.md"],
+    ])("turns the wikilink %j into the file name %j", (input, expected) => {
+      expect(processVariableNameForNotePath(input)).toBe(expected);
+    });
+
+    it.each([
+      ["/testfolder", "/testfolder"],
+      ["testfolder", "testfolder"],
+      ["testfolder/", "testfolder/"],
+      ["  testfolder ", "testfolder"],
+    ])("returns the folder path %j as %j", (input, expected) => {
+      expect(processVariableNameForNotePath(input)).toBe(expected);
+    });
+  });
+
+  describe("getNotesFromTags()", () => {
+    beforeEach(() => {
+      mockMetadataCache.getFileCache.mockImplementation((file: TFile) => {
+        return mockFileMetadata[file.path as keyof typeof mockFileMetadata];
+      });
+    });
+
+    it("returns the files whose frontmatter has the tag", () => {
+      const result = getNotesFromTags(mockApp, ["#tag1"]);
+
+      expect(result.map((file) => file.path)).toEqual(["test/test2/note1.md", "note4.md"]);
+    });
+
+    it("returns files matching any of several tags", () => {
+      const result = getNotesFromTags(mockApp, ["#tag2", "#tag4"]);
+
+      expect(result.map((file) => file.path)).toEqual([
+        "test/test2/note1.md",
+        "test/note2.md",
+        "note4.md",
+      ]);
+    });
+
+    it("limits the search to the provided note files", () => {
+      type TFileCtor = new (path: string) => TFile;
+      const noteFiles: TFile[] = [
+        new (TFile as unknown as TFileCtor)("test/test2/note1.md"),
+        new (TFile as unknown as TFileCtor)("test/note2.md"),
+      ];
+
+      const result = getNotesFromTags(mockApp, ["#tag1"], noteFiles);
+
+      expect(result.map((file) => file.path)).toEqual(["test/test2/note1.md"]);
+    });
+
+    it("returns no files for a tag no note has", () => {
+      expect(getNotesFromTags(mockApp, ["#nonexistentTag"])).toEqual([]);
+    });
+
+    it("ignores inline tags and only considers frontmatter tags", () => {
+      expect(getNotesFromTags(mockApp, ["#inlineTag1"])).toEqual([]);
+    });
+  });
+
+  describe("isNewerVersion()", () => {
+    it.each([
+      ["4.0.8", "4.0.7", true],
+      ["4.0.8", "4.0.7-dev.abc", true],
+      ["4.0.8", "4.0.7+build.123", true],
+      ["4.0.7", "4.0.7", false],
+      ["4.0.7", "4.0.7-dev.abc", false],
+      ["4.0.7", "4.0.8", false],
+      ["4.1.0", "4.0.9", true],
+      ["5.0.0", "4.9.9", true],
+    ])("compares release %s with installed %s as %s", (latest, current, expected) => {
+      expect(isNewerVersion(latest, current)).toBe(expected);
+    });
+  });
+  describe("checkLatestVersion()", () => {
+    const issueUrl = "https://github.com/Brevilabs/obsidian-copilot-private/issues/317";
+    const mockedRequestUrl = Obsidian.requestUrl as jest.MockedFunction<typeof Obsidian.requestUrl>;
+
+    beforeEach(() => {
+      mockedRequestUrl.mockReset();
+    });
+
+    const manifestUrl =
+      "https://github.com/logancyang/obsidian-copilot/releases/download/v4.0.4/manifest.json";
+    const response = (json: unknown): Obsidian.RequestUrlResponse => ({
+      status: 200,
+      text: "",
+      json,
+      arrayBuffer: new ArrayBuffer(0),
+      headers: {},
+    });
+    const releaseResponse = {
+      tag_name: "v4.0.3",
+      body: "# Copilot 4.0.4",
+      html_url: "https://github.com/logancyang/obsidian-copilot/releases/tag/v4.0.4",
+      assets: [{ name: "manifest.json", browser_download_url: manifestUrl }],
+    };
+
+    it(`returns release notes with the manifest version even when the tag differs for ${issueUrl}`, async () => {
+      mockedRequestUrl
+        .mockResolvedValueOnce(response(releaseResponse))
+        .mockResolvedValueOnce(response({ version: "4.0.4" }));
+
+      await expect(checkLatestVersion()).resolves.toEqual({
+        version: "4.0.4",
+        error: null,
+        release: {
+          version: "4.0.4",
+          body: "# Copilot 4.0.4",
+          htmlUrl: releaseResponse.html_url,
+        },
+      });
+      expect(mockedRequestUrl).toHaveBeenNthCalledWith(1, {
+        url: "https://api.github.com/repos/logancyang/obsidian-copilot/releases/latest",
+        method: "GET",
+      });
+      expect(mockedRequestUrl).toHaveBeenNthCalledWith(2, {
+        url: manifestUrl,
+        method: "GET",
+      });
+      expect(mockedRequestUrl).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([
+      undefined,
+      [],
+      [{ name: "main.js", browser_download_url: manifestUrl }],
+      [{ name: "manifest.json" }],
+    ])(
+      "returns an error when the release has no downloadable manifest asset (%j)",
+      async (assets) => {
+        mockedRequestUrl.mockResolvedValueOnce(response({ ...releaseResponse, assets }));
+        await expect(checkLatestVersion()).resolves.toEqual({
+          version: null,
+          error: "The latest Copilot release has no manifest.json asset.",
+          release: null,
+        });
+        expect(mockedRequestUrl).toHaveBeenCalledTimes(1);
+      }
+    );
+
+    it.each([undefined, null, 404, "", "v4.0.4", "4.0", "4.0.x", "4.0.4-", "04.0.4"])(
+      "returns an error for malformed manifest version %j",
+      async (version) => {
+        mockedRequestUrl
+          .mockResolvedValueOnce(response(releaseResponse))
+          .mockResolvedValueOnce(response({ version }));
+        await expect(checkLatestVersion()).resolves.toEqual({
+          version: null,
+          error: "The latest Copilot manifest has no valid version.",
+          release: null,
+        });
+      }
+    );
+
+    it.each(["4.0.4-beta.1", "4.0.4+build.123", "4.0.4-beta.1+build.123"])(
+      "preserves valid manifest version suffixes in %s",
+      async (version) => {
+        mockedRequestUrl
+          .mockResolvedValueOnce(response(releaseResponse))
+          .mockResolvedValueOnce(response({ version }));
+        await expect(checkLatestVersion()).resolves.toMatchObject({ version, error: null });
+      }
+    );
+
+    it("keeps the manifest version when optional release notes are absent", async () => {
+      mockedRequestUrl
+        .mockResolvedValueOnce(response({ assets: releaseResponse.assets }))
+        .mockResolvedValueOnce(response({ version: "4.0.4" }));
+      await expect(checkLatestVersion()).resolves.toEqual({
+        version: "4.0.4",
+        error: null,
+        release: {
+          version: "4.0.4",
+          body: "",
+          htmlUrl: "https://github.com/logancyang/obsidian-copilot/releases/latest",
+        },
+      });
+    });
+
+    it("returns the request error when GitHub cannot be reached", async () => {
+      mockedRequestUrl.mockRejectedValue(new Error("offline"));
+      await expect(checkLatestVersion()).resolves.toEqual({
+        version: null,
+        error: "offline",
+        release: null,
+      });
+    });
+
+    it("returns the manifest request error without falling back to the release tag", async () => {
+      mockedRequestUrl
+        .mockResolvedValueOnce(response(releaseResponse))
+        .mockRejectedValueOnce(new Error("manifest unavailable"));
+      await expect(checkLatestVersion()).resolves.toEqual({
+        version: null,
+        error: "manifest unavailable",
+        release: null,
+      });
+    });
+  });
+
   describe("getPropertyValuesFromNote()", () => {
-    // getPropertyValuesFromNote only reads app.metadataCache.getFileCache(file),
-    // which is mocked per-case, so the file argument itself is never inspected.
     const file = new TFile();
     const withFrontmatter = (frontmatter: Record<string, unknown>) =>
       mockMetadataCache.getFileCache.mockReturnValue({ frontmatter });
@@ -395,28 +414,16 @@ describe("utils", () => {
       expect(getPropertyValuesFromNote(mockApp, file, "constructor")).toEqual([]);
     });
 
-    it("returns the canonical empty array for null values", () => {
-      withFrontmatter({ Topics: null });
-      const result1 = getPropertyValuesFromNote(mockApp, file, "Topics");
-      const result2 = getPropertyValuesFromNote(mockApp, file, "Topics");
-      expect(result1).toEqual([]);
-      expect(result1).toBe(result2); // referential stability
-    });
-
-    it("returns the canonical empty array for empty list values", () => {
-      withFrontmatter({ Topics: [] });
-      const result1 = getPropertyValuesFromNote(mockApp, file, "Topics");
-      const result2 = getPropertyValuesFromNote(mockApp, file, "Topics");
-      expect(result1).toEqual([]);
-      expect(result1).toBe(result2); // referential stability
-    });
-
-    it("returns the canonical empty array for non-scalar-only lists", () => {
-      withFrontmatter({ Topics: [{ nested: true }, { another: "object" }] });
-      const result1 = getPropertyValuesFromNote(mockApp, file, "Topics");
-      const result2 = getPropertyValuesFromNote(mockApp, file, "Topics");
-      expect(result1).toEqual([]);
-      expect(result1).toBe(result2); // referential stability
+    it.each([
+      ["null", null],
+      ["an empty list", []],
+      ["a list of only non-scalar values", [{ nested: true }, { another: "object" }]],
+    ])("returns the shared empty array when the value is %s", (_label, value) => {
+      withFrontmatter({ Topics: value });
+      const first = getPropertyValuesFromNote(mockApp, file, "Topics");
+      const second = getPropertyValuesFromNote(mockApp, file, "Topics");
+      expect(first).toEqual([]);
+      expect(first).toBe(second);
     });
   });
 
@@ -456,672 +463,419 @@ describe("utils", () => {
       expect(noteHasProperty(mockApp, file, "toString")).toBe(false);
     });
   });
-});
 
-describe("extractNoteFiles", () => {
-  let mockVault: Obsidian.Vault;
+  describe("extractNoteFiles()", () => {
+    const extractPaths = (query: string): string[] =>
+      extractNoteFiles(query, new Obsidian.Vault()).map((f) => f.path);
 
-  beforeEach(() => {
-    mockVault = new Obsidian.Vault();
+    it("extracts the notes referenced by wikilinks in order", () => {
+      expect(extractPaths("Please refer to [[Note1]] and [[Note2]] for more information.")).toEqual(
+        ["Note1.md", "Note2.md"]
+      );
+    });
+
+    it("resolves note titles containing spaces", () => {
+      expect(extractPaths("Check out [[Note 1]] and [[Another Note]] for details.")).toEqual([
+        "Note 1.md",
+        "Another Note.md",
+      ]);
+    });
+
+    it("resolves note titles containing special characters", () => {
+      expect(extractPaths("Important notes: [[Note-1]], [[Note_2]], and [[Note#3]].")).toEqual([
+        "Note-1.md",
+        "Note_2.md",
+        "Note#3.md",
+      ]);
+    });
+
+    it("returns each note once when it is linked repeatedly", () => {
+      expect(extractPaths("Refer to [[Note1]], [[Note2]], and [[Note1]] again.")).toEqual([
+        "Note1.md",
+        "Note2.md",
+      ]);
+    });
+
+    it("returns no notes when the text has no wikilinks", () => {
+      expect(extractPaths("There are no note titles in this string.")).toEqual([]);
+    });
   });
 
-  it("should extract single note title", () => {
-    const query = "Please refer to [[Note1]] for more information.";
-    const result = extractNoteFiles(query, mockVault);
-    const resultPaths = result.map((f) => f.path);
-    expect(resultPaths).toEqual(["Note1.md"]);
+  describe("extractTemplateNoteFiles()", () => {
+    const extractPaths = (query: string): string[] =>
+      extractTemplateNoteFiles(query, new Obsidian.Vault()).map((f) => f.path);
+
+    it("extracts the notes referenced by wikilinks wrapped in curly braces in order", () => {
+      expect(
+        extractPaths("Please refer to {[[Note1]]} and {[[Note2]]} for more information.")
+      ).toEqual(["Note1.md", "Note2.md"]);
+    });
+
+    it("resolves note titles containing spaces and special characters", () => {
+      expect(
+        extractPaths("Check out {[[Note 1]]}, {[[Another Note]]}, {[[Note-1]]}, and {[[Note#3]]}.")
+      ).toEqual(["Note 1.md", "Another Note.md", "Note-1.md", "Note#3.md"]);
+    });
+
+    it("returns each note once when it is linked repeatedly", () => {
+      expect(extractPaths("Refer to {[[Note1]]}, {[[Note2]]}, and {[[Note1]]} again.")).toEqual([
+        "Note1.md",
+        "Note2.md",
+      ]);
+    });
+
+    it("ignores bare wikilinks that have no curly braces", () => {
+      expect(extractPaths("Extract {[[Note1]]} but not [[Note2]].")).toEqual(["Note1.md"]);
+      expect(extractPaths("Only [[Note1]] and [[Note2]] exist here.")).toEqual([]);
+    });
+
+    it("returns no notes when the text has no template patterns", () => {
+      expect(extractPaths("There are no template note patterns in this string.")).toEqual([]);
+    });
   });
 
-  it("should extract multiple note titles", () => {
-    const query = "Please refer to [[Note1]] and [[Note2]] for more information.";
-    const result = extractNoteFiles(query, mockVault);
-    const resultPaths = result.map((f) => f.path);
-    expect(resultPaths).toEqual(["Note1.md", "Note2.md"]);
-  });
-
-  it("should handle note titles with spaces", () => {
-    const query = "Check out [[Note 1]] and [[Another Note]] for details.";
-    const result = extractNoteFiles(query, mockVault);
-    const resultPaths = result.map((f) => f.path);
-    expect(resultPaths).toEqual(["Note 1.md", "Another Note.md"]);
-  });
-
-  it("should handle duplicate note titles", () => {
-    const query = "Refer to [[Note1]], [[Note2]], and [[Note1]] again.";
-    const result = extractNoteFiles(query, mockVault);
-    const resultPaths = result.map((f) => f.path);
-    expect(resultPaths).toEqual(["Note1.md", "Note2.md"]);
-  });
-
-  it("should return empty array when no note titles found", () => {
-    const query = "There are no note titles in this string.";
-    const result = extractNoteFiles(query, mockVault);
-    expect(result).toEqual([]);
-  });
-
-  it("should handle note titles with special characters", () => {
-    const query = "Important notes: [[Note-1]], [[Note_2]], and [[Note#3]].";
-    const result = extractNoteFiles(query, mockVault);
-    const resultPaths = result.map((f) => f.path);
-    expect(resultPaths).toEqual(["Note-1.md", "Note_2.md", "Note#3.md"]);
-  });
-});
-
-describe("extractTemplateNoteFiles", () => {
-  let mockVault: Obsidian.Vault;
-
-  beforeEach(() => {
-    mockVault = new Obsidian.Vault();
-  });
-
-  it("should extract single note title wrapped in curly braces", () => {
-    const query = "Please refer to {[[Note1]]} for more information.";
-    const result = extractTemplateNoteFiles(query, mockVault);
-    const resultPaths = result.map((f) => f.path);
-    expect(resultPaths).toEqual(["Note1.md"]);
-  });
-
-  it("should extract multiple note titles wrapped in curly braces", () => {
-    const query = "Please refer to {[[Note1]]} and {[[Note2]]} for more information.";
-    const result = extractTemplateNoteFiles(query, mockVault);
-    const resultPaths = result.map((f) => f.path);
-    expect(resultPaths).toEqual(["Note1.md", "Note2.md"]);
-  });
-
-  it("should handle note titles with spaces", () => {
-    const query = "Check out {[[Note 1]]} and {[[Another Note]]} for details.";
-    const result = extractTemplateNoteFiles(query, mockVault);
-    const resultPaths = result.map((f) => f.path);
-    expect(resultPaths).toEqual(["Note 1.md", "Another Note.md"]);
-  });
-
-  it("should handle duplicate note titles", () => {
-    const query = "Refer to {[[Note1]]}, {[[Note2]]}, and {[[Note1]]} again.";
-    const result = extractTemplateNoteFiles(query, mockVault);
-    const resultPaths = result.map((f) => f.path);
-    expect(resultPaths).toEqual(["Note1.md", "Note2.md"]);
-  });
-
-  it("should NOT extract bare wikilinks without curly braces", () => {
-    const query = "This [[Note1]] should not be extracted.";
-    const result = extractTemplateNoteFiles(query, mockVault);
-    expect(result).toEqual([]);
-  });
-
-  it("should only extract wikilinks with curly braces, ignoring bare ones", () => {
-    const query = "Extract {[[Note1]]} but not [[Note2]].";
-    const result = extractTemplateNoteFiles(query, mockVault);
-    const resultPaths = result.map((f) => f.path);
-    expect(resultPaths).toEqual(["Note1.md"]);
-  });
-
-  it("should return empty array when no {[[...]]} patterns found", () => {
-    const query = "There are no template note patterns in this string.";
-    const result = extractTemplateNoteFiles(query, mockVault);
-    expect(result).toEqual([]);
-  });
-
-  it("should return empty array when only bare [[...]] patterns exist", () => {
-    const query = "Only [[Note1]] and [[Note2]] exist here.";
-    const result = extractTemplateNoteFiles(query, mockVault);
-    expect(result).toEqual([]);
-  });
-
-  it("should handle note titles with special characters", () => {
-    const query = "Important notes: {[[Note-1]]}, {[[Note_2]]}, and {[[Note#3]]}.";
-    const result = extractTemplateNoteFiles(query, mockVault);
-    const resultPaths = result.map((f) => f.path);
-    expect(resultPaths).toEqual(["Note-1.md", "Note_2.md", "Note#3.md"]);
-  });
-});
-
-describe("removeThinkTags", () => {
-  it("should remove complete think tags and their content", () => {
-    const input = "Before <think>This is thinking content</think> After";
-    const expected = "Before  After";
-    expect(removeThinkTags(input)).toBe(expected);
-  });
-
-  it("should handle multiple think tags", () => {
-    const input = "Text <think>First thought</think> middle <think>Second thought</think> end";
-    const expected = "Text  middle  end";
-    expect(removeThinkTags(input)).toBe(expected);
-  });
-
-  it("should handle multiline think content", () => {
-    const input = `Start
-<think>
-Line 1
-Line 2
-Line 3
-</think>
-End`;
-    const expected = "Start\n\nEnd";
-    expect(removeThinkTags(input)).toBe(expected);
-  });
-
-  it("should handle unclosed think tags (streaming scenario)", () => {
-    const input = "Before content <think>Partial thought that is still being";
-    const expected = "Before content";
-    expect(removeThinkTags(input)).toBe(expected);
-  });
-
-  it("should handle empty think tags", () => {
-    const input = "Text <think></think> more text";
-    const expected = "Text  more text";
-    expect(removeThinkTags(input)).toBe(expected);
-  });
-
-  it("should handle text without think tags", () => {
-    const input = "This is regular text without any think tags";
-    const expected = "This is regular text without any think tags";
-    expect(removeThinkTags(input)).toBe(expected);
-  });
-
-  it("should handle nested content within think tags", () => {
-    const input = `Main text <think>
+  describe("removeThinkTags()", () => {
+    it("removes complete think blocks, including multi-line content with inner tags", () => {
+      const input = `Main text <think>
 I need to consider:
 - Point 1
-- Point 2
 <inner>nested content</inner>
 </think> Final text`;
-    const expected = "Main text  Final text";
-    expect(removeThinkTags(input)).toBe(expected);
+      expect(removeThinkTags(input)).toBe("Main text  Final text");
+    });
+
+    it("removes every think block in the text", () => {
+      const input = "Text <think>First thought</think> middle <think>Second thought</think> end";
+      expect(removeThinkTags(input)).toBe("Text  middle  end");
+    });
+
+    it("drops an unclosed think block while it is still streaming", () => {
+      const input = "Before content <think>Partial thought that is still being";
+      expect(removeThinkTags(input)).toBe("Before content");
+    });
+
+    it("removes an empty think block", () => {
+      expect(removeThinkTags("Text <think></think> more text")).toBe("Text  more text");
+    });
+
+    it("keeps the text around a think block at the start or end", () => {
+      expect(removeThinkTags("<think>Initial thoughts</think>Main content here")).toBe(
+        "Main content here"
+      );
+      expect(removeThinkTags("Main content here<think>Final thoughts</think>")).toBe(
+        "Main content here"
+      );
+    });
+
+    it("returns text without think blocks unchanged apart from trimming", () => {
+      expect(removeThinkTags("  regular text  ")).toBe("regular text");
+      expect(removeThinkTags("  <think>content</think>  ")).toBe("");
+    });
   });
 
-  it("should trim whitespace from the result", () => {
-    const input = "  <think>content</think>  ";
-    const expected = "";
-    expect(removeThinkTags(input)).toBe(expected);
-  });
+  describe("withTimeout()", () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+    });
 
-  it("should handle think tags at the beginning of text", () => {
-    const input = "<think>Initial thoughts</think>Main content here";
-    const expected = "Main content here";
-    expect(removeThinkTags(input)).toBe(expected);
-  });
+    afterEach(() => {
+      jest.useRealTimers();
+    });
 
-  it("should handle think tags at the end of text", () => {
-    const input = "Main content here<think>Final thoughts</think>";
-    const expected = "Main content here";
-    expect(removeThinkTags(input)).toBe(expected);
-  });
-});
-
-describe("withTimeout", () => {
-  it("should return result when operation completes within timeout", async () => {
-    const operation = async (signal: AbortSignal) => {
-      await new Promise((resolve) => window.setTimeout(resolve, 50));
-      return "success";
+    const sleepThen = <T>(ms: number, run: () => T) => {
+      return async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, ms));
+        return run();
+      };
     };
 
-    const result = await withTimeout(operation, 200, "Test operation");
-    expect(result).toBe("success");
-  });
+    it("resolves with the operation result when it finishes within the timeout", async () => {
+      const pending = withTimeout(
+        sleepThen(50, () => "success"),
+        200,
+        "Test operation"
+      );
 
-  it("should throw TimeoutError when operation exceeds timeout", async () => {
-    const operation = async (signal: AbortSignal) => {
-      await new Promise((resolve) => window.setTimeout(resolve, 200));
-      return "should not complete";
-    };
+      await jest.advanceTimersByTimeAsync(50);
 
-    await expect(withTimeout(operation, 50, "Test operation")).rejects.toThrow(TimeoutError);
+      await expect(pending).resolves.toBe("success");
+    });
 
-    await expect(withTimeout(operation, 50, "Test operation")).rejects.toThrow(
-      "Test operation timed out after 50ms"
-    );
-  });
+    it("rejects with a TimeoutError naming the operation and limit when the operation is too slow", async () => {
+      const pending = withTimeout(
+        sleepThen(200, () => "late"),
+        50,
+        "Test operation"
+      );
+      const assertion = expect(pending).rejects.toThrow(TimeoutError);
 
-  it("should abort the operation when timeout is reached", async () => {
-    let wasAborted = false;
-    const operation = async (signal: AbortSignal) => {
-      signal.addEventListener("abort", () => {
-        wasAborted = true;
+      await jest.advanceTimersByTimeAsync(50);
+
+      await assertion;
+      await expect(pending).rejects.toMatchObject({
+        name: "TimeoutError",
+        message: "Test operation timed out after 50ms",
       });
+    });
 
-      await new Promise((resolve) => window.setTimeout(resolve, 200));
-      return "should not complete";
-    };
+    it("aborts the operation's signal when the timeout is reached", async () => {
+      let signalSeen: AbortSignal | undefined;
+      const pending = withTimeout(
+        async (signal) => {
+          signalSeen = signal;
+          await new Promise((resolve) => window.setTimeout(resolve, 200));
+        },
+        50,
+        "Test operation"
+      );
+      const assertion = expect(pending).rejects.toThrow(TimeoutError);
 
-    try {
-      await withTimeout(operation, 50, "Test operation");
-    } catch {
-      // Expected to timeout
-    }
+      await jest.advanceTimersByTimeAsync(50);
 
-    // Give time for abort event to fire
-    await new Promise((resolve) => window.setTimeout(resolve, 10));
-    expect(wasAborted).toBe(true);
+      await assertion;
+      expect(signalSeen?.aborted).toBe(true);
+    });
+
+    it("propagates non-timeout errors from the operation and clears the timer", async () => {
+      const pending = withTimeout(
+        sleepThen(50, () => {
+          throw new Error("Operation failed");
+        }),
+        200,
+        "Test operation"
+      );
+      const assertion = expect(pending).rejects.toThrow("Operation failed");
+
+      await jest.advanceTimersByTimeAsync(50);
+
+      await assertion;
+      expect(jest.getTimerCount()).toBe(0);
+    });
   });
 
-  it("should handle operation that throws non-timeout errors", async () => {
-    const operation = async (signal: AbortSignal) => {
-      throw new Error("Operation failed");
-    };
-
-    await expect(withTimeout(operation, 200, "Test operation")).rejects.toThrow("Operation failed");
+  describe("getUtf8ByteLength()", () => {
+    it.each([
+      ["ASCII", "Test 123", 8],
+      ["Cyrillic", "Привет", 12],
+      ["Chinese, Japanese, and Korean", "你好こんにちは안녕", 27],
+      ["emoji", "🚀🌟", 8],
+      ["mixed scripts", "Hello мир 你好", 19],
+      ["an empty string", "", 0],
+    ])("counts the bytes of %s text", (_label, text, expected) => {
+      expect(getUtf8ByteLength(text)).toBe(expected);
+    });
   });
 
-  it("should clean up timeout even when operation throws", async () => {
-    const operation = async (signal: AbortSignal) => {
-      await new Promise((resolve) => window.setTimeout(resolve, 50));
-      throw new Error("Operation failed");
-    };
+  describe("truncateToByteLimit()", () => {
+    it("returns the string unchanged when it fits the limit", () => {
+      expect(truncateToByteLimit("Hello", 10)).toBe("Hello");
+      expect(truncateToByteLimit("Test", 4)).toBe("Test");
+    });
 
-    await expect(withTimeout(operation, 200, "Test operation")).rejects.toThrow("Operation failed");
+    it("cuts ASCII text at the byte limit", () => {
+      expect(truncateToByteLimit("Hello World", 5)).toBe("Hello");
+    });
 
-    // If timeout cleanup failed, this would log warnings about unhandled timeouts
-    // The fact that this test passes cleanly indicates proper cleanup
-  });
-});
+    it("never splits a multi-byte character", () => {
+      expect(truncateToByteLimit("Привет мир", 13)).toBe("Привет ");
+      expect(truncateToByteLimit("🚀🌟✨🎉", 8)).toBe("🚀🌟");
+      expect(truncateToByteLimit("Hello мир 你好", 12)).toBe("Hello мир");
+    });
 
-describe("TimeoutError", () => {
-  it("should create error with correct message and name", () => {
-    const error = new TimeoutError("Test operation", 5000);
+    it("keeps the result within the limit when the first character alone exceeds it", () => {
+      expect(getUtf8ByteLength(truncateToByteLimit("🚀Test", 3))).toBeLessThanOrEqual(3);
+    });
 
-    expect(error.message).toBe("Test operation timed out after 5000ms");
-    expect(error.name).toBe("TimeoutError");
-    expect(error).toBeInstanceOf(Error);
-    expect(error).toBeInstanceOf(TimeoutError);
-  });
-});
+    it("returns an empty string for a zero or negative limit", () => {
+      expect(truncateToByteLimit("Hello", 0)).toBe("");
+      expect(truncateToByteLimit("Hello", -1)).toBe("");
+    });
 
-describe("getUtf8ByteLength", () => {
-  it("should correctly calculate byte length for ASCII text", () => {
-    expect(getUtf8ByteLength("Hello")).toBe(5);
-    expect(getUtf8ByteLength("Test 123")).toBe(8);
-  });
-
-  it("should correctly calculate byte length for Cyrillic text", () => {
-    // Each Cyrillic character is 2 bytes in UTF-8
-    expect(getUtf8ByteLength("Привет")).toBe(12); // 6 chars × 2 bytes
-    expect(getUtf8ByteLength("мир")).toBe(6); // 3 chars × 2 bytes
+    it("returns an empty string for an empty input", () => {
+      expect(truncateToByteLimit("", 10)).toBe("");
+    });
   });
 
-  it("should correctly calculate byte length for Chinese/Japanese/Korean text", () => {
-    // CJK characters are typically 3 bytes in UTF-8
-    expect(getUtf8ByteLength("你好")).toBe(6); // 2 chars × 3 bytes
-    expect(getUtf8ByteLength("こんにちは")).toBe(15); // 5 chars × 3 bytes
-    expect(getUtf8ByteLength("안녕")).toBe(6); // 2 chars × 3 bytes
-  });
-
-  it("should correctly calculate byte length for emoji", () => {
-    // Emoji are typically 4 bytes in UTF-8
-    expect(getUtf8ByteLength("🚀")).toBe(4);
-    expect(getUtf8ByteLength("🌟")).toBe(4);
-    expect(getUtf8ByteLength("🚀🌟")).toBe(8);
-  });
-
-  it("should correctly calculate byte length for mixed text", () => {
-    expect(getUtf8ByteLength("Hello мир 你好")).toBe(19); // 5 + 1 + 6 + 1 + 6 = 19
-  });
-
-  it("should handle empty string", () => {
-    expect(getUtf8ByteLength("")).toBe(0);
-  });
-});
-
-describe("truncateToByteLimit", () => {
-  it("should return string as-is if within byte limit", () => {
-    expect(truncateToByteLimit("Hello", 10)).toBe("Hello");
-    expect(truncateToByteLimit("Test", 4)).toBe("Test");
-  });
-
-  it("should truncate ASCII text to byte limit", () => {
-    expect(truncateToByteLimit("Hello World", 5)).toBe("Hello");
-    expect(truncateToByteLimit("Test123456", 7)).toBe("Test123");
-  });
-
-  it("should truncate Cyrillic text without breaking characters", () => {
-    const cyrillic = "Привет мир";
-    // "Привет" = 12 bytes, " " = 1 byte, "мир" = 6 bytes
-    // Total = 19 bytes
-    const result = truncateToByteLimit(cyrillic, 13);
-    // Should include "Привет " (13 bytes) or "Привет" (12 bytes) depending on space handling
-    expect(getUtf8ByteLength(result)).toBeLessThanOrEqual(13);
-    // Verify no broken characters (each result should be valid UTF-8)
-    expect(result.length).toBeGreaterThan(0);
-  });
-
-  it("should truncate emoji without breaking characters", () => {
-    const emoji = "🚀🌟✨🎉";
-    // Each emoji is 4 bytes, total = 16 bytes
-    const result = truncateToByteLimit(emoji, 8);
-    // Should include exactly 2 emoji (8 bytes)
-    expect(getUtf8ByteLength(result)).toBeLessThanOrEqual(8);
-    expect(result).toBe("🚀🌟");
-  });
-
-  it("should handle mixed Unicode text", () => {
-    const mixed = "Hello мир 你好";
-    // "Hello" = 5, " " = 1, "мир" = 6, " " = 1, "你好" = 6
-    // Total = 19 bytes
-    const result = truncateToByteLimit(mixed, 12);
-    expect(getUtf8ByteLength(result)).toBeLessThanOrEqual(12);
-    // Should include at least "Hello мир" (12 bytes)
-    expect(result).toContain("Hello");
-  });
-
-  it("should return empty string for byte limit of 0", () => {
-    expect(truncateToByteLimit("Hello", 0)).toBe("");
-  });
-
-  it("should return empty string for negative byte limit", () => {
-    expect(truncateToByteLimit("Hello", -1)).toBe("");
-  });
-
-  it("should handle empty string", () => {
-    expect(truncateToByteLimit("", 10)).toBe("");
-  });
-
-  it("should handle very long Cyrillic text", () => {
-    const longCyrillic =
-      "используй словарь уже установленных терминов Словарь перевода Songs of Syx";
-    const result = truncateToByteLimit(longCyrillic, 50);
-    expect(getUtf8ByteLength(result)).toBeLessThanOrEqual(50);
-    // Should not break in the middle of a character
-    expect(result.length).toBeGreaterThan(0);
-  });
-
-  it("should handle edge case where single character exceeds limit", () => {
-    // If a single emoji (4 bytes) exceeds the limit of 3 bytes
-    const result = truncateToByteLimit("🚀Test", 3);
-    // Binary search may find a partial character, but we can't include it
-    // The function should return an empty string or the longest valid prefix
-    expect(getUtf8ByteLength(result)).toBeLessThanOrEqual(3);
-  });
-});
-
-describe("stripFrontmatter", () => {
-  it("should strip YAML frontmatter from content", () => {
-    const content = `---
-title: Test
-date: 2024-01-01
+  describe("stripFrontmatter()", () => {
+    it("removes the leading YAML frontmatter block", () => {
+      const content = `---
+title: "Quoted String"
+count: 42
+tags:
+  - tag1
 ---
 This is the actual content.`;
-    const result = stripFrontmatter(content);
-    expect(result).toBe("This is the actual content.");
-  });
+      expect(stripFrontmatter(content)).toBe("This is the actual content.");
+    });
 
-  it("should return content unchanged if no frontmatter", () => {
-    const content = "This is content without frontmatter.";
-    const result = stripFrontmatter(content);
-    expect(result).toBe("This is content without frontmatter.");
-  });
+    it("trims leading whitespace after the frontmatter by default", () => {
+      const content = `---
+title: Test
+---
 
-  it("should handle content that starts with --- but has no closing ---", () => {
-    const content = "---\nThis is not valid frontmatter";
-    const result = stripFrontmatter(content);
-    expect(result).toBe("---\nThis is not valid frontmatter");
-  });
+  Content with leading whitespace after frontmatter.`;
+      expect(stripFrontmatter(content)).toBe("Content with leading whitespace after frontmatter.");
+    });
 
-  it("should handle empty content", () => {
-    const result = stripFrontmatter("");
-    expect(result).toBe("");
-  });
-
-  it("should handle content with --- in the middle", () => {
-    const content = `---
+    it("keeps later --- separators in the body", () => {
+      const content = `---
 title: Test
 ---
 Content with --- separator in the middle.`;
-    const result = stripFrontmatter(content);
-    expect(result).toBe("Content with --- separator in the middle.");
-  });
+      expect(stripFrontmatter(content)).toBe("Content with --- separator in the middle.");
+    });
 
-  it("should trim leading whitespace after frontmatter", () => {
-    const content = `---
-title: Test
----
+    it("returns content without frontmatter unchanged", () => {
+      expect(stripFrontmatter("This is content without frontmatter.")).toBe(
+        "This is content without frontmatter."
+      );
+      expect(stripFrontmatter("")).toBe("");
+    });
 
-  Content with leading whitespace after frontmatter.`;
-    const result = stripFrontmatter(content);
-    // trimStart removes the newlines and spaces
-    expect(result).toBe("Content with leading whitespace after frontmatter.");
-  });
+    it("returns content unchanged when the opening --- has no closing ---", () => {
+      const content = "---\nThis is not valid frontmatter";
+      expect(stripFrontmatter(content)).toBe(content);
+    });
 
-  it("should handle frontmatter with various field types", () => {
-    const content = `---
-title: "Quoted String"
-count: 42
-enabled: true
-tags:
-  - tag1
-  - tag2
----
-Body content here.`;
-    const result = stripFrontmatter(content);
-    expect(result).toBe("Body content here.");
-  });
-
-  it("should preserve leading whitespace after frontmatter when trimStart is false", () => {
-    const content = `---
-title: Test
----
-  Content with leading whitespace after frontmatter.`;
-    const result = stripFrontmatter(content, { trimStart: false });
-    expect(result).toBe("  Content with leading whitespace after frontmatter.");
-  });
-
-  it("should preserve multiple leading newlines when trimStart is false", () => {
-    const content = `---
+    it("preserves leading whitespace after the frontmatter when trimStart is false", () => {
+      const content = `---
 title: Test
 ---
 
   Content after empty line.`;
-    const result = stripFrontmatter(content, { trimStart: false });
-    expect(result).toBe("\n  Content after empty line.");
+      expect(stripFrontmatter(content, { trimStart: false })).toBe("\n  Content after empty line.");
+    });
+
+    it("strips CRLF frontmatter when trimStart is false", () => {
+      const content = "---\r\ntitle: Test\r\n---\r\n  Content here.";
+      expect(stripFrontmatter(content, { trimStart: false })).toBe("  Content here.");
+    });
   });
 
-  it("should handle CRLF line endings when trimStart is false", () => {
-    const content = "---\r\ntitle: Test\r\n---\r\n  Content here.";
-    const result = stripFrontmatter(content, { trimStart: false });
-    expect(result).toBe("  Content here.");
+  describe("formatDateTime()", () => {
+    const fixedDate = new Date("2024-03-15T14:30:45.123Z");
+
+    it("formats UTC deterministically when timezone is utc", () => {
+      const result = formatDateTime(fixedDate, "utc");
+      expect(result.fileName).toBe("20240315_143045");
+      expect(result.display).toBe("2024/03/15 14:30:45");
+      expect(result.epoch).toBe(fixedDate.getTime());
+    });
+
+    it("zero-pads single-digit month, day, hour, minute, and second", () => {
+      const result = formatDateTime(new Date("2024-01-02T03:04:05.000Z"), "utc");
+      expect(result.fileName).toBe("20240102_030405");
+      expect(result.display).toBe("2024/01/02 03:04:05");
+    });
+
+    it("formats local time using the host timezone", () => {
+      const result = formatDateTime(fixedDate, "local");
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const expectedDisplay =
+        `${fixedDate.getFullYear()}/${pad(fixedDate.getMonth() + 1)}/${pad(fixedDate.getDate())} ` +
+        `${pad(fixedDate.getHours())}:${pad(fixedDate.getMinutes())}:${pad(fixedDate.getSeconds())}`;
+
+      expect(result.display).toBe(expectedDisplay);
+      expect(result.fileName).toMatch(/^\d{8}_\d{6}$/);
+      expect(result.epoch).toBe(fixedDate.getTime());
+    });
+
+    it("defaults to local timezone", () => {
+      expect(formatDateTime(fixedDate)).toEqual(formatDateTime(fixedDate, "local"));
+    });
   });
-});
 
-describe("formatDateTime", () => {
-  const fixedDate = new Date("2024-03-15T14:30:45.123Z");
+  describe("getModelInfo()", () => {
+    it("flags claude-opus-4-7 as adaptive thinking", () => {
+      const info = getModelInfo("claude-opus-4-7");
+      expect(info.isThinkingEnabled).toBe(true);
+      expect(info.usesAdaptiveThinking).toBe(true);
+    });
 
-  it("formats UTC deterministically when timezone='utc'", () => {
-    const result = formatDateTime(fixedDate, "utc");
-    expect(result.fileName).toBe("20240315_143045");
-    expect(result.display).toBe("2024/03/15 14:30:45");
-    expect(result.epoch).toBe(fixedDate.getTime());
+    it("flags claude-opus-4-8 and higher as adaptive thinking", () => {
+      expect(getModelInfo("claude-opus-4-8").usesAdaptiveThinking).toBe(true);
+      expect(getModelInfo("claude-opus-4-12").usesAdaptiveThinking).toBe(true);
+    });
+
+    it("keeps claude-opus-4-6 and earlier on legacy thinking", () => {
+      const six = getModelInfo("claude-opus-4-6");
+      expect(six.isThinkingEnabled).toBe(true);
+      expect(six.usesAdaptiveThinking).toBe(false);
+
+      const zero = getModelInfo("claude-opus-4-0");
+      expect(zero.isThinkingEnabled).toBe(true);
+      expect(zero.usesAdaptiveThinking).toBe(false);
+    });
+
+    it("does not affect other thinking-enabled families", () => {
+      expect(getModelInfo("claude-sonnet-4-5").usesAdaptiveThinking).toBe(false);
+      expect(getModelInfo("claude-3-7-sonnet-20250219").usesAdaptiveThinking).toBe(false);
+    });
+
+    it("does not match the unversioned claude-opus-4 prefix", () => {
+      const bare = getModelInfo("claude-opus-4");
+      expect(bare.isThinkingEnabled).toBe(true);
+      expect(bare.usesAdaptiveThinking).toBe(false);
+    });
+
+    it("does not treat dated snapshot IDs as adaptive thinking minors", () => {
+      expect(getModelInfo("claude-opus-4-20250514").usesAdaptiveThinking).toBe(false);
+      expect(getModelInfo("claude-opus-4-1-20250805").usesAdaptiveThinking).toBe(false);
+      expect(getModelInfo("claude-opus-4-7-20260115").usesAdaptiveThinking).toBe(true);
+    });
   });
 
-  it("local format is structurally valid and matches host timezone offset", () => {
-    const result = formatDateTime(fixedDate, "local");
-    // Display must always be "YYYY/MM/DD HH:mm:ss" regardless of host TZ.
-    expect(result.display).toMatch(/^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}$/);
-    expect(result.fileName).toMatch(/^\d{8}_\d{6}$/);
-    expect(result.epoch).toBe(fixedDate.getTime());
+  describe("insertAtCursor()", () => {
+    const from = { line: 0, ch: 0 };
+    const to = { line: 0, ch: 5 };
 
-    // The local display should equal what the host JS Date renders.
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const expectedDisplay =
-      `${fixedDate.getFullYear()}/${pad(fixedDate.getMonth() + 1)}/${pad(fixedDate.getDate())} ` +
-      `${pad(fixedDate.getHours())}:${pad(fixedDate.getMinutes())}:${pad(fixedDate.getSeconds())}`;
-    expect(result.display).toBe(expectedDisplay);
-  });
-
-  it("local and UTC differ when host is not on UTC, and agree otherwise", () => {
-    const local = formatDateTime(fixedDate, "local");
-    const utc = formatDateTime(fixedDate, "utc");
-    if (fixedDate.getTimezoneOffset() === 0) {
-      expect(local.display).toBe(utc.display);
-    } else {
-      expect(local.display).not.toBe(utc.display);
+    function makeApp(selection: string) {
+      const editor = {
+        getSelection: jest.fn(() => selection),
+        getCursor: jest.fn((which: string) => (which === "from" ? from : to)),
+        replaceRange: jest.fn(),
+        setSelection: jest.fn(),
+        focus: jest.fn(),
+        cm: undefined,
+      };
+      const view = new (Obsidian.MarkdownView as unknown as new () => { editor: unknown })();
+      view.editor = editor;
+      const leaf = { view };
+      const app = {
+        workspace: {
+          getMostRecentLeaf: jest.fn(() => leaf),
+          getLeaf: jest.fn(() => leaf),
+        },
+      };
+      return { app, editor };
     }
-  });
 
-  it("defaults to local timezone", () => {
-    const explicit = formatDateTime(fixedDate, "local");
-    const defaulted = formatDateTime(fixedDate);
-    expect(defaulted).toEqual(explicit);
-  });
+    it("inserts at the cursor when there is no selection", async () => {
+      const { app, editor } = makeApp("");
 
-  it("epoch is independent of timezone choice", () => {
-    expect(formatDateTime(fixedDate, "local").epoch).toBe(formatDateTime(fixedDate, "utc").epoch);
-  });
+      await insertAtCursor(app as never, "hello");
 
-  it("zero-pads single-digit month/day/hour/minute/second", () => {
-    const earlyDate = new Date("2024-01-02T03:04:05.000Z");
-    const result = formatDateTime(earlyDate, "utc");
-    expect(result.fileName).toBe("20240102_030405");
-    expect(result.display).toBe("2024/01/02 03:04:05");
-  });
-});
+      expect(editor.replaceRange).toHaveBeenCalledWith("hello", to, to);
+    });
 
-describe("stringToFormattedDateTime", () => {
-  it("parses a valid 'YYYY/MM/DD HH:mm:ss' string and round-trips display", () => {
-    const result = stringToFormattedDateTime("2024/03/15 10:30:45");
-    expect(result.display).toBe("2024/03/15 10:30:45");
-    expect(result.fileName).toBe("20240315_103045");
-    // The reconstructed Date must format back to the same components in local time.
-    const d = new Date(result.epoch);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    expect(
-      `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ` +
-        `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-    ).toBe("2024/03/15 10:30:45");
-  });
+    it("replaces from the selection start when text is selected", async () => {
+      const { app, editor } = makeApp("selected");
 
-  it("round-trips formatDateTime(local) output", () => {
-    const original = new Date("2024-07-04T18:00:00.000Z");
-    const formatted = formatDateTime(original, "local");
-    const reparsed = stringToFormattedDateTime(formatted.display);
-    expect(reparsed.display).toBe(formatted.display);
-    expect(reparsed.fileName).toBe(formatted.fileName);
-    // Display is second-precision, so the round-tripped epoch loses millis.
-    expect(reparsed.epoch).toBe(Math.floor(original.getTime() / 1000) * 1000);
-  });
+      await insertAtCursor(app as never, "hello");
 
-  it("falls back to current date/time on invalid input", () => {
-    const before = Date.now();
-    const result = stringToFormattedDateTime("not-a-date");
-    const after = Date.now();
-    expect(result.epoch).toBeGreaterThanOrEqual(before);
-    expect(result.epoch).toBeLessThanOrEqual(after);
-    expect(result.display).toMatch(/^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}$/);
-    expect(result.fileName).toMatch(/^\d{8}_\d{6}$/);
-  });
+      expect(editor.replaceRange).toHaveBeenCalledWith("hello", from, to);
+    });
 
-  it("falls back on wrong-format input (e.g. dashes)", () => {
-    const before = Date.now();
-    const result = stringToFormattedDateTime("2024-03-15 10:30:45");
-    const after = Date.now();
-    expect(result.epoch).toBeGreaterThanOrEqual(before);
-    expect(result.epoch).toBeLessThanOrEqual(after);
-  });
-});
+    it("does nothing when there is no markdown view to insert into", async () => {
+      const leaf = { view: {} };
+      const app = {
+        workspace: {
+          getMostRecentLeaf: jest.fn(() => leaf),
+          getLeaf: jest.fn(() => leaf),
+        },
+      };
 
-describe("getModelInfo", () => {
-  it("flags claude-opus-4-7 as adaptive thinking", () => {
-    const info = getModelInfo("claude-opus-4-7");
-    expect(info.isThinkingEnabled).toBe(true);
-    expect(info.usesAdaptiveThinking).toBe(true);
-  });
-
-  it("flags claude-opus-4-8 and higher as adaptive thinking", () => {
-    expect(getModelInfo("claude-opus-4-8").usesAdaptiveThinking).toBe(true);
-    expect(getModelInfo("claude-opus-4-12").usesAdaptiveThinking).toBe(true);
-  });
-
-  it("keeps claude-opus-4-6 and earlier on legacy thinking", () => {
-    const six = getModelInfo("claude-opus-4-6");
-    expect(six.isThinkingEnabled).toBe(true);
-    expect(six.usesAdaptiveThinking).toBe(false);
-
-    const zero = getModelInfo("claude-opus-4-0");
-    expect(zero.isThinkingEnabled).toBe(true);
-    expect(zero.usesAdaptiveThinking).toBe(false);
-  });
-
-  it("does not affect other thinking-enabled families", () => {
-    expect(getModelInfo("claude-sonnet-4-5").usesAdaptiveThinking).toBe(false);
-    expect(getModelInfo("claude-3-7-sonnet-20250219").usesAdaptiveThinking).toBe(false);
-  });
-
-  it("does not match unversioned claude-opus-4 prefix", () => {
-    const bare = getModelInfo("claude-opus-4");
-    expect(bare.isThinkingEnabled).toBe(true);
-    expect(bare.usesAdaptiveThinking).toBe(false);
-  });
-
-  it("does not treat dated snapshot IDs as adaptive thinking minors", () => {
-    // claude-opus-4-20250514 is the dated snapshot of Opus 4.0, not Opus 4.20250514.
-    expect(getModelInfo("claude-opus-4-20250514").usesAdaptiveThinking).toBe(false);
-    // claude-opus-4-1-20250805 is dated 4.1.
-    expect(getModelInfo("claude-opus-4-1-20250805").usesAdaptiveThinking).toBe(false);
-    // Dated 4.7 still matches because the minor is delimited by "-".
-    expect(getModelInfo("claude-opus-4-7-20260115").usesAdaptiveThinking).toBe(true);
-  });
-});
-
-describe("insertAtCursor", () => {
-  const from = { line: 0, ch: 0 };
-  const to = { line: 0, ch: 5 };
-
-  // Builds an app whose most-recent leaf is a markdown view with the given
-  // selection. `editor.cm` is undefined so `insertIntoEditor` takes its Editor
-  // API fallback path, letting us assert on `replaceRange`.
-  function makeApp(selection: string) {
-    const editor = {
-      getSelection: jest.fn(() => selection),
-      getCursor: jest.fn((which: string) => (which === "from" ? from : to)),
-      replaceRange: jest.fn(),
-      setSelection: jest.fn(),
-      focus: jest.fn(),
-      cm: undefined,
-    };
-    const view = new (Obsidian.MarkdownView as unknown as new () => { editor: unknown })();
-    view.editor = editor;
-    const leaf = { view };
-    const app = {
-      workspace: {
-        getMostRecentLeaf: jest.fn(() => leaf),
-        getLeaf: jest.fn(() => leaf),
-      },
-    };
-    return { app, editor };
-  }
-
-  it("inserts at the cursor when there is no selection", async () => {
-    const { app, editor } = makeApp("");
-
-    await insertAtCursor(app as never, "hello");
-
-    expect(editor.replaceRange).toHaveBeenCalledWith("hello", to, to);
-  });
-
-  it("replaces from the selection start when text is selected", async () => {
-    const { app, editor } = makeApp("selected");
-
-    await insertAtCursor(app as never, "hello");
-
-    expect(editor.replaceRange).toHaveBeenCalledWith("hello", from, to);
-  });
-
-  it("threads the passed app into the insertion (no global app)", async () => {
-    const { app, editor } = makeApp("");
-
-    await insertAtCursor(app as never, "hello");
-
-    // The write resolves its leaf through the passed app, not a global one.
-    expect(app.workspace.getMostRecentLeaf).toHaveBeenCalled();
-    expect(editor.replaceRange).toHaveBeenCalled();
-  });
-
-  it("does nothing when there is no markdown view to insert into", async () => {
-    const leaf = { view: {} };
-    const app = {
-      workspace: {
-        getMostRecentLeaf: jest.fn(() => leaf),
-        getLeaf: jest.fn(() => leaf),
-      },
-    };
-
-    await expect(insertAtCursor(app as never, "hello")).resolves.toBeUndefined();
+      await expect(insertAtCursor(app as never, "hello")).resolves.toBeUndefined();
+    });
   });
 });

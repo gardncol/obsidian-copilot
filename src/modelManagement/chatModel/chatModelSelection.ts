@@ -16,11 +16,6 @@ const DISPLAY_NAME_TO_LEGACY_PROVIDER: Record<string, ChatModelProviders> = {
   siliconflow: ChatModelProviders.SILICONFLOW,
 };
 
-/**
- * Legacy selections used `wireModelId|ChatModelProviders`; keep them resolvable
- * during migration. A model may have been persisted under different provider
- * spellings depending on how it was selected, so enumerate every plausible form.
- */
 function getLegacyChatModelKeys(entry: ResolvedChatBackendEntry): readonly string[] {
   const providers = new Set<ChatModelProviders>([
     mapProviderTypeToChatModelProvider(entry.provider),
@@ -45,29 +40,27 @@ export function isChatModelSelectionForEntry(
   return entry.configuredModelId === selection || getLegacyChatModelKeys(entry).includes(selection);
 }
 
-/**
- * Resolve a persisted chat selection. New writes are configured-model IDs, while legacy
- * `name|provider` keys remain readable for settings, project files, and command frontmatter.
- */
 export function findChatBackendEntry(
   entries: readonly EnabledBackendEntry[],
-  preferredSelection: string | undefined
+  preferredSelection: string | undefined,
+  fallbackToFirst = true
 ): ResolvedChatBackendEntry | undefined {
   const okEntries = entries.filter(
     (entry): entry is ResolvedChatBackendEntry => entry.state === "ok"
   );
-  if (!preferredSelection) return okEntries[0];
+  // Commands must ask for a model instead of silently changing providers. https://github.com/Brevilabs/obsidian-copilot-private/issues/616
+  const fallback = fallbackToFirst ? okEntries[0] : undefined;
+  if (!preferredSelection) return fallback;
 
   return (
-    okEntries.find((entry) => isChatModelSelectionForEntry(entry, preferredSelection)) ??
-    okEntries[0]
+    okEntries.find((entry) => isChatModelSelectionForEntry(entry, preferredSelection)) ?? fallback
   );
 }
 
-/** Return the configured-model ID represented by either a new or legacy selection. */
 export function resolveChatModelSelectionId(
   entries: readonly EnabledBackendEntry[],
-  selection: string | undefined
+  selection: string | undefined,
+  fallbackToFirst = true
 ): string | undefined {
-  return findChatBackendEntry(entries, selection)?.configuredModelId;
+  return findChatBackendEntry(entries, selection, fallbackToFirst)?.configuredModelId;
 }

@@ -1,6 +1,8 @@
-import { registerContextMenu, registerSymposiumFileMenu } from "@/commands/contextMenu";
-import { COMMAND_IDS, COMMAND_ICONS, COMMAND_NAMES } from "@/constants";
-import { TFile, TFolder, type App, type EventRef, type Menu } from "obsidian";
+import { registerContextMenu } from "@/commands/contextMenu";
+import { getCachedCustomCommands } from "@/commands/state";
+import type { CustomCommand } from "@/commands/type";
+import { COMMAND_IDS } from "@/constants";
+import type { App, Menu } from "obsidian";
 
 jest.mock("@/commands/state", () => ({
   getCachedCustomCommands: jest.fn(() => []),
@@ -48,14 +50,16 @@ class TestMenu {
   }
 }
 
-function markdownFile(path: string): TFile {
-  const TFileConstructor = TFile as unknown as new (path: string) => TFile;
-  return new TFileConstructor(path);
-}
-
-function folder(path: string): TFolder {
-  const TFolderConstructor = TFolder as unknown as new (path: string) => TFolder;
-  return new TFolderConstructor(path);
+function customCommand(title: string, order: number, showInContextMenu: boolean): CustomCommand {
+  return {
+    title,
+    content: "",
+    modelKey: "",
+    showInContextMenu,
+    showInSlashMenu: false,
+    order,
+    lastUsedMs: 0,
+  };
 }
 
 function findItem(menu: TestMenu, title: string): TestMenuItem | undefined {
@@ -64,109 +68,42 @@ function findItem(menu: TestMenu, title: string): TestMenuItem | undefined {
 
 describe("contextMenu", () => {
   describe("registerContextMenu()", () => {
-    it("publishes the editor event's Markdown file instead of the workspace active file", () => {
-      const activeFile = markdownFile("Notes/Active.md");
-      const editorFile = markdownFile("Notes/Editor.md");
-      const publish = jest.fn().mockResolvedValue(undefined);
+    it("lists Quick Ask, the quick command trigger, then custom commands marked for the context menu by order", () => {
+      jest
+        .mocked(getCachedCustomCommands)
+        .mockReturnValue([
+          customCommand("Second", 2, true),
+          customCommand("Hidden", 0, false),
+          customCommand("First", 1, true),
+        ]);
       const menu = new TestMenu();
       const app = {
         commands: { executeCommandById: jest.fn() },
-        workspace: { getActiveFile: jest.fn(() => activeFile) },
       } as unknown as App;
 
-      registerContextMenu(menu as unknown as Menu, app, editorFile, publish);
+      registerContextMenu(menu as unknown as Menu, app);
 
       const copilotMenu = findItem(menu, "Copilot")?.submenu;
-      const publishItem = findItem(
-        copilotMenu!,
-        COMMAND_NAMES[COMMAND_IDS.PUBLISH_FILE_TO_SYMPOSIUM]
+      expect(copilotMenu?.items.map((item) => item.title)).toEqual([
+        "Quick Ask",
+        "Trigger quick command",
+        "First",
+        "Second",
+      ]);
+    });
+
+    it("executes the Copilot command behind the clicked submenu item", () => {
+      jest.mocked(getCachedCustomCommands).mockReturnValue([]);
+      const executeCommandById = jest.fn();
+      const menu = new TestMenu();
+
+      registerContextMenu(
+        menu as unknown as Menu,
+        { commands: { executeCommandById } } as unknown as App
       );
-      expect(publishItem?.icon).toBe(COMMAND_ICONS[COMMAND_IDS.PUBLISH_FILE_TO_SYMPOSIUM]);
 
-      publishItem?.click?.();
-
-      expect(publish).toHaveBeenCalledWith(editorFile);
-      expect(publish).not.toHaveBeenCalledWith(activeFile);
-    });
-
-    it.each([
-      ["no active file", null],
-      ["a non-Markdown file", markdownFile("Notes/Diagram.canvas")],
-    ])("omits the editor action for %s", (_case, activeFile) => {
-      const menu = new TestMenu();
-      const app = {
-        commands: { executeCommandById: jest.fn() },
-        workspace: { getActiveFile: jest.fn(() => activeFile) },
-      } as unknown as App;
-
-      registerContextMenu(menu as unknown as Menu, app, activeFile, jest.fn());
-
-      const copilotMenu = findItem(menu, "Copilot")?.submenu;
-      expect(
-        findItem(copilotMenu!, COMMAND_NAMES[COMMAND_IDS.PUBLISH_FILE_TO_SYMPOSIUM])
-      ).toBeUndefined();
-    });
-  });
-
-  describe("registerSymposiumFileMenu()", () => {
-    it("registers one file-menu handler that publishes the exact clicked Markdown file", () => {
-      const activeFile = markdownFile("Notes/Active.md");
-      const clickedFile = markdownFile("Notes/Clicked.md");
-      const eventRef = {} as EventRef;
-      const publish = jest.fn().mockResolvedValue(undefined);
-      let fileMenuHandler: ((menu: Menu, file: TFile) => void) | undefined;
-      const on = jest.fn((eventName: string, handler: typeof fileMenuHandler) => {
-        expect(eventName).toBe("file-menu");
-        fileMenuHandler = handler;
-        return eventRef;
-      });
-      const registerEvent = jest.fn();
-      const host = {
-        app: {
-          workspace: {
-            getActiveFile: jest.fn(() => activeFile),
-            on,
-          },
-        } as unknown as App,
-        registerEvent,
-      };
-
-      registerSymposiumFileMenu(host, publish);
-
-      expect(on).toHaveBeenCalledTimes(1);
-      expect(registerEvent).toHaveBeenCalledWith(eventRef);
-
-      const menu = new TestMenu();
-      fileMenuHandler?.(menu as unknown as Menu, clickedFile);
-      const publishItem = findItem(menu, COMMAND_NAMES[COMMAND_IDS.PUBLISH_FILE_TO_SYMPOSIUM]);
-      publishItem?.click?.();
-
-      expect(publish).toHaveBeenCalledWith(clickedFile);
-      expect(publish).not.toHaveBeenCalledWith(activeFile);
-    });
-
-    it.each([
-      ["a folder", folder("Notes")],
-      ["a non-Markdown file", markdownFile("Notes/Diagram.canvas")],
-    ])("omits the file-menu action for %s", (_case, file) => {
-      let fileMenuHandler: ((menu: Menu, file: TFile | TFolder) => void) | undefined;
-      const host = {
-        app: {
-          workspace: {
-            on: jest.fn((_eventName: string, handler: typeof fileMenuHandler) => {
-              fileMenuHandler = handler;
-              return {};
-            }),
-          },
-        } as unknown as App,
-        registerEvent: jest.fn(),
-      };
-      const menu = new TestMenu();
-
-      registerSymposiumFileMenu(host, jest.fn());
-      fileMenuHandler?.(menu as unknown as Menu, file);
-
-      expect(menu.items).toHaveLength(0);
+      findItem(findItem(menu, "Copilot")!.submenu!, "Quick Ask")?.click?.();
+      expect(executeCommandById).toHaveBeenCalledWith(`copilot:${COMMAND_IDS.TRIGGER_QUICK_ASK}`);
     });
   });
 });

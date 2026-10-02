@@ -2,76 +2,36 @@ import { logWarn } from "@/logger";
 import { joinPosix } from "@/utils/pathUtils";
 import { computeDirHash, type DirHashFs } from "./dirHash";
 import { parseSkillFile, SkillFormatError, type ParsedSkillFile } from "./skillFormat";
-import type { BackendId } from "./types";
+import type { BackendId, RejectedSkill, SkillDiscoveryResult } from "./types";
 
-/**
- * Subset of `node:fs` consumed by {@link discoverProjectSkills}. Mirrors
- * the shape used by `importDetector.ts` (the predecessor) plus the read
- * surface needed to parse SKILL.md and fingerprint the dir contents.
- *
- * Paths are absolute throughout. Modeled as a leaf adapter so unit tests
- * can supply an in-memory FS without touching disk (see AGENTS.md
- * "Avoiding Deep Dependency Chains in Tests").
- */
 export interface ProjectDiscoveryFs extends DirHashFs {
-  /** Whether the path exists (any kind). */
   exists(absPath: string): Promise<boolean>;
 }
 
-/**
- * One project-managed skill candidate discovered under a single agent's
- * `<vault>/.<agent>/skills/<name>/` directory. The merge layer
- * (`mergeDiscovery.ts`) folds candidates with the same `name` + same
- * `contentHash` into a single mirrored row.
- */
 export interface ProjectSkillCandidate {
-  /** Source agent — the folder owning this real directory. */
   agent: BackendId;
-  /** Skill name (parent directory basename, also `frontmatter.name`). */
   name: string;
-  /** Absolute path to the SKILL.md file. */
   filePath: string;
-  /** Absolute path to the skill directory. */
   dirPath: string;
-  /** Recursive content hash of the directory; drives the mirrored-merge rule. */
   contentHash: string;
-  /** Parsed SKILL.md (frontmatter + body). */
   parsed: ParsedSkillFile;
 }
 
-/** Options bag for {@link discoverProjectSkills}. All paths are absolute. */
+type ProjectDiscoveryEntry = ProjectSkillCandidate | RejectedSkill | null;
+
 export interface DiscoverProjectSkillsOptions {
-  /** Absolute path to the vault root. */
   vaultRootAbsPath: string;
-  /**
-   * Project-relative POSIX path of each registered agent's skills
-   * directory (sourced from `BackendDescriptor.skillsProjectDir`).
-   */
   agentDirsProjectRel: Readonly<Record<BackendId, string>>;
-  /** Injected FS adapter. */
   fs: ProjectDiscoveryFs;
 }
 
-/**
- * Walk every registered agent's `.<agent>/skills/` directory and return
- * every immediate subdirectory that:
- *
- *   - Is a real directory (not a symlink — symlinks pointing into the
- *     canonical store are reconciliation links; symlinks pointing
- *     elsewhere are user-owned and already covered by reconciliation).
- *   - Contains a `SKILL.md` that parses against the Agent Skills spec.
- *
- * Each result carries the parsed frontmatter + a recursive content hash
- * so the merge layer can collapse identical duplicates across agents
- * into one row. Parse failures are skipped with a single `logWarn`
- * (mirrors `discoverManagedSkills` behavior).
- */
 export async function discoverProjectSkills(
   options: DiscoverProjectSkillsOptions
-): Promise<ProjectSkillCandidate[]> {
+): Promise<SkillDiscoveryResult<ProjectSkillCandidate>> {
   const { vaultRootAbsPath, agentDirsProjectRel, fs } = options;
 
-  const results: ProjectSkillCandidate[] = [];
+  const accepted: ProjectSkillCandidate[] = [];
+  const rejected: RejectedSkill[] = [];
 
   await Promise.all(
     Object.entries(agentDirsProjectRel).map(async ([agent, projectRel]) => {
@@ -90,18 +50,13 @@ export async function discoverProjectSkills(
       }
 
       const candidates = await Promise.all(
-        entries.sort().map(async (name) => {
+        entries.sort().map(async (name): Promise<ProjectDiscoveryEntry> => {
           const entryAbs = joinPosix(agentDirAbs, name);
 
-          // Symlinks at the top level — never include. Reconciliation
-          // already handles user-owned symlinks; symlinks into the
-          // canonical store are represented by the canonical row.
           let isLink = false;
           try {
             isLink = await fs.isSymlink(entryAbs);
-          } catch {
-            // Treat unreadable lstat as "not a link" and let isDirectory decide.
-          }
+          } catch {}
           if (isLink) return null;
 
           if (!(await safeIsDirectory(fs, entryAbs))) return null;
@@ -120,13 +75,19 @@ export async function discoverProjectSkills(
           try {
             parsed = parseSkillFile(content, name);
           } catch (err) {
-            const reason =
-              err instanceof SkillFormatError
-                ? err.message
-                : err instanceof Error
-                  ? err.message
-                  : String(err);
+            const reason = err instanceof Error ? err.message : String(err);
             logWarn(`[skills] Skipping ${skillMd}: ${reason}`);
+            // Hidden agent folders are not indexed by Obsidian, so Settings must keep their
+            // format failures to offer external-editor recovery. https://github.com/Brevilabs/obsidian-copilot-private/issues/166
+            if (err instanceof SkillFormatError) {
+              return {
+                name,
+                filePath: skillMd,
+                dirPath: entryAbs,
+                reason,
+                offendingText: err.offendingText,
+              };
+            }
             return null;
           }
 
@@ -144,13 +105,15 @@ export async function discoverProjectSkills(
         })
       );
 
-      for (const candidate of candidates) {
-        if (candidate !== null) results.push(candidate);
+      for (const result of candidates) {
+        if (result === null) continue;
+        if ("reason" in result) rejected.push(result);
+        else accepted.push(result);
       }
     })
   );
 
-  return results;
+  return { accepted, rejected };
 }
 
 async function safeExists(fs: ProjectDiscoveryFs, abs: string): Promise<boolean> {

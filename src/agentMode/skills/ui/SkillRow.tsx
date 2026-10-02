@@ -1,3 +1,4 @@
+import { SkillRowLayout } from "./SkillRowLayout";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,43 +28,15 @@ import { AgentIconButton } from "./AgentIconButton";
 
 interface SkillRowProps {
   skill: Skill;
-  /** Brand projection of every registered backend, supplied by the host. */
   agents: ReadonlyArray<AgentBrand>;
-  /**
-   * Project-relative skills directory for each registered backend, sourced
-   * from `BackendDescriptor.skillsProjectDir`. Used for the location
-   * indicator and to build the migration action-list paths.
-   */
   agentDirsProjectRel: Readonly<Record<BackendId, string>>;
-  /** Open the SKILL.md file in Obsidian's editor. */
   onEditSkillMd?: () => void;
-  /** Open the per-skill properties modal. */
   onEditProperties?: () => void;
-  /** Reveal the canonical skill folder in the file explorer. */
   onRevealInVault?: () => void;
-  /** Open the delete-confirmation dialog. */
   onDelete?: () => void;
-  /**
-   * DOM container for the overflow menu's Radix portal. Must point to a node
-   * inside Obsidian's Settings modal so the menu lives in the modal's focus
-   * scope — otherwise Radix's focus-follows-hover fails (focus calls don't
-   * land on the menu items) and the existing `focus:` highlight styles never
-   * apply, making the menu look dead on mouseover.
-   */
   containerRef: React.RefObject<HTMLDivElement>;
 }
 
-/**
- * Single row in the Tidy list — name + chips + description on the left,
- * three brand-coloured agent toggles in the middle, ⋯ overflow on the right.
- * Visual contract mirrors `Skills Tab Flows.html` §D + §E.
- *
- * Toggle wiring follows the §7 decision tree of the Skills Discovery
- * Redesign: canonical skills toggle directly; project-managed skills
- * route through the migration confirm dialog (or just delete a duplicate
- * folder, depending on the case). All FS work is delegated to
- * {@link SkillManager}.
- */
 export const SkillRow: React.FC<SkillRowProps> = ({
   skill,
   agents,
@@ -81,10 +54,6 @@ export const SkillRow: React.FC<SkillRowProps> = ({
   const displayName = formatSkillDisplayName(skill);
   const locationLabel = buildLocationLabel(skill, agentDirsProjectRel);
 
-  // Pure function of `skill.location` — when the skill is mirrored across
-  // 2+ agent folders, the edit/rename/delete actions are unsafe (any one
-  // edit would silently diverge the copies) and lock down to a single
-  // "Migrate to shared folder" entry.
   const lockdownCount = skill.location.kind === "project" ? skill.location.agentDirs.length : 0;
   const mirroredLockdown = lockdownCount >= 2;
   const lockdownTooltip = mirroredLockdown
@@ -93,11 +62,6 @@ export const SkillRow: React.FC<SkillRowProps> = ({
       `Migrate it to your shared folder first to enable edits.`
     : null;
 
-  /**
-   * Compose the §8 migration action list for any toggle-driven variant.
-   * Centralised here (vs. inside the modal) so SkillRow stays the single
-   * owner of "what is the current FS state and where is everything moving".
-   */
   const handleToggleAgent = React.useCallback(
     async (agent: BackendId): Promise<void> => {
       const manager = SkillManager.getInstance();
@@ -143,7 +107,6 @@ export const SkillRow: React.FC<SkillRowProps> = ({
           return;
         }
         default: {
-          // Exhaustive check — ToggleDecision union is closed.
           const _exhaustive: never = decision;
           void _exhaustive;
           return;
@@ -153,7 +116,6 @@ export const SkillRow: React.FC<SkillRowProps> = ({
     [agents, agentDirsProjectRel, app, enabledAgents, skill]
   );
 
-  /** Open the proactive-consolidate migration dialog from the overflow menu. */
   const handleProactiveConsolidate = React.useCallback(() => {
     void runProactiveConsolidate({
       app,
@@ -163,107 +125,98 @@ export const SkillRow: React.FC<SkillRowProps> = ({
   }, [agentDirsProjectRel, app, skill]);
 
   return (
-    <div
-      data-menu-open={menuOpen ? "true" : undefined}
-      className={cn(
-        "tw-grid tw-grid-cols-[1fr_auto_auto] tw-items-center tw-gap-4",
-        "tw-rounded-md tw-border tw-border-solid tw-border-border tw-bg-primary",
-        "tw-px-3.5 tw-py-2.5",
-        "tw-transition-colors hover:tw-border-border-hover hover:tw-bg-primary-alt",
-        "data-[menu-open=true]:tw-bg-primary-alt data-[menu-open=true]:tw-border-normal/100"
-      )}
-    >
-      {/* Name + description column */}
-      <div className="tw-min-w-0">
-        <div className="tw-flex tw-items-center tw-gap-2">
-          <span className="tw-text-ui-small tw-font-semibold tw-text-normal">{displayName}</span>
+    <SkillRowLayout
+      name={displayName}
+      description={skill.description}
+      menuOpen={menuOpen}
+      annotations={
+        <>
           {chips.map((chip) => (
             <Chip key={chip.label} variant={chip.variant} label={chip.label} />
           ))}
           {locationLabel !== null && (
             <span className="tw-truncate tw-text-ui-smaller tw-text-faint">{locationLabel}</span>
           )}
+        </>
+      }
+      controls={
+        <div className="tw-flex tw-items-center tw-gap-1.5">
+          {agents.map((agent) => {
+            const enabled = enabledAgents.has(agent.id);
+            return (
+              <AgentIconButton
+                key={agent.id}
+                Icon={agent.Icon}
+                agentId={agent.id}
+                agentName={agent.displayName}
+                enabled={enabled}
+                onClick={() => {
+                  void handleToggleAgent(agent.id);
+                }}
+                title={tooltipFor(agent.displayName, enabled)}
+              />
+            );
+          })}
         </div>
-        {skill.description.length > 0 && (
-          <div className="tw-mt-0.5 tw-max-w-[540px] tw-truncate tw-text-ui-smaller tw-text-muted">
-            {skill.description}
-          </div>
-        )}
-      </div>
-
-      {/* Agent toggle row */}
-      <div className="tw-flex tw-items-center tw-gap-1.5">
-        {agents.map((agent) => {
-          const enabled = enabledAgents.has(agent.id);
-          return (
-            <AgentIconButton
-              key={agent.id}
-              Icon={agent.Icon}
-              agentId={agent.id}
-              agentName={agent.displayName}
-              enabled={enabled}
-              onClick={() => {
-                void handleToggleAgent(agent.id);
-              }}
-              title={tooltipFor(agent.displayName, enabled)}
-            />
-          );
-        })}
-      </div>
-
-      {/* Overflow popover — Edit / Properties / Reveal / Delete (or Migrate when locked down).
-          modal={false} keeps Radix from engaging react-remove-scroll's body scroll lock:
-          "Reveal in vault" moves focus into the file-explorer leaf, which can interrupt the
-          menu's close/unmount and strand the document-level wheel listener, killing scroll
-          everywhere until restart (issue #118). The sibling menu in AgentTabStrip does the same. */}
-      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen} modal={false}>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon"
-            title="More actions"
-            aria-label={`More actions for ${skill.name}`}
+      }
+      actions={
+        // Non-modal: a modal menu can strand Radix's wheel listener after Reveal in vault.
+        // https://github.com/logancyang/obsidian-copilot-preview/issues/118
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen} modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              title="More actions"
+              aria-label={`More actions for ${skill.name}`}
+            >
+              <MoreVertical className="tw-size-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="tw-min-w-[180px]"
+            container={containerRef.current}
           >
-            <MoreVertical className="tw-size-4" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="end"
-          className="tw-min-w-[180px]"
-          container={containerRef.current}
-        >
-          {mirroredLockdown ? (
-            <MirroredLockdownMenu
-              tooltip={lockdownTooltip ?? ""}
-              onMigrate={handleProactiveConsolidate}
-              onRevealInVault={onRevealInVault}
-            />
-          ) : (
-            <>
-              <DropdownMenuItem className="tw-gap-2.5 tw-text-ui-small" onSelect={onEditSkillMd}>
-                <Edit3 className="tw-size-3.5" aria-hidden="true" />
-                Edit SKILL.md
-              </DropdownMenuItem>
-              <DropdownMenuItem className="tw-gap-2.5 tw-text-ui-small" onSelect={onEditProperties}>
-                <Settings className="tw-size-3.5" aria-hidden="true" />
-                Properties…
-              </DropdownMenuItem>
-              <DropdownMenuItem className="tw-gap-2.5 tw-text-ui-small" onSelect={onRevealInVault}>
-                <FolderSearch className="tw-size-3.5" aria-hidden="true" />
-                Reveal in vault
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                className="tw-gap-2.5 tw-text-ui-small tw-text-error focus:tw-bg-modifier-error-rgb/15 focus:tw-text-error"
-                onSelect={onDelete}
-              >
-                <Trash2 className="tw-size-3.5" aria-hidden="true" />
-                Delete…
-              </DropdownMenuItem>
-            </>
-          )}
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
+            {mirroredLockdown ? (
+              <MirroredLockdownMenu
+                tooltip={lockdownTooltip ?? ""}
+                onMigrate={handleProactiveConsolidate}
+                onRevealInVault={onRevealInVault}
+              />
+            ) : (
+              <>
+                <DropdownMenuItem className="tw-gap-2.5 tw-text-ui-small" onSelect={onEditSkillMd}>
+                  <Edit3 className="tw-size-3.5" aria-hidden="true" />
+                  Edit SKILL.md
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="tw-gap-2.5 tw-text-ui-small"
+                  onSelect={onEditProperties}
+                >
+                  <Settings className="tw-size-3.5" aria-hidden="true" />
+                  Properties…
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="tw-gap-2.5 tw-text-ui-small"
+                  onSelect={onRevealInVault}
+                >
+                  <FolderSearch className="tw-size-3.5" aria-hidden="true" />
+                  Reveal in vault
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="tw-gap-2.5 tw-text-ui-small tw-text-error focus:tw-bg-modifier-error-rgb/15 focus:tw-text-error"
+                  onSelect={onDelete}
+                >
+                  <Trash2 className="tw-size-3.5" aria-hidden="true" />
+                  Delete…
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      }
+    />
   );
 };
 
@@ -272,11 +225,6 @@ interface ChipSpec {
   label: string;
 }
 
-/**
- * Build the "in .claude/skills" / "mirrored in .claude, .codex" location
- * indicator. Returns `null` for canonical skills (no indicator needed —
- * canonical is the default home).
- */
 function buildLocationLabel(
   skill: Skill,
   agentDirsProjectRel: Readonly<Record<BackendId, string>>
@@ -288,7 +236,6 @@ function buildLocationLabel(
     const rel = agentDirsProjectRel[dirs[0]];
     return rel !== undefined ? `in ${rel}` : null;
   }
-  // Mirrored — list each agent's parent dot-folder (e.g. `.claude, .codex`).
   const parents = dirs
     .map((id) => agentDirsProjectRel[id])
     .filter((p): p is string => typeof p === "string")
@@ -297,26 +244,16 @@ function buildLocationLabel(
   return `mirrored in ${parents.join(", ")}`;
 }
 
-/**
- * Strip the `/skills` suffix from a project-relative agent dir so the
- * mirrored indicator stays short (`.claude/skills` → `.claude`).
- */
 function parentDotFolder(rel: string): string {
   const trimmed = rel.replace(/\/+$/, "");
   const idx = trimmed.lastIndexOf("/");
   return idx === -1 ? trimmed : trimmed.slice(0, idx);
 }
 
-/** Look up an agent's display name (Claude/Codex/opencode) by id. */
 function agentDisplayName(agents: ReadonlyArray<AgentBrand>, id: BackendId): string {
   return agents.find((a) => a.id === id)?.displayName ?? id;
 }
 
-/**
- * Translate Claude-only frontmatter flags into the small inline chips
- * shown next to the skill name. Order is meaningful — warnings come
- * before informational chips.
- */
 function computeChips(skill: Skill): ChipSpec[] {
   const chips: ChipSpec[] = [];
   if (skill.disableModelInvocation === true) {
@@ -331,23 +268,14 @@ function computeChips(skill: Skill): ChipSpec[] {
   return chips;
 }
 
-/** Trim model strings down so the chip stays single-line in narrow panels. */
 function truncateModel(model: string): string {
   return model.length <= 22 ? model : `${model.slice(0, 21)}…`;
 }
 
-/** Tooltip copy for a single agent icon in its current state. */
 function tooltipFor(agentName: string, enabled: boolean): string {
   return enabled ? `Enabled for ${agentName}` : `Disabled for ${agentName} · click to enable`;
 }
 
-/**
- * Overflow menu rendered when `skill.location` is project-mirrored across
- * two or more agent folders. The four normal edit/rename/delete entries
- * are intentionally inert (clicks do nothing) with `aria-disabled="true"`
- * and a Radix tooltip explaining the lockdown. Migrate-to-shared and
- * Reveal-in-vault stay enabled.
- */
 const MirroredLockdownMenu: React.FC<{
   tooltip: string;
   onMigrate: () => void;
@@ -410,7 +338,6 @@ const MirroredLockdownMenu: React.FC<{
   );
 };
 
-/** Inline "model-invoke off" / "hidden from /" / "claude · sonnet-4" pill. */
 const Chip: React.FC<{ variant: ChipSpec["variant"]; label: string }> = ({ variant, label }) => {
   const base = cn(
     "tw-rounded-sm tw-border tw-px-1.5 tw-py-0.5 tw-font-mono tw-text-smallest tw-font-medium tw-uppercase tw-tracking-wide"
@@ -434,18 +361,9 @@ interface RunMigrationArgs {
   action: "expandToNewAgent" | "disableLastAgent";
 }
 
-/**
- * Open the migration confirm dialog (or skip it when the suppress flag is
- * set) for a toggle-driven migration. The migration FS work happens in
- * SkillManager; this function is only responsible for building the
- * action-list strings and wiring up the modal callback.
- */
 function runMigration(args: RunMigrationArgs): Promise<void> {
   const manager = SkillManager.getInstance();
   const canonicalFolderRel = resolveCanonicalSkillsFolderRel();
-  // resolveCanonicalNameForMigration → suffixOnCollision throws for
-  // pathologically long names that can't be suffixed under the 64-char cap.
-  // Surface it instead of letting the throw escape into an unhandled rejection.
   let resolvedName: string;
   try {
     resolvedName = manager.resolveCanonicalNameForMigration(args.skill.name);
@@ -472,11 +390,6 @@ function runMigration(args: RunMigrationArgs): Promise<void> {
       args.action === "expandToNewAgent" ? args.targetAgent : null,
       args.action
     );
-    // `eperm` is not a real failure: the skill was already moved to canonical
-    // and only the symlink fanout is pending (reconciliation heals it once
-    // Developer Mode is on, and the EPERM banner explains why). Treat it as
-    // success so the user doesn't see a contradictory "Could not migrate"
-    // toast while the row flips to a working canonical skill.
     if (!result.ok && result.reason !== "eperm") {
       new Notice(`Could not migrate ${args.skill.name}: ${result.reason}`);
       return;
@@ -527,11 +440,6 @@ interface RunProactiveConsolidateArgs {
   agentDirsProjectRel: Readonly<Record<BackendId, string>>;
 }
 
-/**
- * Open the proactive-consolidate variant of the migration confirm dialog
- * — triggered from the overflow menu's "Migrate to shared folder" entry
- * for a project-mirrored skill.
- */
 function runProactiveConsolidate(args: RunProactiveConsolidateArgs): Promise<void> {
   if (args.skill.location.kind !== "project" || args.skill.location.agentDirs.length < 2) {
     return Promise.resolve();
@@ -562,9 +470,6 @@ function runProactiveConsolidate(args: RunProactiveConsolidateArgs): Promise<voi
 
   const commit = async (suppressFuture: boolean): Promise<void> => {
     const result = await manager.consolidateMirroredSkill(args.skill, suppressFuture);
-    // `eperm` means the consolidation completed on disk (canonical copy
-    // written, duplicates removed) and only the symlinks are pending — the
-    // banner explains it. Treat as success, like the toggle path above.
     if (!result.ok && result.reason !== "eperm") {
       new Notice(`Could not consolidate ${args.skill.name}: ${result.reason}`);
       return;
@@ -599,11 +504,6 @@ interface BuildLinesArgs {
   variant: MigrateConfirmVariant;
 }
 
-/**
- * Build the "Copilot will:" action lines for a toggle-driven migration.
- * The shape varies by variant — see §8 of the design doc for the
- * canonical action lists.
- */
 function buildToggleMigrationActionLines(args: BuildLinesArgs): MigrateActionLine[] {
   const { skill, canonicalFolderRel, agentDirsProjectRel, targetAgent, resolvedName, variant } =
     args;
@@ -616,13 +516,11 @@ function buildToggleMigrationActionLines(args: BuildLinesArgs): MigrateActionLin
 
   const canonicalDest = `<vault>/${canonicalFolderRel}/${resolvedName}/`;
 
-  // Move the representative source into canonical.
   out.push({
     verb: "Move",
     detail: `<vault>/${repDir}/${skill.name}/   →   ${canonicalDest}`,
   });
 
-  // Delete the other duplicate sources (mirrored case only).
   for (const agent of sourceDirs.slice(1)) {
     const dir = agentDirsProjectRel[agent];
     if (dir === undefined) continue;
@@ -634,7 +532,6 @@ function buildToggleMigrationActionLines(args: BuildLinesArgs): MigrateActionLin
   }
 
   if (variant === "disable-last-agent") {
-    // The body explicitly says "Not create any shortcuts (no agents enabled)."
     out.push({
       verb: "Not create",
       detail: "any shortcuts (no agents enabled).",
@@ -642,7 +539,6 @@ function buildToggleMigrationActionLines(args: BuildLinesArgs): MigrateActionLin
     return out;
   }
 
-  // Create shortcuts for every existing source agent + the new target.
   const finalAgents = sourceDirs.includes(targetAgent) ? sourceDirs : [...sourceDirs, targetAgent];
   for (const agent of finalAgents) {
     const dir = agentDirsProjectRel[agent];
@@ -663,11 +559,6 @@ interface BuildConsolidateLinesArgs {
   resolvedName: string;
 }
 
-/**
- * Build the "Copilot will:" action lines for the proactive-consolidate
- * variant. The skill stays enabled for every agent it already lives
- * under — no new toggle.
- */
 function buildConsolidateActionLines(args: BuildConsolidateLinesArgs): MigrateActionLine[] {
   const { skill, canonicalFolderRel, agentDirsProjectRel, resolvedName } = args;
   if (skill.location.kind !== "project") return [];
@@ -702,10 +593,6 @@ function buildConsolidateActionLines(args: BuildConsolidateLinesArgs): MigrateAc
   return out;
 }
 
-/**
- * Resolve the currently configured canonical skills folder (vault-relative),
- * falling back to the spec default when settings are missing.
- */
 function resolveCanonicalSkillsFolderRel(): string {
   return getEffectiveSkillsFolder();
 }

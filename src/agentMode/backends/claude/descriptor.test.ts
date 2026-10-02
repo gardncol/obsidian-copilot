@@ -1,8 +1,14 @@
+import { signOutFromClaude } from "./claudeAuth";
+jest.mock("./claudeAuth", () => ({ signOutFromClaude: jest.fn() }));
+
 import type { AgentSession } from "@/agentMode/session/AgentSession";
-import type { BackendState, InstallState } from "@/agentMode/session/types";
-import { resetSettings, type CopilotSettings } from "@/settings/model";
+import type { BackendState } from "@/agentMode/session/types";
+import { resetSettings, setSettings, type CopilotSettings } from "@/settings/model";
+import { MIYO_SEARCH_FOLDER_ENV, MIYO_SEARCH_SCOPE_ENV } from "@/builtinSkills/builtinSkills";
+import { __resetVaultBaseCache } from "@/utils/vaultPath";
+import { FileSystemAdapter, type App } from "obsidian";
 import { resolveClaudeBinary } from "./claudeBinaryResolver";
-import { claudeCompatibilityStore } from "./claudeCompatibilityStore";
+import { probeClaudeVersion } from "./claudeVersion";
 import {
   ClaudeBackendDescriptor,
   getClaudeInstallState,
@@ -17,26 +23,15 @@ jest.mock("./claudeBinaryResolver", () => ({
   resolveClaudeBinary: jest.fn(),
 }));
 
-jest.mock("./claudeCompatibilityStore", () => ({
-  claudeCompatibilityStore: {
-    get: jest.fn(),
-    refresh: jest.fn(),
-    subscribe: jest.fn(),
-  },
+jest.mock("./claudeVersion", () => ({
+  ...jest.requireActual("./claudeVersion"),
+  probeClaudeVersion: jest.fn(),
 }));
 
 const mockResolveClaudeBinary = resolveClaudeBinary as jest.MockedFunction<
   typeof resolveClaudeBinary
 >;
-const mockGetCompatibility = claudeCompatibilityStore.get as jest.MockedFunction<
-  typeof claudeCompatibilityStore.get
->;
-const mockRefreshCompatibility = claudeCompatibilityStore.refresh as jest.MockedFunction<
-  typeof claudeCompatibilityStore.refresh
->;
-const mockSubscribeCompatibility = claudeCompatibilityStore.subscribe as jest.MockedFunction<
-  typeof claudeCompatibilityStore.subscribe
->;
+const mockProbeClaudeVersion = probeClaudeVersion as jest.MockedFunction<typeof probeClaudeVersion>;
 
 function settingsWithClaudeRuntime(options: {
   path?: string;
@@ -54,84 +49,247 @@ function settingsWithClaudeRuntime(options: {
   } as unknown as CopilotSettings;
 }
 
-describe("claude descriptor", () => {
+describe("descriptor", () => {
   beforeEach(() => {
     jest.resetAllMocks();
   });
 
+  describe("ClaudeBackendDescriptor.auth.getProbeKey()", () => {
+    afterEach(() => jest.restoreAllMocks());
+    it.each(["CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])(
+      "https://github.com/Brevilabs/obsidian-copilot-private/issues/379 invalidates authentication when effective %s changes without exposing secrets",
+      (variable) => {
+        mockResolveClaudeBinary.mockReturnValue("/cli");
+        const original = ClaudeBackendDescriptor.auth.getProbeKey!(settingsWithClaudeRuntime({}));
+        const changed = ClaudeBackendDescriptor.auth.getProbeKey!(
+          settingsWithClaudeRuntime({ envOverrides: { [variable]: "private-fixture-value" } })
+        );
+        expect(changed).not.toBe(original);
+        expect(changed).toMatch(/^[a-f0-9]{64}$/);
+        expect(changed).not.toContain("private-fixture-value");
+      }
+    );
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/379 invalidates a newly resolved CLI", () => {
+      mockResolveClaudeBinary.mockReturnValueOnce("/first/cli").mockReturnValueOnce("/second/cli");
+      const settings = settingsWithClaudeRuntime({});
+      expect(ClaudeBackendDescriptor.auth.getProbeKey!(settings)).not.toBe(
+        ClaudeBackendDescriptor.auth.getProbeKey!(settings)
+      );
+    });
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/379 preserves identity when override order or provenance changes without changing the effective profile", () => {
+      mockResolveClaudeBinary.mockReturnValue("/cli");
+      jest.replaceProperty(process, "env", {
+        CLAUDE_CONFIG_DIR: "/profile",
+        ANTHROPIC_API_KEY: "private-fixture-key",
+      });
+      const inherited = ClaudeBackendDescriptor.auth.getProbeKey!(settingsWithClaudeRuntime({}));
+      const overridden = ClaudeBackendDescriptor.auth.getProbeKey!(
+        settingsWithClaudeRuntime({
+          envOverrides: { ANTHROPIC_API_KEY: "private-fixture-key", CLAUDE_CONFIG_DIR: "/profile" },
+        })
+      );
+      expect(inherited).toBe(overridden);
+    });
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/379 invalidates an inherited credential change", () => {
+      mockResolveClaudeBinary.mockReturnValue("/cli");
+      jest.replaceProperty(process, "env", { ANTHROPIC_API_KEY: "first-fixture" });
+      const original = ClaudeBackendDescriptor.auth.getProbeKey!(settingsWithClaudeRuntime({}));
+      jest.replaceProperty(process, "env", { ANTHROPIC_API_KEY: "second-fixture" });
+      expect(ClaudeBackendDescriptor.auth.getProbeKey!(settingsWithClaudeRuntime({}))).not.toBe(
+        original
+      );
+    });
+  });
+
+  describe("ClaudeBackendDescriptor.auth.signOut()", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/379 signs out using the session CLI and profile and preserves the resulting account label", async () => {
+      mockResolveClaudeBinary.mockReturnValue("/custom/claude");
+      jest
+        .mocked(signOutFromClaude)
+        .mockResolvedValue({ loggedIn: true, label: "zero@example.com (max)" });
+      const options = { signal: new AbortController().signal };
+      await expect(
+        ClaudeBackendDescriptor.auth.signOut!(
+          settingsWithClaudeRuntime({ envOverrides: { CLAUDE_CONFIG_DIR: "/custom profile" } }),
+          options
+        )
+      ).resolves.toEqual({ signedIn: true, label: "zero@example.com (max)" });
+      expect(signOutFromClaude).toHaveBeenCalledWith(
+        "/custom/claude",
+        expect.objectContaining({ CLAUDE_CONFIG_DIR: "/custom profile" }),
+        options
+      );
+    });
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/379 does not claim credentials were removed when the CLI is missing", async () => {
+      mockResolveClaudeBinary.mockReturnValue(null);
+      await expect(
+        ClaudeBackendDescriptor.auth.signOut!(settingsWithClaudeRuntime({}))
+      ).rejects.toThrow("Install Claude Code before signing out");
+      expect(signOutFromClaude).not.toHaveBeenCalled();
+    });
+  });
+  describe("ClaudeBackendDescriptor.createBackendProcess()", () => {
+    afterEach(() => {
+      resetSettings();
+      __resetVaultBaseCache();
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/121 gives global and Project sessions the same protected active-vault Miyo identity", async () => {
+      resetSettings();
+      __resetVaultBaseCache();
+      mockResolveClaudeBinary.mockReturnValue("/usr/local/bin/claude");
+      setSettings({
+        miyoSearchAll: false,
+        agentMode: {
+          byok: {},
+          activeBackend: "claude",
+          debugFullFrames: false,
+          notificationSound: false,
+          notificationSoundId: "piano",
+          welcomeDismissed: false,
+          skills: { folder: "copilot/skills" },
+          backends: {
+            claude: {
+              envOverrides: {
+                [MIYO_SEARCH_SCOPE_ENV]: "unrestricted",
+                [MIYO_SEARCH_FOLDER_ENV]: "other-vault",
+              },
+            },
+          },
+        },
+      });
+      const adapter = Object.create(FileSystemAdapter.prototype) as FileSystemAdapter;
+      adapter.getBasePath = () => "/active-vault";
+      const app = { vault: { adapter, getName: () => "active-vault" } } as unknown as App;
+
+      const process = ClaudeBackendDescriptor.createBackendProcess({
+        plugin: {} as never,
+        app,
+        clientVersion: "4.0.0",
+        descriptor: ClaudeBackendDescriptor,
+      }) as unknown as {
+        opts: {
+          getEnvOverrides?: () => Record<string, string> | undefined;
+          getManagedEnv?: () => Promise<Readonly<Record<string, string>>>;
+        };
+      };
+
+      expect(process.opts.getEnvOverrides?.()).toEqual({});
+      await expect(process.opts.getManagedEnv?.()).resolves.toEqual(
+        expect.objectContaining({
+          [MIYO_SEARCH_SCOPE_ENV]: "current",
+          [MIYO_SEARCH_FOLDER_ENV]: "active-vault",
+        })
+      );
+    });
+  });
+
   describe("getClaudeInstallState()", () => {
-    it("returns absent without consulting compatibility state when no executable resolves", () => {
+    it("returns a stable absent state when no executable resolves", () => {
       mockResolveClaudeBinary.mockReturnValue(null);
 
       const first = getClaudeInstallState(settingsWithClaudeRuntime({}));
 
       expect(first).toEqual({ kind: "absent" });
       expect(getClaudeInstallState(settingsWithClaudeRuntime({}))).toBe(first);
-      expect(mockGetCompatibility).not.toHaveBeenCalled();
     });
 
-    it("reads compatibility state using the custom executable and sorted environment identity", () => {
-      const readyState: InstallState = { kind: "ready", source: "custom" };
-      mockResolveClaudeBinary.mockReturnValue("/custom/bin/claude");
-      mockGetCompatibility.mockReturnValue(readyState);
+    it("reports checking for an executable that has not been probed yet", () => {
+      mockResolveClaudeBinary.mockReturnValue("/unprobed/claude");
 
-      const result = getClaudeInstallState(
+      expect(
+        getClaudeInstallState(settingsWithClaudeRuntime({ path: "/unprobed/claude" }))
+      ).toEqual({ kind: "checking", source: "custom" });
+    });
+
+    it("returns the probed state regardless of the order of environment overrides", async () => {
+      mockResolveClaudeBinary.mockReturnValue("/ordered/claude");
+      mockProbeClaudeVersion.mockResolvedValue({ kind: "supported", version: "2.1.206" });
+      await refreshClaudeInstallState(
         settingsWithClaudeRuntime({
-          path: "/custom/bin/claude",
+          path: "/ordered/claude",
           envOverrides: { ZED: "last", ALPHA: "first" },
         })
       );
 
-      expect(result).toBe(readyState);
-      expect(mockGetCompatibility).toHaveBeenCalledWith({
-        cacheKey: 'custom\u0000/custom/bin/claude\u0000[["ALPHA","first"],["ZED","last"]]',
-        path: "/custom/bin/claude",
-        source: "custom",
-        env: expect.objectContaining({ ALPHA: "first", ZED: "last" }),
-      });
+      expect(
+        getClaudeInstallState(
+          settingsWithClaudeRuntime({
+            path: "/ordered/claude",
+            envOverrides: { ALPHA: "first", ZED: "last" },
+          })
+        )
+      ).toEqual({ kind: "ready", source: "custom" });
+    });
+
+    it("reports checking again when the environment overrides change for the same executable", async () => {
+      mockResolveClaudeBinary.mockReturnValue("/env-keyed/claude");
+      mockProbeClaudeVersion.mockResolvedValue({ kind: "supported", version: "2.1.206" });
+      await refreshClaudeInstallState(
+        settingsWithClaudeRuntime({ path: "/env-keyed/claude", envOverrides: { PROFILE: "a" } })
+      );
+
+      expect(
+        getClaudeInstallState(
+          settingsWithClaudeRuntime({ path: "/env-keyed/claude", envOverrides: { PROFILE: "b" } })
+        )
+      ).toEqual({ kind: "checking", source: "custom" });
     });
   });
 
   describe("refreshClaudeInstallState()", () => {
-    it("does not refresh compatibility state when no executable resolves", async () => {
+    it("returns absent without probing when no executable resolves", async () => {
       mockResolveClaudeBinary.mockReturnValue(null);
 
       await expect(refreshClaudeInstallState(settingsWithClaudeRuntime({}), true)).resolves.toEqual(
-        {
-          kind: "absent",
-        }
+        { kind: "absent" }
       );
-      expect(mockRefreshCompatibility).not.toHaveBeenCalled();
+      expect(mockProbeClaudeVersion).not.toHaveBeenCalled();
     });
 
-    it("forces a refresh for the managed executable and returns its new state", async () => {
-      const readyState: InstallState = { kind: "ready", source: "managed" };
+    it("probes the managed executable and publishes a ready state for a supported version", async () => {
       mockResolveClaudeBinary.mockReturnValue("/managed/bin/claude");
-      mockRefreshCompatibility.mockResolvedValue(readyState);
+      mockProbeClaudeVersion.mockResolvedValue({ kind: "supported", version: "2.1.206" });
+      const settings = settingsWithClaudeRuntime({});
 
-      const result = await refreshClaudeInstallState(settingsWithClaudeRuntime({}), true);
+      await expect(refreshClaudeInstallState(settings, true)).resolves.toEqual({
+        kind: "ready",
+        source: "managed",
+      });
+      expect(getClaudeInstallState(settings)).toEqual({ kind: "ready", source: "managed" });
+    });
 
-      expect(result).toBe(readyState);
-      expect(mockRefreshCompatibility).toHaveBeenCalledWith(
-        {
-          cacheKey: "managed\u0000/managed/bin/claude\u0000[]",
-          path: "/managed/bin/claude",
-          source: "managed",
-          env: process.env,
-        },
-        { force: true }
-      );
+    it("reuses the cached state unless a forced refresh is requested", async () => {
+      mockResolveClaudeBinary.mockReturnValue("/forced/claude");
+      mockProbeClaudeVersion.mockResolvedValue({ kind: "supported", version: "2.1.206" });
+      const settings = settingsWithClaudeRuntime({ path: "/forced/claude" });
+
+      await refreshClaudeInstallState(settings);
+      await refreshClaudeInstallState(settings);
+      expect(mockProbeClaudeVersion).toHaveBeenCalledTimes(1);
+
+      await refreshClaudeInstallState(settings, true);
+      expect(mockProbeClaudeVersion).toHaveBeenCalledTimes(2);
     });
   });
 
   describe("subscribeClaudeInstallState()", () => {
-    it("subscribes to compatibility changes and returns the matching unsubscribe function", () => {
+    it("notifies the listener of install state changes until it unsubscribes", async () => {
+      mockResolveClaudeBinary.mockReturnValue("/subscribed/claude");
+      mockProbeClaudeVersion.mockResolvedValue({ kind: "supported", version: "2.1.206" });
       const listener = jest.fn();
-      const unsubscribe = jest.fn();
-      mockSubscribeCompatibility.mockReturnValue(unsubscribe);
+      const unsubscribe = subscribeClaudeInstallState(listener);
 
-      expect(subscribeClaudeInstallState(listener)).toBe(unsubscribe);
-      expect(mockSubscribeCompatibility).toHaveBeenCalledWith(listener);
+      await refreshClaudeInstallState(settingsWithClaudeRuntime({ path: "/subscribed/claude" }));
+      expect(listener).toHaveBeenCalled();
+
+      listener.mockClear();
+      unsubscribe();
+      await refreshClaudeInstallState(
+        settingsWithClaudeRuntime({ path: "/subscribed/claude" }),
+        true
+      );
+      expect(listener).not.toHaveBeenCalled();
     });
   });
 
@@ -157,6 +315,49 @@ describe("claude descriptor", () => {
         applyModelWireId,
       };
     }
+
+    it.each([null, "removed", "high"])(
+      "https://github.com/Brevilabs/obsidian-copilot-private/issues/219 applies a concrete effort for preference %p",
+      async (effort) => {
+        const spy = jest.spyOn(ClaudeBackendDescriptor.wire, "effortConfigFor").mockReturnValue({
+          id: "effort",
+          type: "select",
+          name: "Effort",
+          currentValue: "high",
+          options: [
+            { value: "low", name: "Low" },
+            { value: "high", name: "High" },
+          ],
+        });
+        const setConfigOption = jest.fn();
+        const session = {
+          getState: () => ({
+            model: {
+              current: { baseModelId: "sonnet", effort: "high" },
+              availableModels: [
+                {
+                  baseModelId: "sonnet",
+                  effortOptions: [
+                    { value: "high", label: "High" },
+                    { value: "low", label: "Low" },
+                  ],
+                },
+              ],
+            },
+          }),
+          setConfigOption,
+        } as unknown as AgentSession;
+        try {
+          await ClaudeBackendDescriptor.applySelection(session, { baseModelId: "sonnet", effort });
+          expect(setConfigOption).toHaveBeenCalledWith(
+            "effort",
+            effort === "high" ? "high" : "low"
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      }
+    );
 
     it("uses backend-confirmed startup state when the session is optimistically seeded", async () => {
       const { session, applyModelWireId } = makeSession("sonnet");

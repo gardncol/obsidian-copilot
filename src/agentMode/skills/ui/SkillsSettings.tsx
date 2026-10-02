@@ -1,8 +1,23 @@
+import { availableBuiltinAgents } from "@/agentMode/skills/builtin/reconcileBuiltinSkills";
+import { useBackendInstallStates } from "@/agentMode/session/useBackendInstallStates";
+import { ALL_MANAGED_SKILLS, planManagedBuiltins } from "@/builtinSkills/builtinSkills";
+import { parseSkillFile } from "@/agentMode/skills/skillFormat";
+import { BuiltinSkillsTable } from "./BuiltinSkillsTable";
 import { formatSkillDisplayName } from "@/agentMode/skills/mergeDiscovery";
+import {
+  buildSkillRepairPrompt,
+  type SkillRepairEvidence,
+} from "@/agentMode/skills/skillRepairPrompt";
 import { listBackendDescriptors } from "@/agentMode/backends/registry";
 import type { AgentBrand } from "@/agentMode/session/types";
 import { DeleteConfirmModal } from "./DeleteConfirmDialog";
 import { EmptyPlaceholder } from "./EmptyPlaceholder";
+import {
+  AllSkillsNotLoaded,
+  SkillLoadIssues,
+  SkillLoadIssuesModal,
+  type SkillLoadIssue,
+} from "./SkillLoadIssues";
 import {
   PropertiesModal,
   type PropertiesSaveOutcome,
@@ -13,144 +28,216 @@ import {
   SkillManager,
   useEpermSeen,
   useManagedSkills,
+  useRejectedSkills,
 } from "@/agentMode/skills/SkillManager";
 import { SkillRow } from "./SkillRow";
 import { type Skill } from "@/agentMode/skills/types";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { logWarn } from "@/logger";
 import { deriveSkillsFolder } from "@/settings/copilotFolder";
 import { openWithSystemDefault } from "@/utils/openWithSystemDefault";
+import { openVaultPath } from "@/utils/openVaultPath";
+import { revealFolderInExplorer } from "@/utils/revealFolderInExplorer";
 import { getVaultBase, toVaultRelative } from "@/utils/vaultPath";
 import { useSettingsValue } from "@/settings/model";
 import { AlertTriangle, Search } from "lucide-react";
-import { App, FileSystemAdapter, Notice, TFile, TFolder } from "obsidian";
+import { App, FileSystemAdapter, Notice, TFolder } from "obsidian";
 import { useApp } from "@/context";
+import { usePlugin } from "@/contexts/PluginContext";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-/**
- * Substring → brand-name lookup for the sync-folder warning banner. The
- * detection is case-insensitive against the absolute vault path, so the
- * substrings carry only their brand fragment.
- */
 const SYNC_BRANDS: ReadonlyArray<{ substr: string; brand: string }> = [
   { substr: "onedrive", brand: "OneDrive" },
   { substr: "icloud", brand: "iCloud" },
   { substr: "dropbox", brand: "Dropbox" },
 ];
 
-/**
- * Skills tab.
- *
- * Renders the header copy, the toolbar (search + count), and either the
- * empty placeholder or the Tidy list of {@link SkillRow}s sourced from
- * {@link SkillManager}. The skills folder is root-derived and not editable
- * here, so there is no folder-setting row.
- *
- * Discovery is fully automatic — the unified walker (canonical folder plus
- * every registered agent's project-skills directory) runs on every mount
- * and on every settings-folder change. Skills sitting under
- * `.<agent>/skills/` show up as project-managed rows automatically; the
- * user never has to trigger discovery by hand.
- *
- * Wires per-agent toggles, overflow menu actions (Edit SKILL.md, Reveal
- * in vault, Delete), the delete confirmation modal, the EPERM banner,
- * and the sync-folder banner.
- */
+const BUILTIN_ROWS = ALL_MANAGED_SKILLS.map((skill) => ({
+  name: skill.name,
+  description: parseSkillFile(skill.skillMd, skill.name).frontmatter.description,
+  content: skill.skillMd,
+  enabledAgents: skill.enabledAgents,
+}));
+
 export const SkillsSettings: React.FC = () => {
   const app = useApp();
+  const plugin = usePlugin();
   const settings = useSettingsValue();
-  // Skills live under the single configurable Copilot root. The derived path
-  // drives discovery (the effect below) and the empty-state hint; it is not
-  // user-editable here, so there is no folder-setting row.
   const skillsFolder = deriveSkillsFolder(settings);
-  // Brand projection of every registered backend. Sourced from the public
-  // registry — descriptors are module-level constants so the list is stable
-  // per session; the `useMemo` keeps the reference identity stable across
-  // renders for child props.
+  const descriptors = useMemo(() => listBackendDescriptors(), []);
   const agents = useMemo<ReadonlyArray<AgentBrand>>(
     () =>
-      listBackendDescriptors().map(({ id, displayName, Icon }) => ({
+      descriptors.map(({ id, displayName, Icon }) => ({
         id,
         displayName,
         Icon,
       })),
-    []
+    [descriptors]
   );
   const skills = useManagedSkills();
+  const rejectedSkills = useRejectedSkills();
   const epermSeen = useEpermSeen();
 
   const [searchValue, setSearchValue] = useState("");
+  const [builtinPending, setBuiltinPending] = useState<readonly string[]>([]);
+  const [builtinError, setBuiltinError] = useState<string>();
+  const [refreshError, setRefreshError] = useState<string>();
+  const userSkills = useMemo(() => skills.filter((skill) => !skill.builtin), [skills]);
+  const installStates = useBackendInstallStates(plugin, descriptors);
+  const lastAvailableAgents = useRef<readonly string[]>(
+    skills.filter((skill) => skill.builtin).flatMap((skill) => skill.enabledAgents)
+  );
+  const availableAgents = availableBuiltinAgents(installStates, lastAvailableAgents.current);
+  lastAvailableAgents.current = availableAgents;
+  const eligibleBuiltins = planManagedBuiltins({
+    search: settings.enableMiyoSearchSkill === true,
+    documents: settings.docProcessorBackend === "miyo",
+  }).seed;
+  const unavailableReasons: Record<string, string> = {};
+  for (const skill of eligibleBuiltins) {
+    const collision =
+      userSkills.some(
+        (userSkill) => userSkill.name === skill.name && userSkill.location.kind === "canonical"
+      ) ||
+      rejectedSkills.some(
+        (rejected) =>
+          toVaultRelative(rejected.dirPath, getVaultBase(app)) === `${skillsFolder}/${skill.name}`
+      );
+    if (collision) {
+      unavailableReasons[skill.name] =
+        "A skill with this name already exists in Your Skills. Your file is kept unchanged.";
+    }
+  }
+  const builtinRows = BUILTIN_ROWS.filter(
+    (skill) =>
+      eligibleBuiltins.some((builtin) => builtin.name === skill.name) &&
+      `${skill.name} ${skill.description}`.toLowerCase().includes(searchValue.trim().toLowerCase())
+  );
 
-  // Anchor for Radix portals on this tab (e.g. SkillRow's overflow menu).
-  // Portaling into the tab's own DOM keeps menus inside Obsidian's Settings
-  // modal focus scope so Radix focus-follows-hover works.
+  const handleBuiltinChange = useCallback(
+    async (name: string, enabled: boolean, agent?: string) => {
+      setBuiltinPending((names) => [...names, name]);
+      setBuiltinError(undefined);
+      try {
+        const manager = SkillManager.getInstance();
+        const result =
+          agent === undefined
+            ? await manager.setBuiltinSkillEnabled(name, enabled)
+            : await manager.setBuiltinAgentEnabled(name, agent, enabled);
+        if (!result.ok) setBuiltinError(result.message);
+        else setRefreshError(undefined);
+      } catch (error) {
+        setBuiltinError(
+          `Could not update ${name}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      } finally {
+        setBuiltinPending((names) => names.filter((pendingName) => pendingName !== name));
+      }
+    },
+    []
+  );
+  const handleToggleBuiltinSkill = useCallback(
+    (name: string, enabled: boolean) => {
+      void handleBuiltinChange(name, enabled);
+    },
+    [handleBuiltinChange]
+  );
+  const handleToggleBuiltinAgent = useCallback(
+    (name: string, agent: string, enabled: boolean) => {
+      void handleBuiltinChange(name, enabled, agent);
+    },
+    [handleBuiltinChange]
+  );
+
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Session-local banner-dismissal state. The sync-folder banner has its
-  // own dismiss flag because the user can clear it independently of the
-  // EPERM banner. Neither persists across plugin reloads — by design.
   const [syncBannerDismissed, setSyncBannerDismissed] = useState(false);
 
-  // Trigger a discovery pass on mount and whenever the derived folder changes
-  // (e.g. the user moves the Copilot root) so the list reflects whatever lives
-  // at the currently configured path. The unified walker pulls in canonical +
-  // every agent's project-skills dir in one pass.
+  // Refresh on focus: fixing a hidden agent file in an external editor bypasses Obsidian's
+  // watcher. https://github.com/Brevilabs/obsidian-copilot-private/issues/166
   useEffect(() => {
-    void SkillManager.getInstance().refresh();
+    const manager = SkillManager.getInstance();
+    let active = true;
+    const refresh = async () => {
+      const result = await manager.refresh();
+      if (active) {
+        setRefreshError(
+          result.reconcileError ??
+            result.discoveryError ??
+            (result.reconcileErrorCount > 0
+              ? "Some skill links could not be updated. Check folder permissions."
+              : undefined)
+        );
+      }
+    };
+    void refresh();
+    const hostWindow = containerRef.current?.win;
+    const handleFocus = (): void => {
+      void refresh();
+    };
+    hostWindow?.addEventListener("focus", handleFocus);
+    return () => {
+      active = false;
+      hostWindow?.removeEventListener("focus", handleFocus);
+    };
   }, [skillsFolder]);
 
-  /**
-   * Open a SKILL.md (absolute path) for editing. Managed skills live inside
-   * the visible vault and open in Obsidian. Project-managed skills live
-   * under agent dotfile folders (e.g. `.claude/skills/`) that Obsidian
-   * doesn't index — falling through `openLinkText` there triggers a
-   * "Folder already exists" error as it tries to create a new note, so we
-   * hand those off to the OS default editor via Electron's shell instead.
-   */
-  const handleOpenSkillMdAbsPath = useCallback(
-    (absPath: string) => {
-      const vaultRel = toVaultRelative(absPath, getVaultBase(app));
-      if (vaultRel !== absPath && app.vault.getAbstractFileByPath(vaultRel) instanceof TFile) {
-        void app.workspace.openLinkText(vaultRel, "", true);
-        return;
-      }
-      void openWithSystemDefault(absPath);
-    },
-    [app]
-  );
-
-  /** Open the canonical SKILL.md of a managed skill in Obsidian's editor. */
   const handleEditSkillMd = useCallback(
     (skill: Skill) => {
-      handleOpenSkillMdAbsPath(skill.filePath);
-    },
-    [handleOpenSkillMdAbsPath]
-  );
-
-  /** Reveal the canonical skill folder in Obsidian's file explorer. */
-  const handleRevealInVault = useCallback(
-    (skill: Skill) => {
-      const folderRel = toVaultRelative(skill.dirPath, getVaultBase(app));
-      if (folderRel === skill.dirPath) {
-        new Notice("Could not resolve the skill folder inside this vault.");
-        return;
-      }
-      revealInFileExplorer(app, folderRel);
+      openVaultPath(app, skill.filePath, { newLeaf: true });
     },
     [app]
   );
 
-  const filteredSkills = useMemo(() => filterSkills(skills, searchValue), [skills, searchValue]);
+  // Hidden agent folders are outside Obsidian's index, so they cannot use the vault reveal
+  // path. https://github.com/Brevilabs/obsidian-copilot-private/issues/166
+  const handleRevealSkillFolder = useCallback(
+    (dirPath: string) => {
+      const folderRel = toVaultRelative(dirPath, getVaultBase(app));
+      if (app.vault.getAbstractFileByPath(folderRel) instanceof TFolder) {
+        revealFolderInExplorer(app, folderRel);
+        return;
+      }
+      void openWithSystemDefault(dirPath);
+    },
+    [app]
+  );
+
+  const handleFixWithAgent = useCallback(
+    (issues: readonly SkillRepairEvidence[]): void => {
+      (app as unknown as { setting: { close: () => void } }).setting.close();
+      void plugin.newAgentChatWithDraft(buildSkillRepairPrompt(issues));
+    },
+    [app, plugin]
+  );
+
+  const loadIssues = useMemo<SkillLoadIssue[]>(() => {
+    const vaultBase = getVaultBase(app);
+    return rejectedSkills.map((skill) => {
+      const folderRel = toVaultRelative(skill.dirPath, vaultBase);
+      const indexed = app.vault.getAbstractFileByPath(folderRel) instanceof TFolder;
+      const evidence: SkillRepairEvidence = {
+        location: toVaultRelative(skill.filePath, vaultBase),
+        reason: skill.reason,
+        offendingText: skill.offendingText,
+      };
+      return {
+        ...evidence,
+        revealLabel: indexed ? "Reveal in vault" : "Show in folder",
+        onFixWithAgent: () => handleFixWithAgent([evidence]),
+        onOpen: () => openVaultPath(app, skill.filePath, { newLeaf: true }),
+        onReveal: () => handleRevealSkillFolder(skill.dirPath),
+      };
+    });
+  }, [app, handleFixWithAgent, handleRevealSkillFolder, rejectedSkills]);
+
+  const filteredSkills = useMemo(
+    () => filterSkills(userSkills, searchValue),
+    [userSkills, searchValue]
+  );
 
   const displayFolder = skillsFolder;
 
-  /**
-   * Open the per-skill Properties modal. The modal owns its own save and
-   * collision state; the `onSave` callback runs the rename + patch and
-   * reports back whether the modal should close, stay open, or show a
-   * name-collision inline error.
-   */
   const handleEditProperties = useCallback(
     (skill: Skill) => {
       new PropertiesModal(
@@ -166,7 +253,6 @@ export const SkillsSettings: React.FC = () => {
           if (!result.ok) {
             if (result.code === "collision") return "collision";
             if (result.code === "invalid") {
-              // Shouldn't happen — the modal gates Save on inline validation.
               return "stay";
             }
             new Notice(
@@ -181,7 +267,6 @@ export const SkillsSettings: React.FC = () => {
     [app, displayFolder]
   );
 
-  /** Open the native delete confirmation modal. */
   const handleAskDelete = useCallback(
     (skill: Skill) => {
       const manager = SkillManager.getInstance();
@@ -201,8 +286,6 @@ export const SkillsSettings: React.FC = () => {
     [app, displayFolder]
   );
 
-  // Detect a sync-folder vault on every render — the absolute path is
-  // stable across the session so the work is trivial.
   const syncBrand = useMemo(() => detectSyncBrand(app), [app]);
 
   return (
@@ -218,7 +301,12 @@ export const SkillsSettings: React.FC = () => {
           </div>
         </div>
 
-        {/* Durable banners — stack at the top of the tab body, above the toolbar. */}
+        {refreshError && (
+          <div role="alert" className="tw-text-ui-smaller tw-text-error">
+            {refreshError}
+          </div>
+        )}
+
         {(epermSeen || (syncBrand !== null && !syncBannerDismissed)) && (
           <div className="tw-mt-3 tw-flex tw-flex-col tw-gap-2">
             {epermSeen && <EpermBanner onDismiss={dismissEpermBanner} />}
@@ -228,7 +316,19 @@ export const SkillsSettings: React.FC = () => {
           </div>
         )}
 
-        {/* Toolbar — search + count */}
+        {loadIssues.length > 0 && (
+          <div className="tw-mt-3">
+            <SkillLoadIssues
+              issues={loadIssues}
+              onViewDetails={() =>
+                new SkillLoadIssuesModal(app, loadIssues, () =>
+                  handleFixWithAgent(loadIssues)
+                ).open()
+              }
+            />
+          </div>
+        )}
+
         <div className="tw-mt-4 tw-flex tw-items-center tw-gap-2">
           <div className="tw-relative tw-flex-1 sm:tw-flex-initial">
             <Search
@@ -243,17 +343,28 @@ export const SkillsSettings: React.FC = () => {
               aria-label="Search skills"
             />
           </div>
-          <span className="tw-text-xs tw-text-muted">{formatSkillCount(skills.length)}</span>
+          <span className="tw-text-xs tw-text-muted">{userSkills.length} loaded</span>
         </div>
 
-        {/* Body — empty placeholder, or the Tidy list. */}
-        <div className="tw-mt-4">
-          {skills.length === 0 ? (
-            <EmptyPlaceholder folder={displayFolder} />
+        <div className="tw-mt-4" role="region" aria-label="Your Skills">
+          <div
+            role="heading"
+            aria-level={3}
+            className="tw-mb-3 tw-text-left tw-text-base tw-font-semibold"
+          >
+            Your Skills
+          </div>
+          {userSkills.length === 0 ? (
+            // Rejected files prove skills exist; the empty state would claim there are none. https://github.com/Brevilabs/obsidian-copilot-private/issues/166
+            rejectedSkills.length > 0 ? (
+              <AllSkillsNotLoaded />
+            ) : (
+              <EmptyPlaceholder folder={displayFolder} />
+            )
           ) : (
             <div className="tw-flex tw-flex-col tw-gap-1.5">
               {filteredSkills.length === 0 ? (
-                <div className="tw-rounded-md tw-border tw-border-dashed tw-border-border tw-bg-primary tw-px-3.5 tw-py-6 tw-text-center tw-text-ui-smaller tw-text-muted">
+                <div className="tw-rounded-sm tw-border tw-border-dashed tw-border-border tw-bg-primary tw-px-3 tw-py-6 tw-text-center tw-text-ui-smaller tw-text-muted">
                   No skills match &ldquo;{searchValue}&rdquo;.
                 </div>
               ) : (
@@ -265,7 +376,7 @@ export const SkillsSettings: React.FC = () => {
                     agentDirsProjectRel={SkillManager.getInstance().getAgentDirsProjectRel()}
                     onEditSkillMd={() => handleEditSkillMd(skill)}
                     onEditProperties={() => handleEditProperties(skill)}
-                    onRevealInVault={() => handleRevealInVault(skill)}
+                    onRevealInVault={() => handleRevealSkillFolder(skill.dirPath)}
                     onDelete={() => handleAskDelete(skill)}
                     containerRef={containerRef}
                   />
@@ -275,14 +386,21 @@ export const SkillsSettings: React.FC = () => {
           )}
         </div>
       </section>
+      <BuiltinSkillsTable
+        skills={builtinRows}
+        preferences={settings.agentMode.skills.builtinPreferences}
+        unavailableReasons={unavailableReasons}
+        agents={agents}
+        availableAgents={availableAgents}
+        pendingSkills={builtinPending}
+        error={builtinError}
+        onToggleSkill={handleToggleBuiltinSkill}
+        onToggleAgent={handleToggleBuiltinAgent}
+      />
     </div>
   );
 };
 
-/**
- * Windows-EPERM warn banner. Verbatim copy is product-blessed; the title
- * + paragraph split mirrors wireframe state H.
- */
 const EpermBanner: React.FC<{ onDismiss: () => void }> = ({ onDismiss }) => {
   return (
     <div
@@ -306,8 +424,6 @@ const EpermBanner: React.FC<{ onDismiss: () => void }> = ({ onDismiss }) => {
       <button
         type="button"
         onClick={onDismiss}
-        // Preflight is off: zero the native button chrome inline so the
-        // dismiss ✕ doesn't render as a beveled grey square.
         style={{ appearance: "none", border: 0, background: "transparent", padding: 0 }}
         className="tw-px-1 tw-text-faint hover:tw-text-normal"
         aria-label="Dismiss"
@@ -318,10 +434,6 @@ const EpermBanner: React.FC<{ onDismiss: () => void }> = ({ onDismiss }) => {
   );
 };
 
-/**
- * Sync-folder info banner. Brand name is computed at mount from the
- * vault's absolute path. Verbatim copy is product-blessed.
- */
 const SyncFolderBanner: React.FC<{ brand: string; onDismiss: () => void }> = ({
   brand,
   onDismiss,
@@ -344,8 +456,6 @@ const SyncFolderBanner: React.FC<{ brand: string; onDismiss: () => void }> = ({
       <button
         type="button"
         onClick={onDismiss}
-        // Preflight is off: zero the native button chrome inline so the
-        // dismiss ✕ doesn't render as a beveled grey square.
         style={{ appearance: "none", border: 0, background: "transparent", padding: 0 }}
         className="tw-px-1 tw-text-faint hover:tw-text-normal"
         aria-label="Dismiss"
@@ -356,11 +466,6 @@ const SyncFolderBanner: React.FC<{ brand: string; onDismiss: () => void }> = ({
   );
 };
 
-/**
- * Case-insensitive substring filter on the displayed name + description.
- * Uses {@link formatSkillDisplayName} (not the bare `name`) so the visible
- * `(claude)`/`(codex)` disambiguator suffix on split rows is searchable.
- */
 function filterSkills(skills: Skill[], query: string): Skill[] {
   const trimmed = query.trim().toLowerCase();
   if (trimmed.length === 0) return skills;
@@ -371,51 +476,6 @@ function filterSkills(skills: Skill[], query: string): Skill[] {
   );
 }
 
-/** Pluralise the skill count for the toolbar. */
-function formatSkillCount(n: number): string {
-  return `${n} skill${n === 1 ? "" : "s"}`;
-}
-
-/**
- * Reveal a vault-relative folder in Obsidian's internal file-explorer
- * plugin. Falls back to a Notice if the explorer isn't installed or the
- * folder isn't in the vault cache (hidden dotfile folder, etc.).
- */
-function revealInFileExplorer(app: App, relPath: string): void {
-  const folder = app.vault.getAbstractFileByPath(relPath);
-  if (folder instanceof TFolder) {
-    const fileExplorer = (
-      app as unknown as {
-        internalPlugins?: {
-          getPluginById?: (id: string) =>
-            | {
-                enabled?: boolean;
-                instance?: { revealInFolder?: (folder: TFolder) => void };
-              }
-            | undefined;
-        };
-      }
-    ).internalPlugins?.getPluginById?.("file-explorer");
-    if (fileExplorer?.enabled && fileExplorer.instance?.revealInFolder) {
-      fileExplorer.instance.revealInFolder(folder);
-      return;
-    }
-    logWarn("[skills] File Explorer plugin unavailable; cannot reveal folder.");
-    new Notice("File Explorer isn't enabled; can't reveal the folder.");
-    return;
-  }
-  // Hidden folders aren't in the vault cache. Surface a friendly notice
-  // rather than failing silently.
-  new Notice(
-    `Skill folder "${relPath}" isn't indexed by Obsidian — open it from your file manager.`
-  );
-}
-
-/**
- * Detect whether the vault path contains a well-known sync-client folder
- * fragment. Returns the brand name to display, or `null` when the vault
- * doesn't appear to be under a known sync root.
- */
 function detectSyncBrand(app: App): string | null {
   const adapter = app.vault.adapter;
   if (!(adapter instanceof FileSystemAdapter)) return null;

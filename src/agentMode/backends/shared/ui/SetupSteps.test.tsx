@@ -4,7 +4,6 @@ import { CommandBlock, SetupStep } from "./SetupSteps";
 
 const DEFAULT_PROMPT = process.platform === "win32" ? "PS> " : "$ ";
 
-/** Match the `<code>` block that renders exactly this command behind the shell prompt. */
 const commandBlock =
   (command: string, prompt = DEFAULT_PROMPT) =>
   (_content: string, element: Element | null): boolean =>
@@ -55,30 +54,6 @@ describe("SetupSteps", () => {
       } finally {
         jest.useRealTimers();
       }
-    });
-
-    it("renders an in-app alternative beside Copy when one is supplied", () => {
-      const onSignIn = jest.fn();
-      render(
-        <CommandBlock
-          command="claude auth login --claudeai"
-          action={
-            <button type="button" onClick={onSignIn}>
-              Sign in
-            </button>
-          }
-        />
-      );
-
-      fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
-
-      expect(onSignIn).toHaveBeenCalledTimes(1);
-    });
-
-    it("offers only Copy when no in-app alternative exists", () => {
-      render(<CommandBlock command="codex login" />);
-
-      expect(screen.getAllByRole("button").map((b) => b.textContent)).toEqual(["Copy"]);
     });
   });
 

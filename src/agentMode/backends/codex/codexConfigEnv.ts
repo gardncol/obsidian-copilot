@@ -5,6 +5,14 @@ interface CodexManagedConfig {
   sandbox_mode: "workspace-write";
 }
 
+// Codex budgets skill descriptions from its resolved context window. These ceilings give
+// large-context models enough budget while Codex clamps them to each model's supported limits.
+// https://github.com/Brevilabs/obsidian-copilot-private/issues/322
+const CODEX_DEFAULT_CONFIG = {
+  model_context_window: 1_000_000,
+  model_auto_compact_token_limit: 500_000,
+};
+
 function parseCodexConfig(value: string | undefined): Record<string, unknown> {
   if (!value?.trim()) return {};
 
@@ -21,20 +29,26 @@ function parseCodexConfig(value: string | undefined): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-/**
- * Current codex-acp versions ignore server-mode argv and consume Codex config
- * from this JSON env var. Plugin-owned fields win so inherited/user config
- * cannot silently remove the prompt and safety defaults Agent Mode requires.
- */
 export function mergeCodexConfigEnv(
   existing: string | undefined,
   developerInstructions: string
 ): string {
+  const userConfig = parseCodexConfig(existing);
   const managed: CodexManagedConfig = {
     developer_instructions: developerInstructions,
     approval_policy: "on-request",
     approvals_reviewer: "user",
     sandbox_mode: "workspace-write",
   };
-  return JSON.stringify({ ...parseCodexConfig(existing), ...managed });
+  return JSON.stringify({
+    ...CODEX_DEFAULT_CONFIG,
+    ...userConfig,
+    // Codex gates structured questions in Default separately from permission modes.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/551
+    features: {
+      default_mode_request_user_input: true,
+      ...(userConfig.features as Record<string, unknown> | undefined),
+    },
+    ...managed,
+  });
 }

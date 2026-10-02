@@ -1,22 +1,20 @@
 # Troubleshooting Copilot V4
 
-Start in **Settings → Copilot → Basic → Agents** and check the status beside the agent you want to use.
+Start in **Settings → Copilot → Basic → Agents** and check the status beside the Agent Chat backend you want to use.
 
-## Agent setup
+## Agent Chat setup
 
 ### opencode shows “Not set up” or “Error”
 
 1. Open **Basic → Agents → opencode**.
-2. Choose **Download opencode**. If it fails, choose **Try again** and read the displayed error.
-3. If opencode is already installed, choose **I already have it**. If detection misses it, open **Configure → My own binary**, enter its absolute path, and choose **Apply**.
+2. Open **Configure → Managed by Copilot** and select **Download & install**. If it fails, read the displayed error and retry.
+3. If opencode is already installed, open **Configure → My own binary** and select **Auto-detect**. If detection misses it, enter its absolute path and choose **Apply**.
 
 Use **Configure → Managed by Copilot** to reinstall or uninstall it. Setup is complete at **Ready**.
 
 ### Claude shows “Update required,” cannot be found, or is signed out
 
-Copilot requires Claude Code 2.1.206 or newer.
-
-- **Update required:** update Claude Code, then run **Configure Claude → Auto-detect**. For a custom path, update that installation or choose **Clear**.
+- **Update required:** update Claude Code to the minimum version shown by Copilot, then run **Configure Claude → Auto-detect**. For a custom path, update that installation or choose **Clear**.
 - **Not found:** run the displayed install command, then choose **Auto-detect**, or enter the absolute path to `claude`.
 - **Signed out:** choose **Sign in**. If **Open sign-in page** appears, use it to finish authentication.
 
@@ -24,18 +22,20 @@ Copilot uses your Claude Code login; there is no API key to paste here.
 
 ### Codex is installed, but Copilot cannot find it
 
-Copilot connects through `codex-acp`, not the `codex` executable alone.
+Copilot connects through `codex-acp`, not the `codex` executable alone. Manual installations require a supported `@agentclientprotocol/codex-acp` adapter. **Configure** reports any required compatibility update; managed downloads use the version pinned by Copilot.
 
 1. Open **Basic → Agents → Codex → Configure**.
-2. Run the displayed install command. On macOS and Linux: `npm install -g @agentclientprotocol/codex-acp`.
-3. Choose **Auto-detect**, or enter the absolute path to `codex-acp` and choose **Apply**.
-4. Run `codex login` in a terminal if Codex is not authenticated.
+2. Choose **Download & install** under **Managed by Copilot**. If this first installation fails, read the error in Configure, fix the reported problem, then choose **Download & install** again. Failed updates of an already-managed adapter show the same error in Settings and Agent Chat. Open **Configure** in Settings to retry, or use **Retry** in Agent Chat.
+3. For an adapter you manage yourself, choose **My own binary**, then **Auto-detect** or enter the absolute path to `codex-acp` on macOS/Linux or its `dist\index.js` on Windows. Copilot does not update custom binaries.
+4. Click **Sign in** and finish authentication in your browser. If it does not open, click **Open sign-in page**. Cancel or retry if needed. Managed Codex includes its runtime; Node.js and npm are not required.
 
-See [Getting Started](getting-started.md) for the complete setup flow and [Windows Setup for Agent](agent-mode-windows-setup.md) for Windows-specific commands.
+You can also choose **Sign in to Codex** on the Agent Chat status card. For terminal login, run your configured adapter with `cli login` using the same `CODEX_HOME` as Copilot.
+
+See [Getting Started](getting-started.md) for the complete setup flow and [Windows setup for Agent Chat](agent-mode-windows-setup.md) for Windows-specific commands.
 
 ## Models, licenses, and API keys
 
-### The picker says “No models — enable in Basic → Agents → Quick Chat”
+### No models are enabled for Quick Chat
 
 Open **Basic → Agents → Quick Chat**, enable a model, and choose a **Default model**. If none are configured, first add a provider under **Settings → Copilot → BYOK**.
 
@@ -55,7 +55,7 @@ V4 stores secrets in the Obsidian Keychain.
 
 Do not delete `data.json`: it contains the vault's Keychain namespace. Use the in-app reset; it does not delete Keychain entries.
 
-## Agent chat is waiting or behaving unexpectedly
+## Agent Chat is waiting or behaving unexpectedly
 
 ### Nothing happens after you send
 
@@ -65,13 +65,13 @@ Permission choices depend on the active agent. **Stop** cancels the current turn
 
 ### You cannot switch agents in the current session
 
-An Agent session keeps its original backend after work begins. Create an empty session to choose another. Use **Recent Chats** for earlier sessions.
+An Agent Chat keeps its original backend after work begins. Create an empty chat to choose another. Use **Recent Chats** for earlier work.
 
 ### A project message says “Waiting for context”
 
 The message is queued while Copilot prepares saved sources. Fix or remove any source that cannot load. After changing saved context or instructions, start **New Chat**.
 
-See [Agent Projects](projects.md) for what is saved with a project.
+See [Projects](projects.md) for what is saved with a project.
 
 ### A skill or skill command is missing
 
@@ -79,18 +79,17 @@ In **Settings → Copilot → Skills**, confirm the skill has a valid `SKILL.md`
 
 On Windows, **Windows needs Developer Mode for multi-agent fanout** means you must enable **Settings → Privacy & security → For developers → Developer Mode** (or run Obsidian as administrator), then toggle again. The same repair works when vault sync replaces a link.
 
-Learn more in [Agents in Copilot V4](agent-mode-and-tools.md#skills-shared-across-agents).
+Learn more in [Skills across agents](agent-mode-and-tools.md#skills-across-agents).
 
 ## Miyo is unavailable or search is not running
 
 Open **Settings → Copilot → Miyo**.
 
-- **Miyo isn't running:** open Miyo, then choose **Retry connection**.
+- **Miyo isn't running:** open Miyo, then choose **Retry** beside **Disconnect**.
 - **Register this vault with Miyo:** choose **Register & connect** on the same computer. For a remote connection or mobile device, register the vault in Miyo first, then retry.
-- **Not set up — add chat sources in Miyo:** this belongs to the separate **Search chat** row and does not block Agent vault search. Configure chat sources only if you want ChatGPT or Claude history search.
-- If excluded folders no longer match the Copilot folder, choose **Resync Miyo**. For a remote connection, remove and re-add the vault in Miyo.
+- **Chat sources are not set up:** this belongs to the separate **Search chat** row and does not block Agent Chat vault search. Configure chat sources only if you want ChatGPT or Claude history search.
 
-Connection alone does not enable Agent search. Under **Powered by Miyo**, turn on **Semantic search**. Copilot installs `miyo-search` already enabled for opencode, Claude, and Codex. If Copilot reports a same-name collision, rename or remove the existing skill and try again.
+Connection alone does not enable Agent Chat search. Under **Powered by Miyo**, turn on **Semantic search for agents**. Copilot installs `miyo-search` for opencode, Claude, and Codex. If Copilot reports a same-name collision, rename or remove the existing Skill and try again.
 
 ## Quick Ask does not open or has no model
 
@@ -103,19 +102,56 @@ See [Copilot Commands and Quick Ask](custom-commands.md#quick-ask) for selection
 
 ## Logs and bug reports
 
-For Agent problems, use **Report an Issue**. Copilot prepares a screenshot and recent device-local activity logs, then opens a prefilled GitHub issue. Attach the files yourself.
+Use **Advanced → Debugging & support → Report an issue** for any Copilot problem, Agent Chat or Quick Chat alike. Turn on **Debug Mode** in the same section first and reproduce the problem, so the logs you send actually contain it.
 
-For Quick Chat, enable **Advanced → Debug Mode**, reproduce the problem, then choose **Create Log File**. Agent logs can also be opened or cleared under **Advanced → Agent Mode activity log file**.
+### Filing a report
+
+1. **Describe what went wrong, and tick what to include.** The sources on offer are a screenshot of the Agent Chat pane (only while one is open), the **Agent Mode activity log**, the regular Copilot chat log, and the opencode log when opencode is your backend. Anything you tick that turns out to have nothing to collect is listed on the next page with the reason, so you never have to guess whether it was gathered.
+2. **Let Copilot prepare the report.** The review page shows **Preparing report…** until the zip is ready. Copilot briefly hides the dialog to photograph the pane behind it, reads and cleans the logs you asked for, and packs everything into one zip on your own computer — the zip is the only file it writes.
+3. **Review what was packed, then upload.** Copilot lists what actually went into the zip, source by source, with the finished file's size and, beside anything skipped or failed, the reason. **Show zip** opens the file in your file manager if you want to look inside. Uploading is a separate click — **Upload & open issue** — and nothing leaves your machine until you press it. **Cancel** here deletes the zip unless you have already chosen **Open issue anyway**.
+4. **Finish the issue in your browser.** As soon as the upload lands, Copilot opens a prefilled GitHub issue with the report ID already in the body, closes the dialog, and shows a short notice. If your browser could not be opened, the notice carries the report ID and a link to the issue page instead. Nothing is filed until you press Submit in your browser.
+
+### What gets sent, and what does not
+
+Before anything is written into the zip, Copilot cleans every log and your own description on this device: usernames taken from home-folder paths, email addresses, and recognizable credentials such as API keys and tokens are replaced with visible markers so you can see that something was removed. This is a best-effort pass over the formats Copilot knows, so an unfamiliar secret can still slip through — which is exactly what the review step is for.
+
+**The screenshot is not cleaned at all.** It is a picture, so nothing can be found and removed in it. Look at it before you upload.
+
+A log too large for the report keeps its newest entries rather than being dropped, and the file itself opens with a banner identifying it as a truncated log and naming the original size. Cleaning always runs over the whole log before anything is cut, so a log too large to clean whole (over 64 MB) is left out and listed with that reason.
+
+The zip is uploaded only to Brevilabs. The upload reuses the random device identifier already used for this vault to group reports and limit uploads. It does not create a separate identifier for bug reports or use your Copilot account identity. If Copilot cannot read a valid saved device identifier, it refuses the upload; you can still save the zip and open the issue to attach it manually. The upload carries no license key or account identity. The public GitHub issue carries the report ID and nothing else — there is no download link on it, and nothing on that page can fetch the bundle.
+
+### What the report ID is for
+
+It is the reference a maintainer looks your report up by. It is not a link, not a password, and there is nothing behind it that anyone reading the issue can open. Because it is just a reference, you can also paste it into Discord when you ask for help there, and it points at the same report.
+
+### How long a report is kept
+
+An uploaded report is stored privately and deleted automatically after 60 days. The report ID is in the issue you filed; copy it somewhere else if you may need it after that.
+
+That deletion covers the uploaded copy only. The zip on your own computer is yours; Copilot leaves it alone after an upload or after you choose **Open issue anyway**, so delete it yourself when you are done with it.
+
+### If the upload fails
+
+- **Retry first.** **Retry upload** re-sends the very same file, and it cannot leave you with two copies stored: if the first attempt quietly did land, the retry returns that same report rather than storing another. The error text starts with **Upload failed (HTTP …)** when the server refused the file and says the outcome is unconfirmed when no answer came back; either way a retry is safe.
+- **The manual path is always open.** The zip is still on your computer. Use **Show zip** to find it and **Open issue anyway** to file the report by hand — that issue carries no report ID, so attach the zip to it yourself. After choosing **Open issue anyway**, you can close the Copilot dialog without losing the zip, even if your browser did not open.
+- **Closing the dialog does not stop an upload.** It finishes in the background; when it lands, a notice shows the report ID and a link to the issue page, and the zip stays where it was.
+- **If uploads are turned away because too many were sent recently,** wait a while and try again, or file it by hand. On a shared or office network it may not have been your own uploads that used up the limit.
+
+### Collecting logs by hand
+
+Run **Copilot: Create log file** from the command palette to save the regular chat log into your vault as a note and open it. The Agent Chat log can be opened or cleared under **Advanced → Debugging & support → Agent Mode activity log**.
 
 Logs and screenshots can contain prompts, note contents, paths, and tool inputs. Review them before attaching anything to a public issue.
 
 ## What works on mobile?
 
-Agent—including opencode, Claude, Codex, Agent projects, and agent skill execution—is desktop-only. On mobile, use Quick Chat. Agent settings display **Agent settings are available on desktop.** Miyo on mobile requires a remote Miyo connection and manual vault registration in Miyo.
+Agent Chat, including opencode, Claude, Codex, Projects, and Skill execution, is desktop-only. On mobile, use Quick Chat. Agent settings display **Agent settings are available on desktop.** Miyo on mobile requires a remote Miyo connection and manual vault registration in Miyo.
 
 ## Related
 
 - [Getting Started](getting-started.md)
-- [Agents in Copilot V4](agent-mode-and-tools.md)
+- [Agent Chat](agent-mode-and-tools.md)
 - [Context and Mentions](context-and-mentions.md)
-- [Copilot Plus and Self-Host](copilot-plus-and-self-host.md)
+- [Copilot Settings](settings.md)
+- [Copilot Plans, Privacy, and Self-Hosting](copilot-plus-and-self-host.md)

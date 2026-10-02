@@ -9,10 +9,8 @@ const meta = {
 } satisfies Meta<InstructionsTextareaProps>;
 export default meta;
 
-/** Empty: the examples rotate, one character at a time. */
-export const CyclingExamples: StoryObj<InstructionsTextareaProps> = {};
+export const Empty: StoryObj<InstructionsTextareaProps> = {};
 
-/** Once there is text, the rotation stops and the examples are out of the way. */
 export const UserAuthored: StoryObj<InstructionsTextareaProps> = {
   args: {
     value:

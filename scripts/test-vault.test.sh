@@ -24,14 +24,15 @@ printf 'clean styles\n' >"$FIXTURE_ROOT/styles.css"
 printf 'tracked\n' >"$FIXTURE_ROOT/source.txt"
 printf 'main.js\nstyles.css\n' >"$FIXTURE_ROOT/.gitignore"
 
-NPM_CALL_LOG="$TEST_ROOT/npm-calls.log"
+DEPLOY_CALL_LOG="$TEST_ROOT/deploy-calls.log"
 cat >"$FAKE_BIN/npm" <<'EOF'
 #!/usr/bin/env bash
-echo "$*" >>"$NPM_CALL_LOG"
+echo "npm $*" >>"$DEPLOY_CALL_LOG"
 exit 0
 EOF
 cat >"$FAKE_BIN/obsidian" <<'EOF'
 #!/usr/bin/env bash
+echo "obsidian $*" >>"$DEPLOY_CALL_LOG"
 exit 0
 EOF
 chmod +x "$FAKE_BIN/npm" "$FAKE_BIN/obsidian"
@@ -45,11 +46,11 @@ git -C "$FIXTURE_ROOT" commit -qm "fixture"
 
 DEPLOY_STDERR="$TEST_ROOT/deploy-stderr.log"
 run_deploy() {
-  : >"$NPM_CALL_LOG"
+  : >"$DEPLOY_CALL_LOG"
   PATH="$FAKE_BIN:$PATH" \
     COPILOT_TEST_VAULT_PATH="$VAULT_ROOT" \
     OBSIDIAN_BIN="$FAKE_BIN/obsidian" \
-    NPM_CALL_LOG="$NPM_CALL_LOG" \
+    DEPLOY_CALL_LOG="$DEPLOY_CALL_LOG" \
     bash "$FIXTURE_ROOT/scripts/test-vault.sh" >/dev/null 2>"$DEPLOY_STDERR"
 }
 
@@ -114,6 +115,13 @@ if [[ "$(node -p "require('$FIXTURE_ROOT/manifest.json').version")" != "4.0.0-pr
   exit 1
 fi
 
+STORIES_LINE="$(grep -n -m1 '^npm run gallery:stories$' "$DEPLOY_CALL_LOG" | cut -d: -f1)"
+BUILD_LINE="$(grep -n -m1 '^npm run build$' "$DEPLOY_CALL_LOG" | cut -d: -f1)"
+if [[ -z "$STORIES_LINE" || -z "$BUILD_LINE" || "$BUILD_LINE" -le "$STORIES_LINE" ]]; then
+  echo "built the plugin before regenerating the gallery story index" >&2
+  exit 1
+fi
+
 printf 'dirty\n' >>"$FIXTURE_ROOT/source.txt"
 printf 'dirty bundle\n' >"$FIXTURE_ROOT/main.js"
 run_deploy
@@ -131,7 +139,7 @@ cat >"$FIXTURE_ROOT/dev/gallery/manifest.json" <<EOF
 EOF
 
 run_deploy
-if grep -q "gallery:vault" "$NPM_CALL_LOG"; then
+if grep -q "gallery:vault" "$DEPLOY_CALL_LOG"; then
   echo "rebuilt the gallery when the vault has no gallery plugin installed" >&2
   exit 1
 fi
@@ -142,8 +150,14 @@ fi
 
 ln -s "$FIXTURE_ROOT/dev/gallery" "$GALLERY_PLUGIN_DIR"
 run_deploy
-if ! grep -q "run gallery:vault" "$NPM_CALL_LOG"; then
+if ! grep -q "npm run gallery:vault" "$DEPLOY_CALL_LOG"; then
   echo "did not rebuild the gallery deployed from this worktree" >&2
+  exit 1
+fi
+GALLERY_DEPLOY_LINE="$(grep -n -m1 '^npm run gallery:vault$' "$DEPLOY_CALL_LOG" | cut -d: -f1)"
+FIRST_RELOAD_LINE="$(grep -n -m1 '^obsidian ' "$DEPLOY_CALL_LOG" | cut -d: -f1)"
+if [[ -z "$GALLERY_DEPLOY_LINE" || -z "$FIRST_RELOAD_LINE" || "$FIRST_RELOAD_LINE" -le "$GALLERY_DEPLOY_LINE" ]]; then
+  echo "reloaded Obsidian before both plugins were deployed" >&2
   exit 1
 fi
 
@@ -152,12 +166,15 @@ mkdir -p "$FOREIGN_GALLERY"
 rm "$GALLERY_PLUGIN_DIR"
 ln -s "$FOREIGN_GALLERY" "$GALLERY_PLUGIN_DIR"
 run_deploy
-if grep -q "gallery:vault" "$NPM_CALL_LOG"; then
-  echo "rebuilt the gallery for a deployment owned by another worktree" >&2
+if ! grep -q "npm run gallery:vault" "$DEPLOY_CALL_LOG"; then
+  echo "did not take over a gallery deployed from another worktree" >&2
   exit 1
 fi
-if ! grep -q "comes from somewhere else" "$DEPLOY_STDERR"; then
-  echo "did not warn that the deployed gallery belongs to another worktree" >&2
+
+rm -r "$FOREIGN_GALLERY"
+run_deploy
+if ! grep -q "npm run gallery:vault" "$DEPLOY_CALL_LOG"; then
+  echo "did not take over a gallery whose worktree no longer exists" >&2
   exit 1
 fi
 

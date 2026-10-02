@@ -16,6 +16,7 @@ import type {
   ModelSelection,
   ModelState,
 } from "@/agentMode/session/types";
+import { sortEffortOptions } from "@/lib/model-effort";
 
 const CANONICAL_ORDER: CopilotMode[] = ["default", "plan", "auto"];
 const CANONICAL_LABELS: Record<CopilotMode, string> = {
@@ -24,24 +25,12 @@ const CANONICAL_LABELS: Record<CopilotMode, string> = {
   auto: "Auto",
 };
 
-/**
- * Backend-supplied raw catalogs — what a backend has after `session/new`
- * (or after a wire-format → neutral conversion). Backends call
- * `translateBackendState` with this and the descriptor to produce the
- * normalized `BackendState` consumers see.
- */
 export interface BackendStateInputs {
   models: RawModelState | null;
   modes: RawModeState | null;
   configOptions: BackendConfigOption[] | null;
 }
 
-/**
- * Project a backend's neutral catalogs onto the unified `BackendState`
- * consumers use. Pure function — depends only on the inputs and the
- * descriptor's wire codec + mode mapping. Re-running on every state
- * mutation is cheap.
- */
 export function translateBackendState(
   inputs: BackendStateInputs,
   descriptor: BackendDescriptor
@@ -52,12 +41,6 @@ export function translateBackendState(
   };
 }
 
-/**
- * Look up the rich `ModelEntry` for a given `baseModelId` in a
- * `ModelState`. Provided as a tiny session-layer helper so consumers
- * that need name/description/effortOptions for the current selection
- * don't open-code the lookup.
- */
 export function findModelEntry(
   state: ModelState | null | undefined,
   baseModelId: string
@@ -69,13 +52,18 @@ function translateModel(
   inputs: BackendStateInputs,
   descriptor: BackendDescriptor
 ): ModelState | null {
-  // Prefer the dedicated `models` state (codex, claude, opencode ≤ 1.15.12).
-  // Newer opencode (≥ 1.15.13) dropped that field and advertises its catalog
-  // only through a generic `category:"model"` select config option, switched
-  // via `session/set_config_option` instead of `session/set_model`.
-  const fromConfig = inputs.models ? null : modelStateFromConfigOption(inputs.configOptions);
+  const configModel = modelStateFromConfigOption(inputs.configOptions);
+  const fromConfig = inputs.models ? null : configModel;
   const modelState = inputs.models ?? fromConfig?.state ?? null;
   if (!modelState) return null;
+  // Dedicated catalogs describe effort variants; the model option describes
+  // the whole model. https://github.com/Brevilabs/obsidian-copilot-private/issues/219
+  const baseDescriptions = new Map<string, string>();
+  if (inputs.models && configModel) {
+    for (const model of configModel.state.availableModels) {
+      if (model.description) baseDescriptions.set(model.modelId, model.description);
+    }
+  }
   const effortFromConfig = fromConfig ? effortConfigOption(inputs.configOptions) : null;
   const apply: ModelApplySpec = fromConfig
     ? {
@@ -85,13 +73,11 @@ function translateModel(
       }
     : { kind: "setModel" };
 
-  // Group advertised wire ids by baseModelId, preserving first-seen order.
   type Group = {
     baseModelId: string;
     provider: string | null;
     name: string;
     description?: string;
-    /** Per-effort entries for suffix-style backends (decoded from wire ids). */
     variants: { effort: string | null; wireId: string }[];
   };
   const groups: Group[] = [];
@@ -122,26 +108,17 @@ function translateModel(
 
   const availableModels: ModelEntry[] = groups.map((g) => ({
     baseModelId: g.baseModelId,
-    // Strip a trailing `(<effort>)` only when the group has multiple
-    // variants — those rows render an effort dropdown, so the suffix
-    // becomes redundant. The recognized vocabulary comes from the
-    // variants themselves (decoded by the descriptor's wire codec),
-    // so backends own their effort tokens — we don't duplicate them.
     name: normalizeName(
       g.variants.length >= 2 ? stripEffortSuffix(g.name, g.variants) : g.name,
       descriptor
     ),
-    // Only backends that opt in surface their per-model blurb; others (opencode)
-    // would just add noisy/duplicative lines, so the field is dropped here.
-    description: descriptor.showModelDescriptions ? g.description : undefined,
+    description: descriptor.showModelDescriptions
+      ? (baseDescriptions.get(g.baseModelId) ?? g.description)
+      : undefined,
     provider: g.provider,
     effortOptions: deriveEffortOptions(g, descriptor),
   }));
 
-  // Build current. The agent's currentModelId may decompose into a
-  // baseModelId not present in availableModels (rare; stale probe state).
-  // In that case, synthesize an entry and append so the current selection
-  // always has a corresponding entry in `availableModels`.
   const decodedCurrent = descriptor.wire.decode(modelState.currentModelId);
   const currentBaseId = decodedCurrent.selection.baseModelId;
   let currentEntry = availableModels.find((e) => e.baseModelId === currentBaseId);
@@ -152,13 +129,16 @@ function translateModel(
     currentEntry = {
       baseModelId: currentBaseId,
       name: normalizeName(currentBaseId, descriptor),
+      // A stale catalog must not hide the active model's available description.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/219
+      description: descriptor.showModelDescriptions
+        ? baseDescriptions.get(currentBaseId)
+        : undefined,
       provider: decodedCurrent.provider,
       effortOptions: synthEffortOptions,
     };
     availableModels.push(currentEntry);
   }
-  // A thought-level option describes only the currently selected model; other
-  // models may expose a different variant set after they become active.
   if (effortFromConfig) {
     currentEntry.effortOptions = optionsFromConfigOption(effortFromConfig);
   }
@@ -177,15 +157,6 @@ function translateModel(
   return { current, availableModels, apply };
 }
 
-/**
- * Fallback model source for backends that advertise their catalog only via a
- * generic `category:"model"` select config option (opencode ≥ 1.15.13) instead
- * of a dedicated `RawModelState`. Flattens grouped options like
- * `optionsFromConfigOption`. Returns the synthesized `RawModelState` plus the
- * option id (so the caller can route switches through `set_config_option`), or
- * `null` when no populated model option exists — leaving `model` null for
- * backends that report nothing.
- */
 function modelStateFromConfigOption(
   configOptions: BackendConfigOption[] | null
 ): { state: RawModelState; configId: string } | null {
@@ -227,19 +198,17 @@ function deriveEffortOptions(
   group: { variants: { effort: string | null; wireId: string }[]; baseModelId: string },
   descriptor: BackendDescriptor
 ): EffortOption[] {
-  // Suffix-style: ≥2 variants for the same base means we have an effort
-  // dimension encoded in the wire id.
-  if (group.variants.length >= 2) {
+  // Even a single encoded effort must survive normalization or reapplying the
+  // current selection sends an invalid bare ID.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/219
+  if (group.variants.some((variant) => variant.effort !== null)) {
     const options: EffortOption[] = [];
-    const hasBare = group.variants.some((v) => v.effort === null);
-    if (hasBare) options.push({ value: null, label: "default" });
     for (const v of group.variants) {
       if (v.effort === null) continue;
       options.push({ value: v.effort, label: v.effort.toLowerCase() });
     }
-    return options;
+    return sortEffortOptions(options);
   }
-  // Descriptor-style: ask the codec for a per-model effort option.
   if (descriptor.wire.effortConfigFor) {
     const opt = descriptor.wire.effortConfigFor(group.baseModelId);
     return optionsFromConfigOption(opt);
@@ -257,18 +226,18 @@ function optionsFromConfigOption(opt: BackendConfigOption | null): EffortOption[
       flat.push({ value: entry.value, name: entry.name });
     }
   }
-  return flat.map((o) => ({ value: o.value, label: (o.name || o.value).toLowerCase() }));
+  // OpenCode appends `default` to every effort menu to mean "send no level".
+  // It is not a level the user can compare against the others, so a model with
+  // real levels offers only those.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/557
+  return sortEffortOptions(
+    flat.map((o) => ({
+      value: o.value === "default" ? null : o.value,
+      label: (o.name || o.value).toLowerCase(),
+    }))
+  );
 }
 
-/**
- * Resolve `current.effort` for the active selection. For suffix-style
- * (effort encoded in wire id), the decoded value wins. For descriptor-
- * style, prefer the live `currentValue` from `inputs.configOptions`
- * (matched by the spec's id) so user effort changes round-trip; fall
- * back to the spec's default when the agent hasn't reported one yet.
- * The result is snapped to an option that exists in
- * `currentEntry.effortOptions`; otherwise null.
- */
 function resolveCurrentEffort(
   decodedEffort: string | null,
   currentEntry: ModelEntry,
@@ -288,9 +257,7 @@ function resolveCurrentEffort(
       candidate = liveValue ?? (spec.currentValue != null ? String(spec.currentValue) : null);
     }
   }
-  if (candidate === null) {
-    return currentEntry.effortOptions.some((o) => o.value === null) ? null : null;
-  }
+  if (candidate === null) return null;
   if (currentEntry.effortOptions.some((o) => o.value === candidate)) return candidate;
   return null;
 }
@@ -299,6 +266,9 @@ function translateMode(
   inputs: BackendStateInputs,
   descriptor: BackendDescriptor
 ): BackendState["mode"] {
+  if (descriptor.getModeState) {
+    return descriptor.getModeState(inputs.modes, inputs.configOptions);
+  }
   const mapping = descriptor.getModeMapping?.(inputs.modes, inputs.configOptions);
   if (!mapping) return null;
   if (mapping.kind === "setMode") return translateSetModeMapping(mapping, inputs.modes);
@@ -355,11 +325,6 @@ function translateConfigOptionModeMapping(
   return { current, options, apply };
 }
 
-/**
- * Reverse-project a native mode id back to a canonical Copilot mode.
- * Returns `null` when the agent is sitting in a mode the descriptor
- * doesn't map (e.g. Claude's `acceptEdits` — intentionally hidden).
- */
 function reverseProjectMode(
   canonical: ModeMapping["canonical"],
   nativeId: string,
@@ -373,7 +338,6 @@ function reverseProjectMode(
   return null;
 }
 
-/** Apply the descriptor's optional display-name normalization, if any. */
 function normalizeName(name: string, descriptor: BackendDescriptor): string {
   return descriptor.normalizeModelName?.(name) ?? name;
 }
@@ -386,11 +350,6 @@ function stripEffortSuffix(name: string, variants: { effort: string | null }[]):
   return m[1].trim();
 }
 
-/**
- * Stable signature of the model slice of a `BackendState`. Used by the
- * model+effort picker hook to invalidate its memo only on model-relevant
- * changes.
- */
 export function modelStateSignature(state: BackendState | null): string {
   const m = state?.model;
   if (!m) return "";
@@ -413,21 +372,11 @@ export function modelStateSignature(state: BackendState | null): string {
   ].join("/");
 }
 
-/**
- * Stable signature of shared model discovery, distinct from session-owned selection state.
- * @param catalog - Probe-owned catalog, or null before discovery settles.
- */
 export function modelCatalogSignature(catalog: BackendModelCatalog | null): string {
   if (!catalog) return "";
   return JSON.stringify(catalog.availableModels);
 }
 
-/**
- * Stable signature of the mode slice of a `BackendState`. Used by the mode
- * picker hook to invalidate its memo only on mode-relevant changes. Includes
- * each option's apply-spec kind so capability flips (`setMode` ↔
- * `setConfigOption`) propagate.
- */
 export function modeStateSignature(state: BackendState | null): string {
   const md = state?.mode;
   if (!md) return "";

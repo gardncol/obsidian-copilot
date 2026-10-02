@@ -2,6 +2,7 @@ import { AgentStatusCard } from "@/agentMode/ui/AgentStatusCard";
 import { useBackendAuthState } from "@/agentMode/session/useBackendAuthState";
 import {
   useBackendInstallState,
+  useManagedInstallActionState,
   useSessionBackendDescriptor,
 } from "@/agentMode/ui/useBackendDescriptor";
 import { AgentSessionManager } from "@/agentMode/session/AgentSessionManager";
@@ -11,46 +12,48 @@ import { Notice } from "obsidian";
 import React from "react";
 
 interface Props {
-  /** Plugin's AgentSessionManager. May be undefined on mobile. */
   manager?: AgentSessionManager;
-  /** The plugin — needed to drive the install/upgrade actions. */
   plugin: CopilotPlugin;
-  /** Click handler for the "Install …" CTA when the backend isn't installed. */
   onInstallClick: () => void;
 }
 
-/**
- * Leads users from Agent Mode failures to the relevant recovery action without adding noise to healthy sessions.
- * @param manager - The session manager that exposes startup failures and retry behavior.
- * @param plugin - The plugin instance needed to run backend recovery actions.
- * @param onInstallClick - The action to start setup when the selected backend is absent.
- */
 export const AgentModeStatus: React.FC<Props> = ({ manager, plugin, onInstallClick }) => {
   const descriptor = useSessionBackendDescriptor(manager);
   const installState = useBackendInstallState(descriptor, plugin);
+  const managedInstall = useManagedInstallActionState(descriptor, plugin);
   const auth = useBackendAuthState(descriptor);
-  const [upgrading, setUpgrading] = React.useState(false);
 
-  // Re-render on manager notify so `lastError` flips are picked up.
   const [, setTick] = React.useState(0);
   React.useEffect(() => {
     if (!manager) return;
     return manager.subscribe(() => setTick((v) => v + 1));
   }, [manager]);
 
+  const heldConfigChange = manager?.hasHeldConfigChange(descriptor.id) ?? false;
+  // A reload waits for a running turn to finish, so read the queued restart
+  // rather than the click: the action then reports progress for exactly as
+  // long as the restart is actually outstanding.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/475
+  const reloading = manager?.isBackendRestartPending(descriptor.id) ?? false;
+
+  const handleReload = React.useCallback(() => {
+    manager?.applyHeldConfigChange(descriptor.id).catch((e) => {
+      logError("[AgentMode] reload after config change failed", e);
+    });
+  }, [manager, descriptor.id]);
+
   const handleUpgrade = React.useCallback(() => {
-    if (!descriptor.upgrade || upgrading) return;
-    setUpgrading(true);
+    const action = descriptor.managedInstall;
+    if (!action || managedInstall.kind === "running") return;
     new Notice(`Upgrading ${descriptor.displayName}…`);
-    descriptor
-      .upgrade(plugin)
+    action
+      .run(plugin)
       .then(() => new Notice(`${descriptor.displayName} upgraded.`))
       .catch((e) => {
         logError("[AgentMode] upgrade failed", e);
         new Notice(`Failed to upgrade ${descriptor.displayName}. See console for details.`);
-      })
-      .finally(() => setUpgrading(false));
-  }, [descriptor, plugin, upgrading]);
+      });
+  }, [descriptor, plugin, managedInstall.kind]);
 
   if (installState.kind === "absent") {
     return (
@@ -66,16 +69,31 @@ export const AgentModeStatus: React.FC<Props> = ({ manager, plugin, onInstallCli
   }
 
   if (installState.kind === "incompatible") {
-    const canUpgrade = descriptor.upgrade !== undefined;
+    const canUpgrade = descriptor.managedInstall !== undefined;
+    const upgrading = managedInstall.kind === "running";
+    const failed = managedInstall.kind === "error";
     return (
       <AgentStatusCard
-        tone="warning"
-        message={installState.message}
+        tone={failed ? "error" : "warning"}
+        // State supplies the summary; never infer a cause by parsing the backend's full error.
+        // https://github.com/Brevilabs/obsidian-copilot-private/issues/410
+        summary={
+          upgrading
+            ? `Updating ${descriptor.displayName}…`
+            : failed
+              ? `${descriptor.displayName} update failed`
+              : `${descriptor.displayName} update required`
+        }
+        message={
+          upgrading ? managedInstall.label : failed ? managedInstall.message : installState.message
+        }
         action={{
           label: canUpgrade
             ? upgrading
               ? "Upgrading…"
-              : "Upgrade"
+              : failed
+                ? "Retry"
+                : "Upgrade"
             : `Configure ${descriptor.displayName}`,
           disabled: canUpgrade && upgrading,
           onClick: canUpgrade ? handleUpgrade : () => descriptor.openInstallUI(plugin),
@@ -88,6 +106,7 @@ export const AgentModeStatus: React.FC<Props> = ({ manager, plugin, onInstallCli
     return (
       <AgentStatusCard
         tone="error"
+        summary={`${descriptor.displayName} setup error`}
         message={installState.message}
         action={{
           label: `Configure ${descriptor.displayName}`,
@@ -97,9 +116,6 @@ export const AgentModeStatus: React.FC<Props> = ({ manager, plugin, onInstallCli
     );
   }
 
-  // Installed but the CLI isn't signed in: surface a recoverable Sign-in CTA
-  // instead of letting a sent chat fail silently. While signing in, the CLI
-  // opens the browser itself; we show its printed URL as a clickable fallback.
   if (descriptor.auth && auth.status && !auth.status.signedIn) {
     return (
       <AgentStatusCard
@@ -113,7 +129,7 @@ export const AgentModeStatus: React.FC<Props> = ({ manager, plugin, onInstallCli
             ? auth.url
               ? { label: "Open sign-in page", href: auth.url }
               : undefined
-            : { label: `Sign in to ${descriptor.displayName}`, onClick: auth.signIn }
+            : { label: "Sign in", onClick: auth.signIn }
         }
       />
     );
@@ -125,11 +141,33 @@ export const AgentModeStatus: React.FC<Props> = ({ manager, plugin, onInstallCli
 
   const bootError = manager.getLastError();
   if (!bootError) {
-    return null;
+    // Settings the running agent was spawned with have changed since. Applying
+    // them restarts the backend and replaces this conversation, so the manager
+    // holds the restart and the choice of when to take it belongs here. A boot
+    // error keeps its recovery action, which also applies any held config.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/475
+    if (!heldConfigChange) return null;
+    return (
+      <AgentStatusCard
+        layout="row"
+        message={`${descriptor.displayName} config has changed`}
+        action={{
+          label: reloading ? "Reloading…" : "Reload",
+          disabled: reloading,
+          onClick: handleReload,
+        }}
+      />
+    );
   }
 
   const handleRetry = (): void => {
-    manager.getOrCreateActiveSession().catch((e) => {
+    // A failed session may remain active after startup rejects. Apply corrected
+    // settings before retrying so that session cannot mask the new config.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/475
+    const retry = heldConfigChange
+      ? manager.applyHeldConfigChange(descriptor.id)
+      : manager.getOrCreateActiveSession();
+    retry.catch((e) => {
       logError("[AgentMode] retry failed", e);
     });
   };
@@ -137,6 +175,7 @@ export const AgentModeStatus: React.FC<Props> = ({ manager, plugin, onInstallCli
   return (
     <AgentStatusCard
       tone="error"
+      summary={`${descriptor.displayName} session error`}
       message={bootError}
       action={{ label: "Retry", onClick: handleRetry }}
     />

@@ -1,5 +1,10 @@
+import { prefetchConfigEfforts } from "@/agentMode/backends/shared/prefetchConfigEfforts";
+import { Notice } from "obsidian";
+import { resolveEffort } from "@/lib/model-effort";
+import { codexAuth } from "./codexAuth";
 import type CopilotPlugin from "@/main";
 import { requireNodeModule } from "@/utils/desktopRuntime";
+import { detectBinary } from "@/utils/detectBinary";
 import {
   subscribeToSettingsChange,
   updateAgentModeBackendFields,
@@ -10,30 +15,34 @@ import { CodexBackend } from "./CodexBackend";
 import { CodexInstallModal } from "./CodexInstallModal";
 import CodexLogo from "./logo.svg";
 import { CodexSettingsPanel } from "./CodexSettingsPanel";
-import type { AgentSession } from "@/agentMode/session/AgentSession";
 import { agentOriginEnabledModelEntries } from "@/agentMode/backends/shared/agentEnabledModels";
-import {
-  binaryPathInstallState,
-  simpleBinaryBackendProcess,
-} from "@/agentMode/backends/shared/simpleBinaryBackend";
+import { simpleBinaryBackendProcess } from "@/agentMode/backends/shared/simpleBinaryBackend";
 import type {
   EnabledModelEntry,
   ModelSelection,
   ModelWireCodec,
   PermissionOption,
 } from "@/agentMode/session/types";
-import type { BackendDescriptor, BackendProcess, InstallState } from "@/agentMode/session/types";
-import { detectBinary } from "@/utils/detectBinary";
+import type {
+  BackendDescriptor,
+  BackendProcess,
+  InstallState,
+  ModelSelectionSession,
+} from "@/agentMode/session/types";
+import { formatCodexModelId, parseCodexModelId } from "@/utils/codexModelId";
 import { codexAcpSearchDirs, resolveCodexAcpBinary } from "./codexBinaryResolver";
+import { CodexBinaryManager } from "./CodexBinaryManager";
+import { CODEX_PINNED_VERSION } from "./codexArchive";
 import { CODEX_BINARY_NAME } from "./cliSetup";
-import { buildCodexModeMapping } from "./codexModeMapping";
+import { buildCodexModeMapping, buildCodexModeState } from "./codexModeMapping";
+import { isSupportedCodexAcpPath, inspectCodexAcpPackage, CODEX_MIN_VERSION } from "./codexVersion";
+import { classifyBinaryInstall } from "@/agentMode/backends/shared/binaryCompatibility";
 
-/**
- * Vocabulary mirrors codex-acp's advertised efforts. `minimal` is included
- * for forward-compat — codex CLI accepts it as a reasoning level even though
- * codex-acp doesn't currently advertise it.
- */
-const KNOWN_CODEX_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+const codexBinaryManager = new CodexBinaryManager();
+
+export function getCodexBinaryManager(): CodexBinaryManager {
+  return codexBinaryManager;
+}
 
 export function updateCodexFields(partial: Partial<CodexBackendSettings>): void {
   updateAgentModeBackendFields("codex", partial);
@@ -55,55 +64,31 @@ function codexAcpResolverEnv(): Parameters<typeof resolveCodexAcpBinary>[0] {
 }
 
 export async function detectCodexAcpPath(): Promise<string | null> {
-  const fromResolver = resolveCodexAcpBinary(codexAcpResolverEnv());
-  if (fromResolver) return fromResolver;
-  return detectBinary(CODEX_BINARY_NAME);
+  const fromKnownLocations = resolveCodexAcpBinary(codexAcpResolverEnv(), isSupportedCodexAcpPath);
+  if (fromKnownLocations) return fromKnownLocations;
+
+  // npm can install into a user-selected prefix outside the known directories;
+  // retain PATH discovery while enforcing the same supported-package contract.
+  // https://github.com/logancyang/obsidian-copilot/issues/2916
+  const fromPath = await detectBinary(CODEX_BINARY_NAME);
+  return isSupportedCodexAcpPath(fromPath ?? undefined) ? fromPath : null;
 }
 
 export function codexAcpDetectionSearchDirs(): string[] {
   return codexAcpSearchDirs(codexAcpResolverEnv());
 }
 
-/**
- * Wire-format codec for Codex — `<base>[/<effort>]`. No provider segment
- * (Codex's catalog isn't routed through Copilot BYOK keys, so
- * `decode().provider` stays `null`).
- */
 const codexWire: ModelWireCodec = {
   encode: (selection: ModelSelection) =>
-    selection.effort ? `${selection.baseModelId}/${selection.effort}` : selection.baseModelId,
-  decode: (wireId: string) => {
-    if (!wireId) return { selection: { baseModelId: wireId, effort: null }, provider: null };
-    const segments = wireId.split("/");
-    if (segments.length === 1) {
-      return { selection: { baseModelId: wireId, effort: null }, provider: null };
-    }
-    if (segments.length === 2 && KNOWN_CODEX_EFFORTS.has(segments[1])) {
-      return {
-        selection: { baseModelId: segments[0], effort: segments[1] },
-        provider: null,
-      };
-    }
-    return { selection: { baseModelId: wireId, effort: null }, provider: null };
-  },
+    formatCodexModelId(selection.baseModelId, selection.effort),
+  decode: (wireId: string) => ({ selection: parseCodexModelId(wireId), provider: null }),
 };
 
-/**
- * Codex backend — wraps the configured `codex-acp`, which inherits auth from
- * the Codex CLI login. Auth is CLI-owned (no Copilot-side keys),
- * so the candidate models come entirely from the CLI's live `availableModels`
- * (active session or preloader cache); curation is the model-management
- * `backends.codex.enabledModels` set surfaced via `getEnabledModelEntries`.
- *
- * Effort is surfaced via opencode-style model-id parsing — codex-acp
- * advertises one model per (base × effort) combination, and we collapse
- * them into a single picker row plus a sibling effort dropdown.
- */
 export const CodexBackendDescriptor: BackendDescriptor = {
   id: "codex",
+  auth: codexAuth,
   displayName: "Codex",
   Icon: CodexLogo,
-  // Cloud agent — flagged with a cloud-egress warning while Self-Host Mode is on.
   selfHostable: false,
   routesCopilotModels: false,
   setupDescription:
@@ -113,25 +98,19 @@ export const CodexBackendDescriptor: BackendDescriptor = {
   restartOnManagedSkillsChange: false,
   restartOnProviderConfigChange: false,
   restartOnSystemPromptChange: true,
-  // codex names a session after the raw first prompt (which leaks the injected
-  // context envelope), so the session derives the tab title client-side instead.
   summarizesSessionTitle: false,
+  // Codex ends its turn on revise_plan without acting on the deny message.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/41
+  planFeedbackDelivery: "next_turn",
   wire: codexWire,
   showModelDescriptions: true,
 
   getEnabledModelEntries(settings: CopilotSettings): EnabledModelEntry[] {
-    // All Codex models are agent-origin.
     return [
       ...agentOriginEnabledModelEntries(settings, "codex", (wireId) => codexWire.decode(wireId)),
     ];
   },
 
-  /**
-   * codex-acp reports inconsistently-cased names (`GPT-5.5` but also
-   * `gpt-5.4`, `gpt-5.3-codex`). Uppercase only the anchored `gpt` prefix so
-   * the column reads consistently — no family/token guessing, so the wire
-   * ids and any mid-string tokens are left untouched.
-   */
   normalizeModelName(name: string): string {
     return name.replace(/^gpt/i, "GPT");
   },
@@ -153,7 +132,28 @@ export const CodexBackendDescriptor: BackendDescriptor = {
   },
 
   getInstallState(settings: CopilotSettings): InstallState {
-    return binaryPathInstallState(settings.agentMode?.backends?.codex?.binaryPath);
+    const configured = settings.agentMode?.backends?.codex;
+    if (!configured?.binaryPath) return { kind: "absent" };
+    try {
+      const installed = inspectCodexAcpPackage(configured.binaryPath);
+      return classifyBinaryInstall(
+        {
+          kind: "installed",
+          version: installed.runtimeVersion,
+          source: configured.binarySource ?? "custom",
+        },
+        CODEX_MIN_VERSION,
+        "Codex"
+      );
+    } catch (error) {
+      return classifyBinaryInstall(
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+          ? { kind: "absent" }
+          : { kind: "error", message: error instanceof Error ? error.message : String(error) },
+        CODEX_MIN_VERSION,
+        "Codex"
+      );
+    }
   },
 
   getResolvedBinaryPath(settings: CopilotSettings): string | null {
@@ -163,7 +163,12 @@ export const CodexBackendDescriptor: BackendDescriptor = {
   subscribeInstallState(_plugin: CopilotPlugin, cb: () => void): () => void {
     return subscribeToSettingsChange((prev, next) => {
       if (
-        prev.agentMode?.backends?.codex?.binaryPath !== next.agentMode?.backends?.codex?.binaryPath
+        prev.agentMode?.backends?.codex?.binaryPath !==
+          next.agentMode?.backends?.codex?.binaryPath ||
+        prev.agentMode?.backends?.codex?.binaryVersion !==
+          next.agentMode?.backends?.codex?.binaryVersion ||
+        prev.agentMode?.backends?.codex?.binarySource !==
+          next.agentMode?.backends?.codex?.binarySource
       ) {
         cb();
       }
@@ -174,22 +179,60 @@ export const CodexBackendDescriptor: BackendDescriptor = {
     new CodexInstallModal(plugin.app).open();
   },
 
-  async applySelection(session: AgentSession, selection: ModelSelection): Promise<void> {
-    await session.applyModelWireId(codexWire.encode(selection));
+  async onPluginLoad(): Promise<void> {
+    codexBinaryManager.forgetSettledError();
+    await codexBinaryManager.autoUpgrade(CODEX_PINNED_VERSION, CODEX_MIN_VERSION, (message) => {
+      new Notice(message);
+    });
   },
 
+  managedInstall: {
+    getState: () => codexBinaryManager.getActionState(),
+    subscribe: (_plugin, onChange) => codexBinaryManager.subscribeRuntimeState(onChange),
+    run: async () => {
+      await codexBinaryManager.install();
+    },
+  },
+
+  async applySelection(
+    session: ModelSelectionSession,
+    selection: ModelSelection,
+    context
+  ): Promise<void> {
+    const currentBase = context
+      ? context.backendReportedCurrent?.baseModelId
+      : session.getState()?.model?.current.baseModelId;
+    // Model options accept bare ids; effort belongs to the selected model's refreshed
+    // config catalog. https://github.com/Brevilabs/obsidian-copilot-private/issues/550
+    if (currentBase !== selection.baseModelId) {
+      await session.applyModelWireId(selection.baseModelId);
+    }
+    const model = session.getState()?.model;
+    const apply = model?.apply;
+    const effort = resolveEffort(
+      selection.effort,
+      model?.availableModels.find((entry) => entry.baseModelId === selection.baseModelId)
+        ?.effortOptions
+    );
+    if (apply?.kind === "setConfigOption" && apply.effortConfigId && effort !== null) {
+      await session.setConfigOption(apply.effortConfigId, effort);
+    }
+  },
+
+  prefetchEffortCatalog: prefetchConfigEfforts,
+
   createBackendProcess(args): BackendProcess {
-    // Codex sees managed skills only via the `.agents/skills/<name>`
-    // symlink. The per-agent toggle drives whether the symlink exists; no
-    // deny synthesis is needed because Codex does not cross-discover from
-    // `.claude/skills/` or `.opencode/skills/`.
     return simpleBinaryBackendProcess(args, new CodexBackend(args.clientVersion));
   },
 
   SettingsPanel: CodexSettingsPanel,
 
-  getModeMapping(modeState) {
-    return buildCodexModeMapping(modeState);
+  getModeMapping() {
+    return buildCodexModeMapping();
+  },
+
+  getModeState(modeState, configOptions) {
+    return buildCodexModeState(modeState, configOptions);
   },
 };
 

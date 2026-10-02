@@ -3,6 +3,7 @@ import { App, Modal } from "obsidian";
 import { Root } from "react-dom/client";
 import { Button } from "@/components/ui/button";
 import { createPluginRoot } from "@/utils/react/createPluginRoot";
+import { createProductUrl, PRODUCT_URLS } from "@/lib/productLinks";
 import { logError } from "@/logger";
 import { DEFAULT_COPILOT_PLUS_CHAT_MODEL, applyLicenseSettings } from "@/plusUtils";
 
@@ -11,7 +12,6 @@ export interface CopilotPlusWelcomeModalContentProps {
   onCancel: () => void;
 }
 
-/** Body of {@link CopilotPlusWelcomeModal}, exported prop-driven so the gallery can render it. */
 export function CopilotPlusWelcomeModalContent({
   onConfirm,
   onCancel,
@@ -21,8 +21,9 @@ export function CopilotPlusWelcomeModalContent({
       <div>
         <p>
           Thanks for purchasing! Your license includes Copilot exclusive models, cross-agent skills,
-          access to the <a href="https://symposium.md">symposium.md</a> doc sharing service, and
-          much more!
+          access to the{" "}
+          <a href={createProductUrl(PRODUCT_URLS.OPENARTIFACTS, "welcome_modal")}>OpenArtifacts</a>{" "}
+          doc sharing service, and much more!
         </p>
         <p>
           Would you like to make <b className="tw-text-accent">{DEFAULT_COPILOT_PLUS_CHAT_MODEL}</b>{" "}
@@ -47,7 +48,6 @@ export class CopilotPlusWelcomeModal extends Modal {
 
   constructor(app: App) {
     super(app);
-    // https://docs.obsidian.md/Reference/TypeScript+API/Modal/setTitle
     // @ts-ignore
     this.setTitle("Welcome to Copilot 🚀");
   }

@@ -1,9 +1,8 @@
 import { BottomLoadingIndicator } from "@/components/chat-components/BottomLoadingIndicator";
 import ChatSingleMessage from "@/components/chat-components/ChatSingleMessage";
-import { SuggestedPrompts } from "@/components/chat-components/SuggestedPrompts";
+import { ChatTranscriptViewport } from "@/components/chat-components/ui/ChatTranscriptViewport";
 import { USER_SENDER } from "@/constants";
 import { useChatScrolling } from "@/hooks/useChatScrolling";
-import { useSettingsValue } from "@/settings/model";
 import { ChatMessage } from "@/types/message";
 import { App } from "obsidian";
 import React, { memo } from "react";
@@ -11,16 +10,18 @@ import React, { memo } from "react";
 interface ChatMessagesProps {
   chatHistory: ChatMessage[];
   currentAiMessage: string;
-  /** Stable ID for streaming message, shared with final persisted message */
   streamingMessageId?: string | null;
   loading?: boolean;
   loadingMessage?: string;
   app: App;
+  sourcePath?: string;
   onRegenerate: (messageIndex: number) => void;
   onEdit: (messageIndex: number, newMessage: string) => void;
   onDelete: (messageIndex: number) => void;
-  onReplaceChat: (prompt: string) => void;
-  showHelperComponents: boolean;
+}
+
+export function isChatEmpty(chatHistory: ChatMessage[], currentAiMessage: string): boolean {
+  return !chatHistory.some((message) => message.isVisible) && !currentAiMessage;
 }
 
 const ChatMessages = memo(
@@ -31,25 +32,24 @@ const ChatMessages = memo(
     loading,
     loadingMessage,
     app,
+    sourcePath = "",
     onRegenerate,
     onEdit,
     onDelete,
-    onReplaceChat,
-    showHelperComponents = true,
   }: ChatMessagesProps) => {
-    const settings = useSettingsValue();
+    const {
+      containerMinHeight,
+      scrollContainerCallbackRef,
+      contentCallbackRef,
+      onScroll,
+      isScrollPaused,
+      scrollToEnd,
+      getMessageKey,
+    } = useChatScrolling({ chatHistory });
 
-    // Chat scrolling behavior
-    const { containerMinHeight, scrollContainerCallbackRef, getMessageKey } = useChatScrolling({
-      chatHistory,
-    });
-
-    if (!chatHistory.filter((message) => message.isVisible).length && !currentAiMessage) {
+    if (isChatEmpty(chatHistory, currentAiMessage)) {
       return (
-        <div className="tw-flex tw-size-full tw-flex-col tw-gap-2 tw-overflow-y-auto">
-          {showHelperComponents && settings.showSuggestedPrompts && (
-            <SuggestedPrompts onClick={onReplaceChat} />
-          )}
+        <div className="tw-flex tw-w-full tw-flex-col tw-gap-2">
           {loading && <BottomLoadingIndicator label={loadingMessage} />}
         </div>
       );
@@ -57,15 +57,16 @@ const ChatMessages = memo(
 
     return (
       <div className="tw-flex tw-h-full tw-flex-1 tw-flex-col tw-overflow-hidden">
-        <div
-          ref={scrollContainerCallbackRef}
-          data-testid="chat-messages"
-          className="tw-relative tw-flex tw-w-full tw-flex-1 tw-select-text tw-flex-col tw-items-start tw-justify-start tw-overflow-y-auto tw-scroll-smooth tw-break-words tw-text-[calc(var(--font-text-size)_-_2px)]"
+        <ChatTranscriptViewport
+          scrollContainerRef={scrollContainerCallbackRef}
+          contentRef={contentCallbackRef}
+          onScroll={onScroll}
+          isScrollPaused={isScrollPaused}
+          scrollToEnd={scrollToEnd}
         >
           {chatHistory.map((message, index) => {
             const visibleMessages = chatHistory.filter((m) => m.isVisible);
             const isLastMessage = index === visibleMessages.length - 1;
-            // Only apply min-height to AI messages that are last
             const shouldApplyMinHeight = isLastMessage && message.sender !== USER_SENDER;
 
             return (
@@ -80,6 +81,7 @@ const ChatMessages = memo(
                 >
                   <ChatSingleMessage
                     message={message}
+                    sourcePath={sourcePath}
                     app={app}
                     isStreaming={false}
                     onRegenerate={() => onRegenerate(index)}
@@ -121,7 +123,7 @@ const ChatMessages = memo(
               <BottomLoadingIndicator label={loadingMessage} />
             </div>
           ) : null}
-        </div>
+        </ChatTranscriptViewport>
       </div>
     );
   }

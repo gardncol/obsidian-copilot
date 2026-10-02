@@ -13,11 +13,6 @@ interface AskUserQuestionCardProps {
   onResolve: (requestId: string, answers: AgentQuestionAnswers) => void;
 }
 
-/**
- * Whether a question has enough input to submit. Mirrors Claude Code's "Other"
- * affordance: an active "Other" row is only satisfied once its free-form text
- * is non-empty, so it can gate Submit independently of the preset options.
- */
 function isAnswered(
   question: AgentQuestion,
   selection: string | Set<string> | undefined,
@@ -25,44 +20,36 @@ function isAnswered(
   customText: string
 ): boolean {
   if (otherActive) return customText.trim().length > 0;
-  if (question.multiSelect) return true;
+  if (question.multiSelect) {
+    // An untouched or fully cleared multi-select must not become an empty-string answer.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/182
+    return selection instanceof Set && selection.size > 0;
+  }
   return typeof selection === "string" && selection !== "";
 }
 
-/**
- * Inline card rendered at the tail of the chat scroll container while the
- * agent's `AskUserQuestion` tool waits on the user — the sibling of
- * `ToolPermissionCard`. Replaces the old `AskUserQuestionModal`: modals steal
- * focus and resolve as a cancel on accidental click-outside, which is
- * inconsistent with the rest of Agent Mode's inline-card model.
- *
- * A single call may carry several questions; each renders under its own tab so
- * the card stays compact, while the answers still submit together to honor the
- * SDK's single-response contract. Submitting routes the answers map through the
- * ask-question prompter's happy path; Cancel resolves with `{}`, which the
- * bridge maps to the "User cancelled the question" deny.
- *
- * Each question also offers an "Other" row that reveals a free-form textarea,
- * so the user can answer when none of the agent's options fit — the typed text
- * is folded into the same plain-string answer the presets produce.
- */
 export const AskUserQuestionCard: React.FC<AskUserQuestionCardProps> = ({ request, onResolve }) => {
   const { questions, requestId } = request;
   const [busy, setBusy] = useState(false);
   const [activeTab, setActiveTab] = useState(0);
-  // Per-question selection: a single label for radio, a Set of labels for checkbox.
   const [selections, setSelections] = useState<Record<number, string | Set<string>>>({});
-  // Per-question "Other" state, kept out of the option-label value space so a
-  // custom answer can never collide with a real option label.
   const [otherActive, setOtherActive] = useState<Record<number, boolean>>({});
   const [customTexts, setCustomTexts] = useState<Record<number, string>>({});
 
-  // Gate Submit until every single-select question has a pick (or a non-empty
-  // "Other"). Multi-select questions may be left empty unless "Other" is armed,
-  // in which case its text must be filled.
+  const showTabs = questions.length > 1;
+  const active = questions[activeTab] ?? questions[0];
+  const activeIdx = questions[activeTab] ? activeTab : 0;
+
   const canSubmit = questions.every((q, idx) =>
     isAnswered(q, selections[idx], otherActive[idx] ?? false, customTexts[idx] ?? "")
   );
+  const canAdvance = isAnswered(
+    active,
+    selections[activeIdx],
+    otherActive[activeIdx] ?? false,
+    customTexts[activeIdx] ?? ""
+  );
+  const isFinalQuestion = activeIdx === questions.length - 1;
 
   const submit = (): void => {
     if (busy || !canSubmit) return;
@@ -76,13 +63,24 @@ export const AskUserQuestionCard: React.FC<AskUserQuestionCardProps> = ({ reques
       if (q.multiSelect) {
         const labels = sel instanceof Set ? Array.from(sel) : [];
         if (other && text) labels.push(text);
-        answers[q.question] = labels.join(", ");
+        answers[q.answerKey ?? q.question] = labels.join(", ");
       } else {
-        // "Other" wins over any stale preset (radio exclusivity clears it anyway).
-        answers[q.question] = other ? text : typeof sel === "string" ? sel : "";
+        answers[q.answerKey ?? q.question] = other ? text : typeof sel === "string" ? sel : "";
       }
     }
     onResolve(requestId, answers);
+  };
+
+  // Tabs may skip questions, so Next validates only the visible answer while
+  // final Submit keeps the request-wide validation that prevents partial payloads.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/117
+  const runPrimaryAction = (): void => {
+    if (isFinalQuestion) {
+      submit();
+      return;
+    }
+    if (busy || !canAdvance) return;
+    setActiveTab(activeIdx + 1);
   };
 
   const cancel = (): void => {
@@ -91,12 +89,6 @@ export const AskUserQuestionCard: React.FC<AskUserQuestionCardProps> = ({ reques
     onResolve(requestId, {});
   };
 
-  const showTabs = questions.length > 1;
-  const active = questions[activeTab] ?? questions[0];
-  const activeIdx = questions[activeTab] ? activeTab : 0;
-
-  // Choosing a preset. Single-select picks one label and disarms "Other";
-  // multi-select toggles the label in its Set and leaves "Other" alone.
   const togglePreset = (label: string): void => {
     if (active.multiSelect) {
       setSelections((prev) => {
@@ -112,8 +104,6 @@ export const AskUserQuestionCard: React.FC<AskUserQuestionCardProps> = ({ reques
     setOtherActive((prev) => ({ ...prev, [activeIdx]: false }));
   };
 
-  // Choosing "Other". Single-select arms it exclusively (clearing the radio
-  // pick); multi-select toggles it alongside any checked presets.
   const toggleOther = (): void => {
     if (active.multiSelect) {
       setOtherActive((prev) => ({ ...prev, [activeIdx]: !(prev[activeIdx] ?? false) }));
@@ -124,7 +114,7 @@ export const AskUserQuestionCard: React.FC<AskUserQuestionCardProps> = ({ reques
   };
 
   return (
-    <div className="tw-mx-3 tw-my-2 tw-w-[calc(100%-1.5rem)] tw-rounded-md tw-border tw-border-solid tw-border-border tw-bg-secondary">
+    <div className="tw-w-full tw-rounded-md tw-border tw-border-solid tw-border-border tw-bg-secondary">
       <div className="copilot-divider-b tw-flex tw-items-center tw-gap-2 tw-px-3 tw-py-2">
         <MessageCircleQuestion className="tw-size-4 tw-shrink-0 tw-text-accent" />
         <div className="tw-truncate tw-text-sm tw-font-medium">Question from agent</div>
@@ -137,17 +127,13 @@ export const AskUserQuestionCard: React.FC<AskUserQuestionCardProps> = ({ reques
               const selected = idx === activeIdx;
               return (
                 <button
-                  key={q.question}
+                  key={q.answerKey ?? q.question}
                   type="button"
                   role="tab"
                   aria-selected={selected}
                   disabled={busy}
                   onClick={() => setActiveTab(idx)}
                   className={cn(
-                    // Underline tab: a colored inset bottom edge marks the
-                    // active question. box-shadow (not a border) avoids the
-                    // preflight-off border-style leak, and overlaps the
-                    // tablist's divider so the accent replaces the grey rule.
                     "tw--mb-px !tw-rounded-none !tw-border-none !tw-bg-transparent tw-p-1.5 tw-text-sm tw-transition-colors",
                     "disabled:tw-cursor-not-allowed disabled:tw-opacity-50",
                     selected
@@ -163,7 +149,7 @@ export const AskUserQuestionCard: React.FC<AskUserQuestionCardProps> = ({ reques
         ) : null}
 
         <QuestionPanel
-          key={active.question}
+          key={active.answerKey ?? active.question}
           question={active}
           name={`askq-${requestId}-${activeIdx}`}
           selection={selections[activeIdx]}
@@ -173,7 +159,7 @@ export const AskUserQuestionCard: React.FC<AskUserQuestionCardProps> = ({ reques
           onTogglePreset={togglePreset}
           onToggleOther={toggleOther}
           onCustomTextChange={(text) => setCustomTexts((prev) => ({ ...prev, [activeIdx]: text }))}
-          onSubmitShortcut={submit}
+          onPrimaryActionShortcut={runPrimaryAction}
         />
       </div>
 
@@ -181,8 +167,13 @@ export const AskUserQuestionCard: React.FC<AskUserQuestionCardProps> = ({ reques
         <Button variant="secondary" size="sm" disabled={busy} onClick={cancel}>
           Cancel
         </Button>
-        <Button variant="default" size="sm" disabled={busy || !canSubmit} onClick={submit}>
-          Submit
+        <Button
+          variant="default"
+          size="sm"
+          disabled={busy || (isFinalQuestion ? !canSubmit : !canAdvance)}
+          onClick={runPrimaryAction}
+        >
+          {isFinalQuestion ? "Submit" : "Next"}
         </Button>
       </div>
     </div>
@@ -191,7 +182,6 @@ export const AskUserQuestionCard: React.FC<AskUserQuestionCardProps> = ({ reques
 
 interface QuestionPanelProps {
   question: AgentQuestion;
-  /** Radio-group name; namespaced by requestId + index so cards don't collide. */
   name: string;
   selection: string | Set<string> | undefined;
   otherActive: boolean;
@@ -200,11 +190,9 @@ interface QuestionPanelProps {
   onTogglePreset: (label: string) => void;
   onToggleOther: () => void;
   onCustomTextChange: (text: string) => void;
-  /** Cmd/Ctrl+Enter in the textarea; the parent guards on `canSubmit`. */
-  onSubmitShortcut: () => void;
+  onPrimaryActionShortcut: () => void;
 }
 
-/** The active question's prompt text plus its single- or multi-select option list. */
 const QuestionPanel: React.FC<QuestionPanelProps> = ({
   question,
   name,
@@ -215,7 +203,7 @@ const QuestionPanel: React.FC<QuestionPanelProps> = ({
   onTogglePreset,
   onToggleOther,
   onCustomTextChange,
-  onSubmitShortcut,
+  onPrimaryActionShortcut,
 }) => {
   const control = question.multiSelect ? "checkbox" : "radio";
   return (
@@ -231,10 +219,6 @@ const QuestionPanel: React.FC<QuestionPanelProps> = ({
               key={opt.label}
               className="tw-flex tw-cursor-pointer tw-items-start tw-gap-2 tw-rounded tw-px-2 tw-py-1.5 hover:tw-bg-modifier-hover"
             >
-              {/* Center the control in a box matching the label's line height so
-                  it top-aligns with the first line of text, not its mid-point.
-                  `tw-m-0` strips the asymmetric default margin browsers give
-                  native checkboxes/radios, which was throwing off alignment. */}
               <span className="tw-flex tw-h-5 tw-shrink-0 tw-items-center">
                 <input
                   type={control}
@@ -255,24 +239,24 @@ const QuestionPanel: React.FC<QuestionPanelProps> = ({
           );
         })}
 
-        {/* "Other" escape hatch: shares the radio group name so single-select
-            grouping stays native, and reveals a free-form textarea when armed. */}
-        <label className="tw-flex tw-cursor-pointer tw-items-start tw-gap-2 tw-rounded tw-px-2 tw-py-1.5 hover:tw-bg-modifier-hover">
-          <span className="tw-flex tw-h-5 tw-shrink-0 tw-items-center">
-            <input
-              type={control}
-              name={name}
-              checked={otherActive}
-              disabled={disabled}
-              onChange={onToggleOther}
-              className="tw-m-0"
-            />
-          </span>
-          <div className="tw-min-w-0">
-            <div className="tw-text-sm tw-leading-5">Other</div>
-            <div className="tw-text-xs tw-text-muted">Type your own response</div>
-          </div>
-        </label>
+        {question.allowOther !== false ? (
+          <label className="tw-flex tw-cursor-pointer tw-items-start tw-gap-2 tw-rounded tw-px-2 tw-py-1.5 hover:tw-bg-modifier-hover">
+            <span className="tw-flex tw-h-5 tw-shrink-0 tw-items-center">
+              <input
+                type={control}
+                name={name}
+                checked={otherActive}
+                disabled={disabled}
+                onChange={onToggleOther}
+                className="tw-m-0"
+              />
+            </span>
+            <div className="tw-min-w-0">
+              <div className="tw-text-sm tw-leading-5">Other</div>
+              <div className="tw-text-xs tw-text-muted">Type your own response</div>
+            </div>
+          </label>
+        ) : null}
       </div>
 
       {otherActive ? (
@@ -286,7 +270,7 @@ const QuestionPanel: React.FC<QuestionPanelProps> = ({
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
               e.preventDefault();
-              onSubmitShortcut();
+              onPrimaryActionShortcut();
             }
           }}
           rows={2}

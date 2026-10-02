@@ -1,35 +1,13 @@
 import { compactAssistantOutput } from "./ChatHistoryCompactor";
 
 describe("ChatHistoryCompactor", () => {
-  describe("compactAssistantOutput", () => {
-    it("should return small content unchanged", () => {
+  describe("compactAssistantOutput()", () => {
+    it("returns text without tool results unchanged", () => {
       const output = "This is a short response without tool results.";
       expect(compactAssistantOutput(output)).toBe(output);
     });
 
-    it("should compact large localSearch blocks", () => {
-      const largeContent = "A".repeat(10000);
-      const output = `I searched for that.
-
-<localSearch>
-<document>
-<title>Note 1</title>
-<path>notes/note1.md</path>
-<content>${largeContent}</content>
-</document>
-</localSearch>
-
-Based on my search, here's what I found.`;
-
-      const result = compactAssistantOutput(output, { verbatimThreshold: 1000 });
-      expect(typeof result).toBe("string");
-      expect((result as string).length).toBeLessThan(output.length);
-      expect(result).toContain("I searched for that");
-      expect(result).toContain("here's what I found");
-      expect(result).toContain("prior_context");
-    });
-
-    it("should compact large readNote JSON results", () => {
+    it("compacts an oversized readNote JSON result to section previews and marks it COMPACTED", () => {
       const largeContent = `## Introduction
 ${"This is intro. ".repeat(200)}
 
@@ -57,7 +35,7 @@ Here's a summary.`;
       expect(result).toContain("## Introduction");
     });
 
-    it("should handle multimodal content arrays", () => {
+    it("compacts the text parts of a multimodal array and leaves image parts untouched", () => {
       const largeContent = "B".repeat(10000);
       const textItem = { type: "text", text: `<localSearch>${largeContent}</localSearch>` };
       const imageItem = { type: "image_url", url: "data:image/png;base64,..." };
@@ -67,10 +45,10 @@ Here's a summary.`;
       expect(Array.isArray(result)).toBe(true);
       const resultArray = result as Array<{ text: string; type: string }>;
       expect(resultArray[0].text.length).toBeLessThan(textItem.text.length);
-      expect(resultArray[1]).toEqual(imageItem); // Image unchanged
+      expect(resultArray[1]).toEqual(imageItem);
     });
 
-    it("should keep small tool results verbatim", () => {
+    it("keeps a readNote result under the verbatim threshold unchanged", () => {
       const smallResult = JSON.stringify({
         notePath: "notes/short.md",
         content: "Brief content.",
@@ -79,19 +57,17 @@ Here's a summary.`;
       expect(compactAssistantOutput(output)).toBe(output);
     });
 
-    it("should never compact selected_text blocks", () => {
+    it("never compacts a selected_text block however large", () => {
       const largeContent = "X".repeat(20000);
       const output = `<selected_text>
 <content>${largeContent}</content>
 </selected_text>`;
 
-      // selected_text is not in the TOOL_RESULT_PATTERNS, so it won't be processed
-      // But if it were, it should remain unchanged due to isRecoverable check
       const result = compactAssistantOutput(output, { verbatimThreshold: 1000 });
       expect(result).toBe(output);
     });
 
-    it("should handle multiple tool results in one message", () => {
+    it("compacts every oversized localSearch block in one message", () => {
       const large1 = "A".repeat(8000);
       const large2 = "B".repeat(8000);
       const output = `First:
@@ -107,13 +83,12 @@ Done.`;
       expect((result as string).length).toBeLessThan(output.length * 0.3);
     });
 
-    it("should return non-string/non-array content unchanged", () => {
+    it("returns non-string, non-array content as-is", () => {
       const output = { some: "object" };
       expect(compactAssistantOutput(output as unknown as string)).toBe(output);
     });
 
-    it("should handle readNote JSON with nested braces in content", () => {
-      // Content contains code with nested braces - this used to break the regex
+    it("compacts a readNote result whose content contains nested braces", () => {
       const codeContent = `## Code Example
 ${"function test() { if (true) { return { value: 1 }; } } ".repeat(100)}
 
@@ -142,7 +117,7 @@ That's the implementation.`;
       expect(result).toContain("That's the implementation");
     });
 
-    it("should handle multiple readNote results in sequence", () => {
+    it("compacts each of several readNote results in one message", () => {
       const content1 = "A".repeat(3000);
       const content2 = "B".repeat(3000);
 
@@ -163,12 +138,11 @@ Done.`;
       expect(result).toContain("First note:");
       expect(result).toContain("Second note:");
       expect(result).toContain("Done.");
-      // Both should be compacted
       const compactedCount = ((result as string).match(/COMPACTED/g) || []).length;
       expect(compactedCount).toBe(2);
     });
 
-    it("should preserve all documents in localSearch results", () => {
+    it("lists every document of an oversized localSearch result with its title and path", () => {
       const largeContent1 = "First document content. ".repeat(200);
       const largeContent2 = "Second document content. ".repeat(200);
       const largeContent3 = "Third document content. ".repeat(200);
@@ -199,10 +173,8 @@ Based on my search, here's what I found.`;
       expect(typeof result).toBe("string");
       const resultStr = result as string;
 
-      // Should be compacted (smaller than original)
       expect(resultStr.length).toBeLessThan(output.length);
 
-      // All three documents should be preserved
       expect(resultStr).toContain("First Note");
       expect(resultStr).toContain("Second Note");
       expect(resultStr).toContain("Third Note");
@@ -211,9 +183,30 @@ Based on my search, here's what I found.`;
       expect(resultStr).toContain("third.md");
       expect(resultStr).toContain("3 search results");
 
-      // Surrounding text should be preserved
       expect(resultStr).toContain("I found these notes:");
       expect(resultStr).toContain("here's what I found");
+    });
+
+    it("compacts an oversized note_context block into a prior_context preview that keeps its headings", () => {
+      const largeContent = `## Section 1
+${"Content for section 1. ".repeat(200)}
+
+## Section 2
+${"Content for section 2. ".repeat(200)}`;
+
+      const output = `<note_context>
+<title>My Note</title>
+<path>notes/mynote.md</path>
+<content>${largeContent}</content>
+</note_context>`;
+
+      const result = compactAssistantOutput(output, { verbatimThreshold: 1000 });
+
+      expect(typeof result).toBe("string");
+      expect((result as string).length).toBeLessThan(output.length);
+      expect(result).toContain('<prior_context source="notes/mynote.md" type="note">');
+      expect(result).toContain("## Section 1");
+      expect(result).toContain("## Section 2");
     });
   });
 });

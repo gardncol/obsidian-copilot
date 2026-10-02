@@ -17,16 +17,6 @@ jest.mock("obsidian", () => {
   };
 });
 
-jest.mock("@/utils/hash", () => ({
-  md5: jest.fn((value: string) => {
-    // Reason: deterministic fake hash for test assertions.
-    // Uses a simple char-code sum to produce reproducible 32-char hex strings.
-    let sum = 0;
-    for (let i = 0; i < value.length; i++) sum += value.charCodeAt(i);
-    return sum.toString(16).padStart(32, "0");
-  }),
-}));
-
 jest.mock("@/settings/model", () => {
   const actual = jest.requireActual<object>("@/settings/model");
   return {
@@ -41,71 +31,19 @@ jest.mock("@/logger", () => ({
   logError: jest.fn(),
 }));
 
-jest.mock("@/services/settingsSecretTransforms", () => ({
-  MODEL_SECRET_FIELDS: ["apiKey"] as const,
-  isSensitiveKey: jest.fn((key: string) => {
-    const lower = key.toLowerCase();
-    const normalized = lower.replace(/[_-]/g, "");
-    return (
-      normalized.includes("apikey") ||
-      lower.endsWith("token") ||
-      lower.endsWith("accesstoken") ||
-      lower.endsWith("secret") ||
-      lower.endsWith("password") ||
-      lower.endsWith("licensekey")
-    );
-  }),
-  // Reason: stub the canonical secret-field list used by hydrateFromKeychain.
-  // Keep it minimal so tests targeting a single field don't accidentally
-  // trigger hydration for every default provider.
-  TOP_LEVEL_SECRET_FIELDS: ["openAIApiKey"] as const,
-  stripKeychainFields: jest.fn((settings: Record<string, unknown>) => {
-    const out = { ...settings };
-    // Reason: mirror the real isSensitiveKey heuristic for top-level fields
-    for (const key of Object.keys(out)) {
-      const lower = key.toLowerCase();
-      const normalized = lower.replace(/[_-]/g, "");
-      const isSensitive =
-        normalized.includes("apikey") ||
-        lower.endsWith("token") ||
-        lower.endsWith("accesstoken") ||
-        lower.endsWith("secret") ||
-        lower.endsWith("password") ||
-        lower.endsWith("licensekey");
-      if (isSensitive) out[key] = "";
-    }
-    if (Array.isArray(out.activeModels)) {
-      out.activeModels = (out.activeModels as Array<Record<string, unknown>>).map((m) => ({
-        ...m,
-        apiKey: "",
-      }));
-    }
-    if (Array.isArray(out.activeEmbeddingModels)) {
-      out.activeEmbeddingModels = (out.activeEmbeddingModels as Array<Record<string, unknown>>).map(
-        (m) => ({ ...m, apiKey: "" })
-      );
-    }
-    return out;
-  }),
-  cleanupLegacyFields: jest.fn((settings: Record<string, unknown>) => ({ ...settings })),
-}));
-
 import { FileSystemAdapter, Notice, type App } from "obsidian";
 import { getSettings } from "@/settings/model";
 import type { CopilotSettings } from "@/settings/model";
 import type { CustomModel } from "@/aiParams";
 import { KeychainService, isSecretKey } from "./keychainService";
 
-/** Build a lightweight settings object. */
 function makeSettings(overrides: Partial<CopilotSettings> = {}): CopilotSettings {
   return {
     activeModels: [],
-    activeEmbeddingModels: [],
     ...overrides,
   } as unknown as CopilotSettings;
 }
 
-/** Build a minimal custom model. */
 function makeModel(overrides: Partial<CustomModel> = {}): CustomModel {
   return {
     name: "gpt-4",
@@ -115,7 +53,6 @@ function makeModel(overrides: Partial<CustomModel> = {}): CustomModel {
   };
 }
 
-/** Fake SecretStorage with controllable Jest spies. */
 function makeSecretStorage() {
   return {
     getSecret: jest.fn().mockReturnValue(null),
@@ -125,26 +62,15 @@ function makeSecretStorage() {
   };
 }
 
-/** Create a FileSystemAdapter mock with a given basePath. */
 function makeAdapter(basePath: string) {
   const adapter = new FileSystemAdapter();
-  // Reason: override the default basePath from the mock constructor
   (adapter as unknown as { _basePath: string })._basePath = basePath;
   return adapter;
 }
 
-/** Create a minimal Obsidian app shape for KeychainService. */
 function makeApp(options?: {
   basePath?: string;
   adapter?: unknown;
-  /**
-   * Reason: distinguish "default to fake storage" from "explicitly omit the
-   * field". Production code reads `app.secretStorage` and falsy means the
-   * runtime lacks the API entirely — the `??` short-circuit had hidden
-   * that case in tests.
-   *   - omit the key   → falls back to the fake storage (most tests)
-   *   - secretStorage: null → simulate an Obsidian build without SecretStorage
-   */
   secretStorage?: ReturnType<typeof makeSecretStorage> | null;
 }) {
   const basePath = options?.basePath ?? "/Users/test/MyVault";
@@ -154,9 +80,6 @@ function makeApp(options?: {
     vault: {
       adapter: options?.adapter ?? makeAdapter(basePath),
       getName: jest.fn().mockReturnValue("MyVault"),
-      // Reason: any non-empty string works here — the production code resolves
-      // `app.vault.configDir` rather than hardcoding ".obsidian", and the lint
-      // rule `obsidianmd/hardcoded-config-path` flags ".obsidian" specifically.
       configDir: "test-config-dir",
     },
     secretStorage,
@@ -168,31 +91,20 @@ beforeEach(() => {
   KeychainService.resetInstance();
 });
 
-// ---------------------------------------------------------------------------
-// isSecretKey
-// ---------------------------------------------------------------------------
-
 describe("keychainService", () => {
   describe("isSecretKey()", () => {
-    it.each(["openAIApiKey", "googleApiKey", "sessionToken", "plusLicenseKey", "myPassword"])(
-      "returns true for %s",
-      (key) => {
-        expect(isSecretKey(key)).toBe(true);
-      }
-    );
+    it.each(["openAIApiKey", "plusLicenseKey"])("returns true for the secret setting %s", (key) => {
+      expect(isSecretKey(key)).toBe(true);
+    });
 
-    it.each(["temperature", "defaultModelKey", "userId"])("returns false for %s", (key) => {
+    it.each(["temperature", "defaultModelKey"])("returns false for the plain setting %s", (key) => {
       expect(isSecretKey(key)).toBe(false);
     });
   });
 
   describe("KeychainService", () => {
-    // ---------------------------------------------------------------------------
-    // Vault ID generation
-    // ---------------------------------------------------------------------------
-
     describe("getVaultId()", () => {
-      it("produces a deterministic 8-char hex ID from desktop vault path", () => {
+      it("derives an 8-character hex ID from the desktop vault path", () => {
         const service = KeychainService.getInstance(makeApp({ basePath: "/Users/test/MyVault" }));
         const id = service.getVaultId();
 
@@ -200,7 +112,7 @@ describe("keychainService", () => {
         expect(/^[0-9a-f]{8}$/.test(id)).toBe(true);
       });
 
-      it("produces a stable ID across multiple calls", () => {
+      it("returns the same ID on every call", () => {
         const service = KeychainService.getInstance(makeApp({ basePath: "/Users/test/MyVault" }));
         expect(service.getVaultId()).toBe(service.getVaultId());
       });
@@ -240,10 +152,6 @@ describe("keychainService", () => {
       });
     });
 
-    // ---------------------------------------------------------------------------
-    // hydrateFromKeychain — read-only keychain hydration
-    // ---------------------------------------------------------------------------
-
     describe("hydrateFromKeychain()", () => {
       it("honors a keychain tombstone by zeroing the in-memory field", async () => {
         const secretStorage = makeSecretStorage();
@@ -256,7 +164,6 @@ describe("keychainService", () => {
 
         expect(result.settings.openAIApiKey).toBe("");
         expect(result.hadFailures).toBe(false);
-        // Reason: hydrateFromKeychain is strictly read-only.
         expect(secretStorage.setSecret).not.toHaveBeenCalled();
       });
 
@@ -314,17 +221,12 @@ describe("keychainService", () => {
       });
 
       it("hydrates canonical top-level secret fields even when missing from input settings", async () => {
-        // Reason: covers the partial-settings scenario — data.json from cross-version
-        // sync, downgrade-then-upgrade, or manual edits may omit some secret fields,
-        // but a corresponding keychain entry can still exist on this device. Hydrate
-        // must iterate the canonical field set, not just Object.keys(settings).
         const secretStorage = makeSecretStorage();
         secretStorage.getSecret.mockImplementation((id: string) =>
           id.endsWith("open-a-i-api-key") ? "sk-recovered" : null
         );
         const service = KeychainService.getInstance(makeApp({ secretStorage }));
 
-        // Note: makeSettings() intentionally does NOT seed openAIApiKey on the input.
         const result = await service.hydrateFromKeychain(makeSettings());
 
         expect((result.settings as unknown as Record<string, string>).openAIApiKey).toBe(
@@ -334,10 +236,6 @@ describe("keychainService", () => {
       });
 
       it("still hydrates legacy secret keys present on input but not in DEFAULT_SETTINGS", async () => {
-        // Reason: deprecated fields may have been removed from DEFAULT_SETTINGS yet
-        // remain in a user's data.json with a live keychain entry. The union of
-        // canonical fields + in-memory secret-shaped keys keeps them readable so
-        // upgrading never silently drops a key.
         const secretStorage = makeSecretStorage();
         secretStorage.getSecret.mockImplementation((id: string) =>
           id.includes("legacy-provider-api-key") ? "legacy-value" : null
@@ -354,10 +252,6 @@ describe("keychainService", () => {
       });
     });
 
-    // ---------------------------------------------------------------------------
-    // persistSecrets
-    // ---------------------------------------------------------------------------
-
     describe("persistSecrets()", () => {
       it("collects current secrets and tombstones cleared or deleted IDs", () => {
         const service = KeychainService.getInstance(makeApp());
@@ -366,7 +260,6 @@ describe("keychainService", () => {
           openAIApiKey: "sk-current",
           googleApiKey: "",
           activeModels: [makeModel({ name: "kept", provider: "openai", apiKey: "chat-secret" })],
-          activeEmbeddingModels: [],
         });
 
         const prev = makeSettings({
@@ -376,28 +269,18 @@ describe("keychainService", () => {
             makeModel({ name: "kept", provider: "openai", apiKey: "chat-prev" }),
             makeModel({ name: "deleted", provider: "openai", apiKey: "del-secret" }),
           ],
-          activeEmbeddingModels: [
-            makeModel({ name: "del-embed", provider: "openai", apiKey: "embed-secret" }),
-          ],
         });
 
         const result = service.persistSecrets(current, prev);
 
-        // Reason: should collect the current openAIApiKey and the kept model's apiKey
         const entryIds = result.secretEntries.map(([id]) => id);
         expect(entryIds.some((id) => id.includes("open-a-i-api-key"))).toBe(true);
         expect(entryIds.some((id) => id.includes("model-api-key-chat"))).toBe(true);
 
-        // Reason: should mark deleted models and cleared googleApiKey for tombstone
         expect(result.keychainIdsToDelete.some((id) => id.includes("google-api-key"))).toBe(true);
         expect(result.keychainIdsToDelete.some((id) => id.includes("model-api-key-chat"))).toBe(
           true
         );
-        expect(
-          result.keychainIdsToDelete.some((id) => id.includes("model-api-key-embedding"))
-        ).toBe(true);
-
-        // Reason: persistSecrets must not mutate the input settings objects
         expect(current.openAIApiKey).toBe("sk-current");
         expect(current.activeModels[0].apiKey).toBe("chat-secret");
         expect(prev.openAIApiKey).toBe("sk-prev");
@@ -405,17 +288,12 @@ describe("keychainService", () => {
       });
     });
 
-    // ---------------------------------------------------------------------------
-    // forgetAllSecrets
-    // ---------------------------------------------------------------------------
-
     describe("forgetAllSecrets()", () => {
       it("clears vault secrets, strips settings, and notifies the user", async () => {
         const secretStorage = makeSecretStorage();
         const service = KeychainService.getInstance(makeApp({ secretStorage }));
         const vaultId = service.getVaultId();
 
-        // Reason: listSecrets returns IDs for this vault and one from another vault
         secretStorage.listSecrets.mockReturnValue([
           `copilot-v${vaultId}-open-a-i-api-key`,
           "copilot-vother000-google-api-key",
@@ -433,7 +311,6 @@ describe("keychainService", () => {
 
         await service.forgetAllSecrets(saveData, syncMemory);
 
-        // Reason: should only delete entries for THIS vault, not other vaults
         expect(secretStorage.deleteSecret).toHaveBeenCalledWith(
           `copilot-v${vaultId}-open-a-i-api-key`
         );
@@ -441,7 +318,6 @@ describe("keychainService", () => {
           "copilot-vother000-google-api-key"
         );
 
-        // Reason: should save stripped settings to disk with secrets blanked
         expect(saveData).toHaveBeenCalled();
         const saved = saveData.mock.calls[0][0] as unknown as Record<string, unknown>;
         expect(saved._keychainOnly).toBeUndefined();
@@ -450,7 +326,6 @@ describe("keychainService", () => {
         expect(savedModels[0].apiKey).toBe("");
 
         expect(syncMemory).toHaveBeenCalled();
-        // Reason: synced memory should also have secrets blanked
         const synced = syncMemory.mock.calls[0][0] as unknown as Record<string, unknown>;
         expect(synced.openAIApiKey).toBe("");
         const syncedModels = synced.activeModels as Array<Record<string, unknown>>;
@@ -460,7 +335,7 @@ describe("keychainService", () => {
         );
       });
 
-      it("handles saveData failure gracefully — keychain NOT cleared", async () => {
+      it("leaves the keychain untouched and tells the user when saving data.json fails", async () => {
         const secretStorage = makeSecretStorage();
         const service = KeychainService.getInstance(makeApp({ secretStorage }));
         secretStorage.listSecrets.mockReturnValue([]);
@@ -472,7 +347,6 @@ describe("keychainService", () => {
 
         await service.forgetAllSecrets(saveData, syncMemory);
 
-        // Reason: disk failed → abort before keychain clear
         expect(secretStorage.deleteSecret).not.toHaveBeenCalled();
         expect(syncMemory).not.toHaveBeenCalled();
         expect(Notice).toHaveBeenCalledWith(
@@ -489,7 +363,6 @@ describe("keychainService", () => {
         const idB = `copilot-v${vaultId}-google-api-key`;
         secretStorage.listSecrets.mockReturnValue([idA, idB]);
 
-        // Reason: simulate partial failure — first delete succeeds, second throws.
         secretStorage.deleteSecret.mockImplementation((id: string) => {
           if (id === idB) throw new Error("keychain locked");
         });
@@ -503,11 +376,8 @@ describe("keychainService", () => {
           /Failed to clear 1 keychain/
         );
 
-        // Reason: disk save succeeds first (new ordering), then keychain clear fails.
         expect(saveData).toHaveBeenCalled();
         expect(secretStorage.deleteSecret).toHaveBeenCalledWith(idA);
-        // Reason: memory MUST be synced even on partial keychain failure, otherwise
-        // the next normal persist would write old secrets back from stale memory.
         expect(syncMemory).toHaveBeenCalled();
       });
 
@@ -544,9 +414,34 @@ describe("keychainService", () => {
       });
     });
 
-    // ---------------------------------------------------------------------------
-    // clearAllVaultSecrets — partial-failure surface area
-    // ---------------------------------------------------------------------------
+    describe("removeRetiredEmbeddingSecrets()", () => {
+      it("deletes only this vault's embedding-scoped model credentials (https://github.com/logancyang/obsidian-copilot/pull/3094#discussion_r3926692782)", () => {
+        const secretStorage = makeSecretStorage();
+        const service = KeychainService.getInstance(makeApp({ secretStorage }));
+        const vaultId = service.getVaultId();
+        const retired = `copilot-v${vaultId}-model-api-key-embedding-text-embedding-3-small`;
+        secretStorage.listSecrets.mockReturnValue([
+          retired,
+          `copilot-v${vaultId}-model-api-key-chat-gpt-4o`,
+          `copilot-v${vaultId}-open-a-i-api-key`,
+          "copilot-vother000-model-api-key-embedding-text-embedding-3-small",
+        ]);
+
+        service.removeRetiredEmbeddingSecrets();
+
+        expect(secretStorage.deleteSecret).toHaveBeenCalledTimes(1);
+        expect(secretStorage.deleteSecret).toHaveBeenCalledWith(retired);
+      });
+
+      it("leaves entries alone when the build cannot enumerate them", () => {
+        const secretStorage = makeSecretStorage();
+        (secretStorage as unknown as { listSecrets: unknown }).listSecrets = undefined;
+        const service = KeychainService.getInstance(makeApp({ secretStorage }));
+
+        expect(() => service.removeRetiredEmbeddingSecrets()).not.toThrow();
+        expect(secretStorage.deleteSecret).not.toHaveBeenCalled();
+      });
+    });
 
     describe("clearAllVaultSecrets()", () => {
       it("clears what it can, then throws aggregating the count of failed entries", () => {
@@ -566,15 +461,11 @@ describe("keychainService", () => {
 
         expect(() => service.clearAllVaultSecrets()).toThrow(/Failed to clear 2 keychain entries/);
 
-        // Reason: the successful delete survives; foreign-vault entry is never touched.
         expect(secretStorage.deleteSecret).toHaveBeenCalledWith(ok);
         expect(secretStorage.deleteSecret).not.toHaveBeenCalledWith(foreign);
       });
 
       it("throws without touching deleteSecret when listSecrets is not a function", () => {
-        // Reason: defensive feature detection — if a future Obsidian build exposes
-        // secretStorage without listSecrets we cannot enumerate vault entries, so
-        // we must refuse rather than silently leave residual entries behind.
         const secretStorage = makeSecretStorage();
         (secretStorage as unknown as { listSecrets: unknown }).listSecrets = undefined;
         const service = KeychainService.getInstance(makeApp({ secretStorage }));

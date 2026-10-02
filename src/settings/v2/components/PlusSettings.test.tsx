@@ -11,8 +11,6 @@ jest.mock("@/settings/model", () => ({
   useSettingsValue: () => currentSettings,
 }));
 
-// Entitlement surface. `useLicenseState` is the hook under test elsewhere; here
-// it only has to produce the states this section renders.
 let mockLicenseState: { status: string; plan?: string } = { status: "none" };
 let mockIsPaidUser: boolean | undefined = false;
 const checkIsPaidUser = jest.fn<Promise<boolean | undefined>, unknown[]>();
@@ -22,7 +20,6 @@ jest.mock("@/plusUtils", () => ({
   // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks the real hook
   useIsPaidUser: () => mockIsPaidUser,
   checkIsPaidUser: (...a: unknown[]) => checkIsPaidUser(...a),
-  createPlusPageUrl: () => "https://example.test/plans",
   navigateToPlusPage: jest.fn(),
 }));
 
@@ -48,6 +45,17 @@ describe("PlusSettings", () => {
   });
 
   describe("PlusSettings()", () => {
+    it("attributes the license link and pairing CTA to distinct Copilot surfaces", () => {
+      render(<PlusSettings />);
+
+      expect(screen.getByRole("link", { name: "Miyo" }).getAttribute("href")).toBe(
+        "https://www.miyo.md/?utm_source=obsidian_copilot&utm_medium=license_settings"
+      );
+      expect(
+        screen.getByRole("link", { name: "New: pair Copilot with Miyo" }).getAttribute("href")
+      ).toBe("https://www.miyo.md/?utm_source=obsidian_copilot&utm_medium=pairing");
+    });
+
     it("names a lifetime purchase Lifetime rather than its stored plan", () => {
       mockLicenseState = { status: "active", plan: "believer" };
       mockIsPaidUser = true;
@@ -77,10 +85,6 @@ describe("PlusSettings", () => {
     });
 
     it("says nothing about a key while its validation is still in flight", async () => {
-      // The hook only sees the stored token, which stays empty until the server
-      // answers, so a freshly applied key reads as inactive there. Rejecting a
-      // license the user just bought — for the length of a network call — is the
-      // regression this guards.
       mockLicenseState = { status: "inactive" };
       let resolveValidation: (value: boolean) => void = () => {};
       checkIsPaidUser.mockReturnValue(

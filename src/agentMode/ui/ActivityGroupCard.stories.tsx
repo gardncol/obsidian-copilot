@@ -17,6 +17,15 @@ function action(title: string, overrides: Partial<ToolCallPart> = {}): ActivityM
 
 const THINKING: ActivityMember = {
   type: "reasoning",
+  part: {
+    kind: "thought",
+    text: "The migration note is the one that changed most recently.",
+    durationMs: 51_000,
+  },
+};
+
+const LIVE_THINKING: ActivityMember = {
+  type: "reasoning",
   part: { kind: "thought", text: "The migration note is the one that changed most recently." },
 };
 
@@ -24,7 +33,6 @@ function group(members: ActivityMember[]): ActivityGroupNode {
   return { type: "activityGroup", id: "activity-0", members };
 }
 
-/** Stands in for the trail's dispatch so stories stay free of plugin state. */
 function renderMember(member: ActivityMember, key: string | number): React.ReactNode {
   return (
     <div key={key} className="tw-truncate tw-py-1 tw-text-sm tw-text-muted">
@@ -49,7 +57,7 @@ const meta = {
     open: false,
     onToggle: () => undefined,
     renderMember,
-    thinkingMs: 51_000,
+    thinkingMs: 0,
   },
   parameters: { gallery: { host: "leaf", layout: "padded" } },
 } satisfies Meta<ActivityGroupCardProps>;
@@ -65,7 +73,7 @@ export const WithFailure: StoryObj<ActivityGroupCardProps> = {
       THINKING,
       action("npm run build", { vendorToolName: "Bash" }),
     ]),
-    thinkingMs: 7_000,
+    thinkingMs: 0,
   },
 };
 
@@ -79,12 +87,34 @@ export const InFlight: StoryObj<ActivityGroupCardProps> = {
         status: "in_progress",
       }),
     ]),
-    thinkingMs: 3_000,
+    thinkingMs: 0,
     liveStep: "npm run test -- ActivityGroupCard",
   },
 };
 
-/** Searches, fetches, MCP calls, unregistered tools — all pool as commands. */
+export const MultiFileEdit: StoryObj<ActivityGroupCardProps> = {
+  args: {
+    group: group([
+      action("Calculate description lengths", { toolKind: "execute" }),
+      action("Edit skill definitions", {
+        toolKind: "edit",
+        output: ["a.md", "b.md", "c.md", "d.md", "e.md"].map((path) => ({
+          type: "diff" as const,
+          path,
+          oldText: "before",
+          newText: "after",
+        })),
+      }),
+      action("Validate skill definitions", { toolKind: "execute" }),
+      {
+        type: "reasoning",
+        part: { kind: "thought", text: "Check the repaired files.", durationMs: 18_426 },
+      },
+    ]),
+    thinkingMs: 0,
+  },
+};
+
 export const LongLine: StoryObj<ActivityGroupCardProps> = {
   args: {
     group: group([
@@ -96,17 +126,16 @@ export const LongLine: StoryObj<ActivityGroupCardProps> = {
       action("Design sync", { vendorToolName: "DesignSyncFromFigmaWorkspace" }),
       THINKING,
     ]),
-    thinkingMs: 214_000,
+    thinkingMs: 0,
   },
 };
 
-/** Expansion is owned by the trail, so a story has to supply the state itself. */
 const ExpandedDemo: React.FC = () => {
   const [open, setOpen] = useState(true);
   return (
     <ActivityGroupCard
       group={MIXED}
-      thinkingMs={51_000}
+      thinkingMs={0}
       open={open}
       onToggle={() => setOpen((v) => !v)}
       renderMember={renderMember}
@@ -116,16 +145,11 @@ const ExpandedDemo: React.FC = () => {
 
 export const Expanded: StoryObj<ActivityGroupCardProps> = { render: ExpandedDemo };
 
-/**
- * The group as it grows: each frame appends the member the agent just started,
- * so the live row swaps while the summary line above it thickens. The last
- * frame is the settled turn, where the live row retires entirely.
- */
 const LIVE_FRAMES: ActivityMember[][] = [
-  [action("Read Projects/Copilot/Roadmap.md", { vendorToolName: "Read" }), THINKING],
+  [action("Read Projects/Copilot/Roadmap.md", { vendorToolName: "Read" }), LIVE_THINKING],
   [
     action("Read Projects/Copilot/Roadmap.md", { vendorToolName: "Read" }),
-    THINKING,
+    LIVE_THINKING,
     action("lint", {
       vendorToolName: "Bash",
       status: "in_progress",
@@ -134,7 +158,7 @@ const LIVE_FRAMES: ActivityMember[][] = [
   ],
   [
     action("Read Projects/Copilot/Roadmap.md", { vendorToolName: "Read" }),
-    THINKING,
+    LIVE_THINKING,
     action("lint", { vendorToolName: "Bash", input: { command: "npm run lint" } }),
     action("test", {
       vendorToolName: "Bash",
@@ -144,7 +168,7 @@ const LIVE_FRAMES: ActivityMember[][] = [
   ],
   [
     action("Read Projects/Copilot/Roadmap.md", { vendorToolName: "Read" }),
-    THINKING,
+    LIVE_THINKING,
     action("lint", { vendorToolName: "Bash", input: { command: "npm run lint" } }),
     action("test", {
       vendorToolName: "Bash",
@@ -153,7 +177,6 @@ const LIVE_FRAMES: ActivityMember[][] = [
   ],
 ];
 
-/** Stepped by hand rather than by a timer so the frame under review holds still. */
 const LiveEdgeDemo: React.FC = () => {
   const [frame, setFrame] = useState(0);
   const members = LIVE_FRAMES[frame];

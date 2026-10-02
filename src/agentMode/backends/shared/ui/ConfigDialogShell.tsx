@@ -1,44 +1,23 @@
 import { ConfigStatusBadge } from "@/agentMode/backends/shared/installStatus";
-import type { InstallState } from "@/agentMode/session/types";
+import type { BackendAuthStatus, InstallState } from "@/agentMode/session/types";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle } from "lucide-react";
 import React from "react";
 
 interface ConfigDialogShellProps {
-  /** Dialog heading. Owned here, not by the modal's native title chrome, so it can share a line with the badge. */
   title: string;
-  /** Readiness of the agent being configured; rendered as the badge beside the title. */
   state: InstallState;
-  /** Blocking-condition strip below the header — compose <ConfigWarningStrip>. */
+  authStatus?: BackendAuthStatus | null;
   warning?: React.ReactNode;
-  /** Ordered body sections — compose <ConfigSection> children. */
   children: React.ReactNode;
-  /** Footer-right content. Defaults to a single "Done" button. */
   footer?: React.ReactNode;
   onClose: () => void;
 }
 
-/**
- * Class the hosting modal must carry for the shell to lay out correctly. Pass it
- * as `ReactModal`'s `modalClass`; stylesheet rules key off it to zero the frame's
- * padding, collapse the native header, and hide the native title.
- */
-export const CONFIG_MODAL_CLASS = "copilot-config-modal";
-
-/**
- * Presentational layout shared by every agent's Configure dialog so the header,
- * sections, and footer stay visually consistent across the three (intentionally
- * bespoke) bodies. Rendered inside a per-agent `ReactModal` subclass — it is not
- * itself a modal, but it does own the title, which is why its subclasses leave
- * Obsidian's native title element empty.
- *
- * Every band owns its own padding so the dividers between them run edge to edge.
- * That only holds inside a host marked with {@link CONFIG_MODAL_CLASS}; without
- * it the frame's own padding insets every divider by a theme-dependent amount.
- */
 export const ConfigDialogShell: React.FC<ConfigDialogShellProps> = ({
   title,
   state,
+  authStatus,
   warning,
   children,
   footer,
@@ -49,7 +28,7 @@ export const ConfigDialogShell: React.FC<ConfigDialogShellProps> = ({
       <h3 className="tw-m-0 tw-text-ui-medium tw-font-semibold tw-leading-tight tw-text-normal">
         {title}
       </h3>
-      <ConfigStatusBadge state={state} />
+      <ConfigStatusBadge state={state} authStatus={authStatus} />
     </div>
     {(state.kind === "incompatible" || state.kind === "error") && warning && (
       <div className="tw-px-4 tw-pb-3">{warning}</div>
@@ -66,19 +45,11 @@ export const ConfigDialogShell: React.FC<ConfigDialogShellProps> = ({
 );
 
 interface ConfigWarningStripProps {
-  /** Readiness state; only the states that carry a message are worth a strip. */
   state: InstallState;
-  /** Sentence appended after the state's message, telling the user how to clear it. */
   detail?: string;
-  /** In-dialog remedy, for agents that can fix themselves without leaving the dialog. */
   action?: React.ReactNode;
 }
 
-/**
- * Alert strip for the one thing standing between the user and a working agent.
- * Renders only for the states that carry a message, so callers can hand it the
- * live install state without branching on the kind themselves.
- */
 export const ConfigWarningStrip: React.FC<ConfigWarningStripProps> = ({
   state,
   detail,
@@ -101,17 +72,18 @@ export const ConfigWarningStrip: React.FC<ConfigWarningStripProps> = ({
   );
 };
 
-/**
- * One labeled section inside a {@link ConfigDialogShell}. The optional title
- * renders a subtle header above the body; a hairline divider separates each
- * section from the content above it.
- */
-export const ConfigSection: React.FC<{ title?: string; children: React.ReactNode }> = ({
-  title,
-  children,
-}) => (
+export const ConfigSection: React.FC<{
+  title?: string;
+  badge?: React.ReactNode;
+  children: React.ReactNode;
+}> = ({ title, badge, children }) => (
   <div className="copilot-divider-t tw-flex tw-flex-col tw-gap-2 tw-p-4">
-    {title && <div className="tw-text-sm tw-font-medium">{title}</div>}
+    {title && (
+      <div className="tw-flex tw-flex-wrap tw-items-center tw-gap-2">
+        <h4 className="tw-m-0 tw-text-sm tw-font-semibold">{title}</h4>
+        {badge}
+      </div>
+    )}
     {children}
   </div>
 );

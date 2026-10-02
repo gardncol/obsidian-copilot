@@ -4,6 +4,10 @@ import React from "react";
 
 describe("AgentStatusCard", () => {
   describe("AgentStatusCard()", () => {
+    it("shows installation progress when requested (https://github.com/Brevilabs/obsidian-copilot-private/issues/530)", () => {
+      render(<AgentStatusCard message="Downloading agent…" progress={{ percent: 42 }} />);
+      expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("42");
+    });
     it("renders a neutral message and invokes its recovery action", () => {
       const onClick = jest.fn();
 
@@ -38,6 +42,29 @@ describe("AgentStatusCard", () => {
       expect(error.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
       expect(error.querySelector("svg")?.getAttribute("class")).toContain("tw-text-error");
       expect(screen.getByText("Claude could not start").className).toContain("tw-text-normal");
+    });
+
+    it("keeps exact recovery details visible below a caller-owned summary (https://github.com/Brevilabs/obsidian-copilot-private/issues/410)", () => {
+      const message =
+        "Could not execute /Users/example/Agent Runtime/bin/codex-acp.\nCheck the configured binary path and retry.\nEACCES: permission denied";
+      const onClick = jest.fn();
+      render(
+        <AgentStatusCard
+          tone="error"
+          summary="Codex setup error"
+          message={message}
+          action={{ label: "Configure Codex", onClick }}
+        />
+      );
+      const summary = screen.getByText("Codex setup error");
+      const details = screen.getByText(message, { normalizer: (text) => text });
+      expect(details.textContent).toBe(message);
+      expect(details.closest("details")).toBeNull();
+      expect(
+        summary.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING
+      ).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Configure Codex" }));
+      expect(onClick).toHaveBeenCalledTimes(1);
     });
 
     it("keeps a busy action disabled", () => {
@@ -81,28 +108,6 @@ describe("AgentStatusCard", () => {
         screen.getByRole("link", { name: "Waiting for sign-in URL" }).getAttribute("href")
       ).toBe("");
       expect(screen.queryByRole("button")).toBeNull();
-    });
-
-    it("allows long messages and actions to wrap inside the card", () => {
-      const message = "VeryLongBackendNameWithoutNaturalBreaks could not be configured";
-      render(
-        <AgentStatusCard
-          message={message}
-          action={{
-            label: "Configure VeryLongBackendNameWithoutNaturalBreaks",
-            onClick: jest.fn(),
-          }}
-        />
-      );
-
-      expect(screen.getByText(message).className).toContain("tw-break-words");
-      expect(screen.getByText(message).className).toContain("tw-min-w-0");
-      const action = screen.getByRole("button", {
-        name: "Configure VeryLongBackendNameWithoutNaturalBreaks",
-      });
-      expect(action.className).toContain("tw-max-w-full");
-      expect(action.className).toContain("tw-whitespace-normal");
-      expect(action.className).toContain("tw-break-words");
     });
   });
 });

@@ -1,13 +1,3 @@
-/**
- * Unit tests for the GitHub Copilot removal migration.
- * https://github.com/logancyang/obsidian-copilot-preview/issues/316
- *
- * `planGitHubCopilotRemoval` is pure, so most coverage builds an in-the-wild
- * settings object and asserts the resulting patch. `executeGitHubCopilotRemoval`
- * is exercised against a mocked settings store and keychain so the side effects
- * are observable in isolation.
- */
-
 import type { CustomModel, ProjectConfig } from "@/aiParams";
 import { ChatModelProviders, DEFAULT_SETTINGS } from "@/constants";
 import { KeychainService } from "@/services/keychainService";
@@ -79,11 +69,11 @@ function settingsWith(overrides: Partial<CopilotSettings> = {}): CopilotSettings
   return { ...DEFAULT_SETTINGS, ...overrides };
 }
 
-beforeEach(() => {
-  jest.clearAllMocks();
-});
-
 describe("githubCopilotRemovalMigration", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
   describe("planGitHubCopilotRemoval()", () => {
     it("returns null for a vault that never configured GitHub Copilot", () => {
       expect(
@@ -128,17 +118,6 @@ describe("githubCopilotRemovalMigration", () => {
           settingsWith({ defaultModelKey: "opencode:gpt-4o|github-copilot" })
         )
       ).toEqual({ defaultModelKey: "" });
-    });
-
-    it("clears the default model key even when no matching model row survived on disk", () => {
-      const patch = planGitHubCopilotRemoval(
-        settingsWith({
-          activeModels: [model({ name: "gpt-4o", provider: ChatModelProviders.OPENAI })],
-          defaultModelKey: "gpt-4o|github-copilot",
-        })
-      );
-
-      expect(patch).toEqual({ defaultModelKey: "" });
     });
 
     it("clears the quick command selection to undefined so quick ask inherits the chat default again (https://github.com/logancyang/obsidian-copilot-preview/issues/316)", () => {

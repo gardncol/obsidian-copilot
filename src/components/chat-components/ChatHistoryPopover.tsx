@@ -1,5 +1,14 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowUpRight, Check, Edit2, MessageCircle, Trash2, X } from "lucide-react";
+import {
+  ArrowUpRight,
+  Check,
+  Edit2,
+  LoaderCircle,
+  MessageCircle,
+  Power,
+  Trash2,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SearchBar } from "@/components/ui/SearchBar";
@@ -13,7 +22,6 @@ import { sortByStrategy } from "@/utils/recentUsageManager";
 import { Platform } from "obsidian";
 import { safeAsyncHandler } from "@/utils/safeAsyncHandler";
 
-/** Number of chat history items loaded per page. */
 const PAGE_SIZE = 50;
 
 export interface ChatHistoryItem {
@@ -21,17 +29,8 @@ export interface ChatHistoryItem {
   title: string;
   createdAt: Date;
   lastAccessedAt: Date;
-  /** Backend that produced this chat (Agent Mode only). Used to resolve a
-   * brand icon in the popover via the caller-supplied `getIcon` resolver. */
   backendId?: string;
-  /** Owning Agent Project id when known, or `undefined` for global chats. The
-   * GLOBAL_SCOPE default is applied in the Agent Mode session layer, not here,
-   * to keep this generic helper free of cross-layer scope imports. */
   projectId?: string;
-  /** A live in-memory session bound to this chat is flagging for attention
-   * (finished / errored / paused while backgrounded). In-memory only and valid
-   * for the app's lifetime — purely-on-disk chats never carry it. Populated by
-   * the Agent Mode session layer; absent on plain conversation history. */
   needsAttention?: boolean;
 }
 
@@ -44,25 +43,15 @@ type ChatHistoryBadgeResolver = (item: ChatHistoryItem) => React.ReactNode;
 interface ChatHistoryPopoverProps {
   children: React.ReactNode;
   chatHistory: ChatHistoryItem[];
+  openChatIds?: ReadonlySet<string>;
+  runningChatIds?: ReadonlySet<string>;
+  onCloseSession?: (id: string) => Promise<void>;
   onUpdateTitle: (id: string, newTitle: string) => Promise<void>;
   onDeleteChat: (id: string) => Promise<void>;
   onLoadChat?: (id: string) => Promise<void>;
   onOpenSourceFile?: (id: string) => Promise<void>;
-  /** Optional resolver that maps a history item to a row icon. When it
-   * returns `undefined` (or is not supplied), the row falls back to
-   * `MessageCircle`. */
   getIcon?: ChatHistoryIconResolver;
-  /** Optional metadata badge rendered beside a chat title. */
   getBadge?: ChatHistoryBadgeResolver;
-  /**
-   * Preferred open direction, chosen by the trigger's geometry — not the
-   * platform. Defaults suit a trigger pinned to the bottom of the pane (the
-   * control-bar History button): open upward, right-aligned. The landing's
-   * full-width "View all" row passes `side="bottom" align="start"` so it opens
-   * downward like an accordion. Radix still flips/shifts to stay on-screen, so
-   * these are preferences, not hard positions (mobile and narrow sidebars are
-   * handled by that collision avoidance, not by branching on `Platform`).
-   */
   side?: "top" | "right" | "bottom" | "left";
   align?: "start" | "center" | "end";
 }
@@ -70,6 +59,9 @@ interface ChatHistoryPopoverProps {
 export function ChatHistoryPopover({
   children,
   chatHistory,
+  openChatIds,
+  runningChatIds,
+  onCloseSession,
   onUpdateTitle,
   onDeleteChat,
   onLoadChat,
@@ -105,42 +97,20 @@ export function ChatHistoryPopover({
     });
   }, [filteredHistory, settings.chatHistorySortStrategy]);
 
-  /**
-   * Reset display count only when the popover opens or when the search query changes.
-   * Uses useLayoutEffect so the reset runs synchronously before the browser paints,
-   * preventing a one-frame render spike with the stale large displayCount.
-   * Guarded by `if (open)` to avoid a wasted state update when the popover closes.
-   */
   useLayoutEffect(() => {
     if (open) setDisplayCount(PAGE_SIZE);
   }, [open, searchQuery]);
 
-  /**
-   * The subset of sorted history visible to the user based on the current page.
-   * Grows by PAGE_SIZE each time the sentinel enters the viewport.
-   */
   const paginatedHistory = useMemo(
     () => sortedHistory.slice(0, displayCount),
     [sortedHistory, displayCount]
   );
 
-  /**
-   * Stable ref holding the latest pagination state so the IntersectionObserver
-   * callback can read current values without re-creating the observer on every render.
-   * Updated via effect to avoid writing to a ref during render.
-   */
   const paginationStateRef = useRef({ displayCount: PAGE_SIZE, totalCount: 0 });
   useEffect(() => {
     paginationStateRef.current = { displayCount, totalCount: sortedHistory.length };
   }, [displayCount, sortedHistory.length]);
 
-  /**
-   * Callback ref for the sentinel element. Using a callback ref (instead of useRef +
-   * useEffect) ensures the IntersectionObserver is attached only after the sentinel
-   * actually mounts — the sentinel lives inside PopoverContent, which Radix only
-   * renders when `open` is true. A plain useEffect with [] would receive a null ref
-   * on component mount (before the popover opens) and never re-run.
-   */
   const sentinelCallbackRef = useCallback((node: HTMLDivElement | null) => {
     if (observerRef.current) {
       observerRef.current.disconnect();
@@ -166,7 +136,6 @@ export function ChatHistoryPopover({
   const groupedHistory = useMemo(() => {
     const sortStrategy = settings.chatHistorySortStrategy;
 
-    // For name sorting, show a flat list without time-based grouping
     if (sortStrategy === "name") {
       return [
         {
@@ -188,7 +157,6 @@ export function ChatHistoryPopover({
     const now = new Date();
 
     paginatedHistory.forEach((chat) => {
-      // Use lastAccessedAt for "recent" strategy, createdAt for "created" strategy
       const referenceDate = sortStrategy === "recent" ? chat.lastAccessedAt : chat.createdAt;
       const diffTime = now.getTime() - referenceDate.getTime();
       const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
@@ -226,7 +194,6 @@ export function ChatHistoryPopover({
       groupMap.get(groupKey)!.push(chat);
     });
 
-    // Sort by priority, ensuring Today is at the top.
     return groups.sort((a, b) => a.priority - b.priority);
   }, [settings.chatHistorySortStrategy, paginatedHistory]);
 
@@ -239,16 +206,13 @@ export function ChatHistoryPopover({
     if (editingId && editingTitle.trim()) {
       try {
         await onUpdateTitle(editingId, editingTitle.trim());
-        // Clear editing state only after successful update
         setEditingId(null);
         setEditingTitle("");
       } catch (error) {
         logError("Error updating title:", error);
-        // Keep editing state active if update failed
         return;
       }
     } else {
-      // Clear editing state if no valid title
       setEditingId(null);
       setEditingTitle("");
     }
@@ -259,7 +223,6 @@ export function ChatHistoryPopover({
     setEditingTitle("");
   };
 
-  /** Clean up any pending auto-cancel timeout when the component unmounts. */
   useEffect(() => {
     return () => {
       if (deleteTimeoutRef.current) {
@@ -270,22 +233,18 @@ export function ChatHistoryPopover({
 
   const handleDelete = async (id: string) => {
     if (confirmDeleteId === id) {
-      // Confirmed deletion - execute the actual delete
       try {
         await onDeleteChat(id);
         setConfirmDeleteId(null);
       } catch (error) {
         logError("Error deleting chat:", error);
-        // Clear confirmation state even if deletion failed
         setConfirmDeleteId(null);
       }
     } else {
-      // First click - show confirmation; clear any previous pending timeout first
       if (deleteTimeoutRef.current) {
         window.clearTimeout(deleteTimeoutRef.current);
       }
       setConfirmDeleteId(id);
-      // Auto-cancel confirmation after 3 seconds
       deleteTimeoutRef.current = window.setTimeout(() => {
         setConfirmDeleteId(null);
         deleteTimeoutRef.current = null;
@@ -301,16 +260,12 @@ export function ChatHistoryPopover({
     if (onLoadChat) {
       await onLoadChat(id);
     }
-    setOpen(false); // Close popover after loading chat
+    setOpen(false);
   };
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
-      {/* collisionPadding keeps the content off the screen bezel when Radix
-          flips/shifts it (default is 0 — it would otherwise hug the edge on
-          mobile / narrow sidebars); the max-w cap stops the 320px content from
-          overflowing a very small viewport. */}
       <PopoverContent
         className="tw-w-80 tw-max-w-[calc(100vw-2rem)] tw-p-0"
         align={align}
@@ -333,7 +288,7 @@ export function ChatHistoryPopover({
                   {groupedHistory.map((group) => (
                     <div
                       key={group.key}
-                      className="tw-mb-3 tw-border-x-[0px] tw-border-b tw-border-t-[0px] tw-border-border tw-pb-2"
+                      className="tw-mb-3 tw-border-x-0 tw-border-b tw-border-t-0 tw-border-border tw-pb-2"
                       style={{ borderBottomStyle: "solid" }}
                     >
                       <div className="tw-mb-2 tw-px-2 tw-text-xs tw-font-medium tw-tracking-wider tw-text-muted">
@@ -344,6 +299,9 @@ export function ChatHistoryPopover({
                           <ChatHistoryItem
                             key={chat.id}
                             chat={chat}
+                            isSessionOpen={openChatIds?.has(chat.id) ?? false}
+                            isRunning={runningChatIds?.has(chat.id) ?? false}
+                            onCloseSession={onCloseSession}
                             isEditing={editingId === chat.id}
                             editingTitle={editingTitle}
                             onEditingTitleChange={setEditingTitle}
@@ -366,7 +324,6 @@ export function ChatHistoryPopover({
                     </div>
                   ))}
 
-                  {/* Sentinel element for IntersectionObserver — triggers the next page load */}
                   <div ref={sentinelCallbackRef} className="tw-h-1" />
 
                   {displayCount < sortedHistory.length ? (
@@ -386,6 +343,9 @@ export function ChatHistoryPopover({
 
 interface ChatHistoryItemProps {
   chat: ChatHistoryItem;
+  isSessionOpen: boolean;
+  isRunning: boolean;
+  onCloseSession?: (id: string) => Promise<void>;
   isEditing: boolean;
   editingTitle: string;
   onEditingTitleChange: (title: string) => void;
@@ -404,6 +364,9 @@ interface ChatHistoryItemProps {
 
 function ChatHistoryItem({
   chat,
+  isSessionOpen,
+  isRunning,
+  onCloseSession,
   isEditing,
   editingTitle,
   onEditingTitleChange,
@@ -456,14 +419,24 @@ function ChatHistoryItem({
       className={cn(
         "tw-group tw-flex tw-cursor-pointer tw-items-center tw-gap-2 tw-rounded-md tw-p-1 tw-transition-colors hover:tw-bg-modifier-hover"
       )}
+      role="button"
+      tabIndex={0}
+      // Let keyboard users reach release controls without opening the chat.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/429
+      onKeyDown={(event) => {
+        if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          onLoadChat(chat.id);
+        }
+      }}
       onClick={() => onLoadChat(chat.id)}
     >
       <ChatIconWithAttention
         icon={RowIcon}
         needsAttention={chat.needsAttention}
+        isSessionLive={isSessionOpen}
         iconClassName="tw-size-3 tw-text-muted"
       />
-
       <span
         className="tw-block tw-min-w-0 tw-flex-1 tw-truncate tw-text-sm tw-font-medium tw-text-normal"
         title={chat.title}
@@ -473,14 +446,20 @@ function ChatHistoryItem({
 
       {getBadge?.(chat)}
 
+      {isRunning && (
+        <LoaderCircle
+          className="tw-size-3.5 tw-shrink-0 tw-animate-spin tw-text-accent group-focus-within:tw-hidden group-hover:tw-hidden"
+          aria-label="Responding"
+        />
+      )}
+
       <div
         className={cn(
           "tw-flex tw-shrink-0 tw-items-center tw-gap-1.5 tw-transition-opacity",
-          isMobile ? "tw-flex" : "tw-hidden group-hover:tw-flex"
+          isMobile ? "tw-flex" : "tw-hidden group-focus-within:tw-flex group-hover:tw-flex"
         )}
       >
         {confirmDeleteId === chat.id ? (
-          // Show confirmation buttons only
           <>
             <Button
               size="sm"
@@ -508,8 +487,22 @@ function ChatHistoryItem({
             </Button>
           </>
         ) : (
-          // Show edit and delete buttons
           <>
+            {isSessionOpen && onCloseSession && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="tw-size-5 tw-p-0"
+                aria-label="Close session"
+                title="Close session"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  safeAsyncHandler(onCloseSession)(chat.id);
+                }}
+              >
+                <Power className="tw-size-3" />
+              </Button>
+            )}
             <Button
               size="sm"
               variant="ghost"

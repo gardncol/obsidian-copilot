@@ -5,16 +5,10 @@ import { AppContext } from "@/context";
 import { AgentTrail } from "@/agentMode/ui/AgentTrailView";
 import type { AgentMessagePart } from "@/agentMode/session/types";
 
-// Render `text` parts as plain text so the test doesn't pull in Obsidian's
-// markdown renderer (`MarkdownRenderer.render` / `Component`).
 jest.mock("@/agentMode/ui/AgentMarkdownText", () => ({
   AgentMarkdownText: ({ text }: { text: string }) => <div data-testid="agent-md">{text}</div>,
 }));
 
-// `insertAtCursor` is a spy (its selection→replace logic is covered by the
-// `insertAtCursor` unit test in utils.test.ts); `cleanMessageForCopy` is a thin
-// stand-in (real sanitization is covered by the `agentResponseText` unit test) so
-// the cleaned text the buttons act on is deterministic here.
 jest.mock("@/utils", () => ({
   cleanMessageForCopy: (s: string) => s.trim(),
   insertAtCursor: jest.fn(),
@@ -98,7 +92,6 @@ describe("AgentTrail", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    // Radix tooltip portals render into Obsidian's `activeDocument` global.
     (window as unknown as { activeDocument: Document }).activeDocument = window.document;
     writeText = jest.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -162,8 +155,6 @@ describe("AgentTrail", () => {
   it("keeps research inline while showing a non-collapsible completed duration", () => {
     renderTrail({
       parts: [
-        // Multi-word title with no vendorToolName renders verbatim as the
-        // ActionCard's collapsed line (GENERIC_SUMMARY → genericToolLabel).
         { kind: "tool_call", id: "t1", title: "Search vault", status: "completed" },
         text("The final answer."),
       ],
@@ -180,9 +171,7 @@ describe("AgentTrail", () => {
     expect(footer?.classList.contains("tw-items-center")).toBe(true);
     expect(footer?.contains(screen.getByTitle("Copy"))).toBe(true);
     expect(footer?.contains(screen.getByTitle("Insert / Replace at cursor"))).toBe(true);
-    // The trailing prose renders as the final answer.
     expect(screen.getByText("The final answer.")).toBeTruthy();
-    // The research tool card renders inline (not folded behind a toggle).
     expect(screen.getByText("Search vault")).toBeTruthy();
   });
 
@@ -234,8 +223,6 @@ describe("AgentTrail", () => {
 
     expect(screen.getByText("Running Count markdown files · 3 tools · 9s")).toBeTruthy();
   });
-  // Two groups split by prose, with the trailing group still working: the
-  // shape that distinguishes "the live edge" from "an earlier group".
   const STREAMING_PARTS: AgentMessagePart[] = [
     READ_A,
     { kind: "thought", text: "still mulling it over" },
@@ -248,8 +235,6 @@ describe("AgentTrail", () => {
     renderTrail({ parts: STREAMING_PARTS, isStreaming: true, turnStopReason: undefined });
 
     expect(screen.getByText("Running `npm run lint`")).toBeTruthy();
-    // The earlier group ends on a thought; treating it as live would leave a
-    // second, permanently spinning row behind the prose.
     expect(screen.queryByText("Reasoning")).toBeNull();
   });
 
@@ -260,12 +245,59 @@ describe("AgentTrail", () => {
       turnStopReason: undefined,
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /Read 1 file/ }));
+    fireEvent.click(screen.getByRole("button", { name: /read 1 file/i }));
 
-    // The expanded member must report the same in-flight state the collapsed
-    // live row did — not flip to a finished "Thought for" block.
     expect(screen.getByText("Reasoning")).toBeTruthy();
     expect(screen.queryByText("Thought for")).toBeNull();
+  });
+
+  it("does not restart a frozen thought when a hidden tool trails it (https://github.com/Brevilabs/obsidian-copilot-private/issues/336)", () => {
+    jest.useFakeTimers();
+    try {
+      jest.setSystemTime(30_000);
+      renderTrail({
+        parts: [
+          READ_A,
+          {
+            kind: "thought",
+            text: "Finished reasoning",
+            startedAtMs: 12_000,
+            durationMs: 18_000,
+          },
+          toolCall("hidden", { vendorToolName: "ToolSearch", status: "in_progress" }),
+        ],
+        isStreaming: true,
+        turnStopReason: undefined,
+      });
+
+      expect(screen.getByText("Ran 1 command, read 1 file, thought for 18s")).toBeTruthy();
+      expect(screen.queryByText("Reasoning")).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("renders a frozen standalone trailing thought as complete (https://github.com/Brevilabs/obsidian-copilot-private/issues/336)", () => {
+    renderTrail({
+      parts: [
+        {
+          kind: "plan",
+          entries: [{ content: "Inspect the result", priority: "medium", status: "pending" }],
+        },
+        {
+          kind: "thought",
+          text: "Finished reasoning",
+          startedAtMs: 12_000,
+          durationMs: 18_000,
+        },
+      ],
+      isStreaming: true,
+      turnStopReason: undefined,
+    });
+
+    expect(screen.getByText("Thought for")).toBeTruthy();
+    expect(screen.getByText("18s")).toBeTruthy();
+    expect(screen.queryByText("Reasoning")).toBeNull();
   });
 
   it("renders prose between two groups at full size", () => {
@@ -273,11 +305,8 @@ describe("AgentTrail", () => {
 
     const prose = screen.getByText("Halfway there.");
     expect(prose.getAttribute("data-testid")).toBe("agent-md");
-    // Both runs around it stay folded into their own summary rows. The first
-    // group's reasoning went unmeasured (the clock only runs at the live edge),
-    // so its line names the tool work alone.
-    expect(screen.getByText("Read 1 file")).toBeTruthy();
-    expect(screen.getByText("Read 1 file, ran 1 command")).toBeTruthy();
+    expect(screen.getByText("Ran 1 command, read 1 file")).toBeTruthy();
+    expect(screen.getByText("Ran 2 commands, read 1 file")).toBeTruthy();
   });
 
   it("keeps a group the user opened open as more parts stream into it", () => {
@@ -287,7 +316,7 @@ describe("AgentTrail", () => {
       turnStopReason: undefined,
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /Read 1 file/ }));
+    fireEvent.click(screen.getByRole("button", { name: /read 1 file/i }));
     expect(screen.getByText("Read notes/a.md")).toBeTruthy();
 
     rerenderTrail({
@@ -296,7 +325,7 @@ describe("AgentTrail", () => {
       turnStopReason: undefined,
     });
 
-    const grown = screen.getByRole("button", { name: /Read 2 files/ });
+    const grown = screen.getByRole("button", { name: /read 2 files/i });
     expect(grown.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("Read notes/b.md")).toBeTruthy();
   });
@@ -316,7 +345,7 @@ describe("AgentTrail", () => {
     fireEvent.click(screen.getByText('Explore · "Look around"'));
 
     expect(screen.getByText("2 tools")).toBeTruthy();
-    expect(screen.getByText("Read 1 file, ran 1 command")).toBeTruthy();
+    expect(screen.getByText("Ran 2 commands, read 1 file")).toBeTruthy();
   });
 
   it("keeps an opened tool visible when streaming turns it into a group", () => {
@@ -339,7 +368,7 @@ describe("AgentTrail", () => {
       turnStopReason: undefined,
     });
 
-    const group = screen.getByRole("button", { name: /Read 1 file, ran 1 command/ });
+    const group = screen.getByRole("button", { name: /Ran 2 commands, read 1 file/ });
     expect(group.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("file contents")).toBeTruthy();
 
@@ -364,10 +393,10 @@ describe("AgentTrail", () => {
       ],
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /Read 1 file, ran 1 command/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Ran 2 commands, read 1 file/ }));
     fireEvent.click(screen.getByText('Explore · "Look around"'));
 
-    const groups = screen.getAllByRole("button", { name: /Read 1 file, ran 1 command/ });
+    const groups = screen.getAllByRole("button", { name: /Ran 2 commands, read 1 file/ });
     expect(groups.map((group) => group.getAttribute("aria-expanded"))).toEqual(["true", "false"]);
   });
 

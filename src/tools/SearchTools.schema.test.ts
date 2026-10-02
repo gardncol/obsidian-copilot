@@ -1,308 +1,117 @@
-import { z } from "zod";
+import type { App } from "obsidian";
 
-/**
- * Schema validation tests for SearchTools
- * These tests ensure that tool schemas match expected handler interfaces
- * without requiring complex runtime mocks
- */
+const mockGetSettings = jest.fn<Record<string, unknown>, []>();
+const mockIsMiyoActive = jest.fn<boolean, []>();
 
-describe("SearchTools Schema Validation", () => {
-  describe("localSearchTool schema", () => {
-    // Define the expected schema based on handler requirements
-    const localSearchSchema = z.object({
-      query: z.string().min(1).describe("The search query"),
-      salientTerms: z.array(z.string()).describe("List of salient terms extracted from the query"),
-      timeRange: z
-        .object({
-          startTime: z.any(), // TimeInfo type
-          endTime: z.any(), // TimeInfo type
-        })
-        .optional()
-        .describe("Time range for search"),
-    });
+jest.mock("@/settings/model", () => ({
+  getSettings: () => mockGetSettings(),
+}));
+jest.mock("@/search/RetrieverFactory", () => ({
+  RetrieverFactory: {
+    isMiyoActive: () => mockIsMiyoActive(),
+  },
+}));
 
-    test("validates correct input structure", () => {
-      const validInput = {
-        query: "test query",
-        salientTerms: ["test", "query"],
-      };
+import { createLocalSearchTool, webSearchTool } from "@/tools/SearchTools";
 
-      const result = localSearchSchema.safeParse(validInput);
-      expect(result.success).toBe(true);
-    });
+describe("SearchTools", () => {
+  describe("createLocalSearchTool()", () => {
+    const schema = createLocalSearchTool({} as App).schema;
 
-    test("accepts empty salientTerms array", () => {
-      const validInput = {
-        query: "what did I do last week",
-        salientTerms: [],
-      };
-
-      const result = localSearchSchema.safeParse(validInput);
-      expect(result.success).toBe(true);
-    });
-
-    test("validates input with timeRange", () => {
-      const validInput = {
+    it("accepts a timeRange given as epoch-millisecond start and end", () => {
+      const result = schema.safeParse({
         query: "meetings last week",
         salientTerms: ["meetings"],
         timeRange: {
-          startTime: {
-            epoch: 1234567890000,
-            isoString: "2009-02-13T23:31:30.000Z",
-            userLocaleString: "2/13/2009, 11:31:30 PM",
-            localDateString: "2009-02-13",
-            timezoneOffset: 0,
-            timezone: "UTC",
-          },
-          endTime: {
-            epoch: 1234567900000,
-            isoString: "2009-02-13T23:31:40.000Z",
-            userLocaleString: "2/13/2009, 11:31:40 PM",
-            localDateString: "2009-02-13",
-            timezoneOffset: 0,
-            timezone: "UTC",
-          },
+          startTime: 1234567890000,
+          endTime: 1234567900000,
         },
-      };
+      });
 
-      const result = localSearchSchema.safeParse(validInput);
       expect(result.success).toBe(true);
     });
 
-    test("rejects empty query", () => {
-      const invalidInput = {
-        query: "",
-        salientTerms: ["test"],
-      };
-
-      const result = localSearchSchema.safeParse(invalidInput);
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error.issues[0].path).toContain("query");
-      }
+    it("accepts an empty salientTerms list when no timeRange is given", () => {
+      expect(schema.safeParse({ query: "what did I do last week", salientTerms: [] }).success).toBe(
+        true
+      );
     });
 
-    test("rejects missing salientTerms", () => {
-      const invalidInput = {
-        query: "test query",
-      };
-
-      const result = localSearchSchema.safeParse(invalidInput);
-      expect(result.success).toBe(false);
+    it("accepts a timeRange with only a startTime", () => {
+      expect(
+        schema.safeParse({
+          query: "notes since yesterday",
+          salientTerms: ["notes"],
+          timeRange: { startTime: 1234567890000 },
+        }).success
+      ).toBe(true);
     });
 
-    test("rejects non-array salientTerms", () => {
-      const invalidInput = {
-        query: "test query",
-        salientTerms: "not an array",
-      };
-
-      const result = localSearchSchema.safeParse(invalidInput);
-      expect(result.success).toBe(false);
+    it("rejects an empty query and a missing salientTerms list", () => {
+      expect(schema.safeParse({ query: "", salientTerms: ["test"] }).success).toBe(false);
+      expect(schema.safeParse({ query: "test query" }).success).toBe(false);
     });
 
-    test("ignores unknown fields like returnAll", () => {
-      const input = { query: "find all notes", salientTerms: ["notes"], returnAll: true };
-      const result = localSearchSchema.safeParse(input);
-      // Schema strips unknown fields but still parses successfully
-      expect(result.success).toBe(true);
+    it("rejects a timeRange whose times are legacy { epoch } objects", () => {
+      expect(
+        schema.safeParse({
+          query: "meetings last week",
+          salientTerms: ["meetings"],
+          timeRange: {
+            startTime: { epoch: 1234567890000 },
+            endTime: { epoch: 1234567900000 },
+          },
+        }).success
+      ).toBe(false);
+    });
+
+    it("rejects with a Miyo-unavailable error instead of using keyword search when enabled Miyo cannot run on mobile (https://github.com/Brevilabs/obsidian-copilot-private/issues/356)", async () => {
+      mockGetSettings.mockReturnValue({ enableMiyo: true });
+      mockIsMiyoActive.mockReturnValue(false);
+      const tool = createLocalSearchTool({} as App);
+      const invoke = tool.invoke.bind(tool) as (input: {
+        query: string;
+        salientTerms: string[];
+      }) => Promise<string>;
+
+      await expect(invoke({ query: "vault notes", salientTerms: [] })).rejects.toThrow(
+        "Miyo is unavailable. Configure a remote Miyo connection, then retry vault search."
+      );
     });
   });
 
-  describe("webSearchTool schema", () => {
-    // This should match ChatHistoryEntry interface
-    const webSearchSchema = z.object({
-      query: z.string().min(1).describe("The search query"),
-      chatHistory: z
-        .array(
-          z.object({
-            role: z.enum(["user", "assistant"]),
-            content: z.string(),
-          })
-        )
-        .describe("Previous conversation turns"),
+  describe("webSearchTool", () => {
+    const schema = webSearchTool.schema;
+
+    it("accepts user and assistant chatHistory entries and an empty history", () => {
+      expect(
+        schema.safeParse({
+          query: "TypeScript tutorials",
+          chatHistory: [
+            { role: "user", content: "I want to learn TypeScript" },
+            { role: "assistant", content: "I can help with that." },
+          ],
+        }).success
+      ).toBe(true);
+      expect(schema.safeParse({ query: "TypeScript tutorials", chatHistory: [] }).success).toBe(
+        true
+      );
     });
 
-    test("validates correct input with proper chatHistory", () => {
-      const validInput = {
-        query: "search for TypeScript tutorials",
-        chatHistory: [
-          { role: "user" as const, content: "I want to learn TypeScript" },
-          { role: "assistant" as const, content: "I can help you with that!" },
-        ],
-      };
-
-      const result = webSearchSchema.safeParse(validInput);
-      expect(result.success).toBe(true);
-    });
-
-    test("accepts empty chatHistory", () => {
-      const validInput = {
-        query: "TypeScript tutorials",
-        chatHistory: [],
-      };
-
-      const result = webSearchSchema.safeParse(validInput);
-      expect(result.success).toBe(true);
-    });
-
-    test("rejects invalid role in chatHistory", () => {
-      const invalidInput = {
-        query: "search query",
-        chatHistory: [
-          { role: "system", content: "System message" }, // 'system' not allowed
-        ],
-      };
-
-      const result = webSearchSchema.safeParse(invalidInput);
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.error.issues[0].path).toContain("chatHistory");
-      }
-    });
-
-    test("rejects missing content in chatHistory", () => {
-      const invalidInput = {
-        query: "search query",
-        chatHistory: [{ role: "user" }], // missing content
-      };
-
-      const result = webSearchSchema.safeParse(invalidInput);
-      expect(result.success).toBe(false);
-    });
-
-    test("rejects non-string content", () => {
-      const invalidInput = {
-        query: "search query",
-        chatHistory: [
-          { role: "user", content: 123 }, // content must be string
-        ],
-      };
-
-      const result = webSearchSchema.safeParse(invalidInput);
-      expect(result.success).toBe(false);
-    });
-
-    test("rejects z.any() chatHistory (regression test)", () => {
-      // This tests that we're NOT using z.any()
-      const weakSchema = z.object({
-        query: z.string(),
-        chatHistory: z.array(z.any()), // This is what we want to avoid
-      });
-
-      const malformedInput = {
-        query: "test",
-        chatHistory: ["just", "strings", 123, null], // Should fail with proper schema
-      };
-
-      // Weak schema would accept this
-      expect(weakSchema.safeParse(malformedInput).success).toBe(true);
-
-      // But our proper schema should reject it
-      expect(webSearchSchema.safeParse(malformedInput).success).toBe(false);
-    });
-  });
-
-  describe("indexTool schema", () => {
-    const indexSchema = z.void();
-
-    test("accepts undefined", () => {
-      const result = indexSchema.safeParse(undefined);
-      expect(result.success).toBe(true);
-    });
-
-    test("rejects any parameters", () => {
-      const result = indexSchema.safeParse({ someParam: "value" });
-      expect(result.success).toBe(false);
-    });
-
-    test("rejects string input", () => {
-      const result = indexSchema.safeParse("string");
-      expect(result.success).toBe(false);
-    });
-
-    test("handles empty object with SimpleTool fix", () => {
-      // This tests the SimpleTool fix for empty objects on void schemas
-      // The fix converts {} to undefined before validation
-      const emptyObj = {};
-
-      // Direct parse would fail
-      const directResult = indexSchema.safeParse(emptyObj);
-      expect(directResult.success).toBe(false);
-
-      // But with the SimpleTool fix (simulated here), it should work
-      const fixedInput = Object.keys(emptyObj).length === 0 ? undefined : emptyObj;
-      const fixedResult = indexSchema.safeParse(fixedInput);
-      expect(fixedResult.success).toBe(true);
-    });
-  });
-
-  describe("Schema type inference", () => {
-    test("localSearch schema infers correct types", () => {
-      const localSchema = z.object({
-        query: z.string().min(1),
-        salientTerms: z.array(z.string()),
-        timeRange: z
-          .object({
-            startTime: z.any(),
-            endTime: z.any(),
-          })
-          .optional(),
-      });
-
-      type InferredType = z.infer<typeof localSchema>;
-
-      // This is a compile-time test - if it compiles, types are correct
-      const testValue: InferredType = {
-        query: "test",
-        salientTerms: ["test"],
-        // timeRange is optional
-      };
-
-      // TypeScript should enforce these types
-      const query: string = testValue.query;
-      const terms: string[] = testValue.salientTerms;
-      const timeRange = testValue.timeRange;
-
-      expect(query).toBe("test");
-      expect(terms).toEqual(["test"]);
-      expect(timeRange).toBeUndefined();
-
-      // Also validate the schema works
-      expect(localSchema.safeParse(testValue).success).toBe(true);
-    });
-
-    test("webSearch schema matches ChatHistoryEntry interface", () => {
-      // Define the expected interface
-      interface ChatHistoryEntry {
-        role: "user" | "assistant";
-        content: string;
-      }
-
-      const webSchema = z.object({
-        query: z.string().min(1),
-        chatHistory: z.array(
-          z.object({
-            role: z.enum(["user", "assistant"]),
-            content: z.string(),
-          })
-        ),
-      });
-
-      type InferredType = z.infer<typeof webSchema>;
-
-      // This ensures the inferred type matches ChatHistoryEntry[]
-      const testValue: InferredType = {
-        query: "test",
-        chatHistory: [] as ChatHistoryEntry[],
-      };
-
-      // Should be assignable to ChatHistoryEntry[]
-      const history: ChatHistoryEntry[] = testValue.chatHistory;
-      expect(history).toEqual([]);
-
-      // Also validate the schema works
-      expect(webSchema.safeParse(testValue).success).toBe(true);
+    it("rejects an empty query and chatHistory entries with an unknown role or missing content", () => {
+      expect(schema.safeParse({ query: "", chatHistory: [] }).success).toBe(false);
+      expect(
+        schema.safeParse({
+          query: "search query",
+          chatHistory: [{ role: "system", content: "System message" }],
+        }).success
+      ).toBe(false);
+      expect(
+        schema.safeParse({
+          query: "search query",
+          chatHistory: [{ role: "user" }],
+        }).success
+      ).toBe(false);
     });
   });
 });

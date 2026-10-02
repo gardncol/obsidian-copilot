@@ -2,8 +2,9 @@ import type { InstallState } from "@/agentMode/session/types";
 import { fireEvent, render, screen } from "@testing-library/react";
 import React from "react";
 import { ClaudeConfigView, type ClaudeConfigViewProps } from "./ClaudeConfigView";
-import { CLAUDE_AUTH_COMMAND, CLAUDE_INSTALL_COMMAND } from "@/agentMode/backends/claude/cliSetup";
+import { CLAUDE_INSTALL_COMMAND } from "@/agentMode/backends/claude/cliSetup";
 
+const CLAUDE_AUTH_COMMAND = "claude auth login --claudeai";
 const DEFAULT_PROMPT = process.platform === "win32" ? "PS> " : "$ ";
 
 const OUTDATED: InstallState = {
@@ -14,7 +15,6 @@ const OUTDATED: InstallState = {
   message: "Claude 2.1.205 is not supported. Copilot requires 2.1.206 or newer.",
 };
 
-/** Match the `<code>` block that renders exactly this command behind the shell prompt. */
 const commandBlock =
   (command: string) =>
   (_content: string, element: Element | null): boolean =>
@@ -30,7 +30,15 @@ const renderView = (overrides: Partial<ClaudeConfigViewProps> = {}): HTMLElement
       onClearPath={jest.fn()}
       detect={jest.fn().mockResolvedValue(null)}
       searchedDirs={() => []}
-      auth={{ status: { signedIn: false }, onSignIn: jest.fn(), signingIn: false, url: null }}
+      auth={{
+        terminalCommand: "claude auth login --claudeai",
+        onSignOut: () => undefined,
+        signingOut: false,
+        status: { signedIn: false },
+        onSignIn: jest.fn(),
+        signingIn: false,
+        url: null,
+      }}
       onClose={jest.fn()}
       {...overrides}
     />
@@ -44,7 +52,7 @@ describe("ClaudeConfigView", () => {
       renderView({ binaryPath: "/usr/local/bin/claude", hasBinaryPathOverride: true });
 
       const input = screen.getByDisplayValue("/usr/local/bin/claude");
-      const steps = screen.getByText("Don't have it yet?");
+      const steps = screen.getByText("Install Claude Code");
       expect(input.compareDocumentPosition(steps) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
 
@@ -65,93 +73,37 @@ describe("ClaudeConfigView", () => {
       expect(screen.getByRole("button", { name: "Apply" })).toBeTruthy();
     });
 
-    it("numbers installing and signing in as the two steps of the fallback block", () => {
+    it("separates installation and authentication while hiding terminal sign-in until ready: https://github.com/Brevilabs/obsidian-copilot-private/issues/379", () => {
       renderView();
-
-      expect(screen.getByText("Install it")).toBeTruthy();
-      expect(screen.getByText("Sign in", { selector: "div" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Install Claude Code" })).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "Authentication" })).toBeTruthy();
       expect(screen.getByText(commandBlock(CLAUDE_INSTALL_COMMAND))).toBeTruthy();
-      expect(screen.getByText(commandBlock(CLAUDE_AUTH_COMMAND))).toBeTruthy();
+      expect(screen.queryByText(commandBlock(CLAUDE_AUTH_COMMAND))).toBeNull();
     });
 
-    it("offers the in-app sign-in beside the command when the backend can run it", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/379 keeps cancellation and Retry outside the copyable command so narrow dialogs can wrap", () => {
+      const onCancel = jest.fn();
       const onSignIn = jest.fn();
       renderView({
         state: { kind: "ready", source: "custom" },
-        auth: { status: { signedIn: false }, onSignIn, signingIn: false, url: null },
-      });
-
-      expect(screen.getByRole("button", { name: "Sign in" })).toBeTruthy();
-    });
-
-    it("blocks a second sign-in while one is already running", () => {
-      renderView({
-        state: { kind: "ready", source: "custom" },
         auth: {
+          terminalCommand: "claude auth login --claudeai",
+          onSignOut: () => undefined,
+          signingOut: false,
           status: { signedIn: false },
-          onSignIn: jest.fn(),
+          onSignIn,
           signingIn: true,
           url: null,
+          onCancel,
         },
       });
-
-      expect(screen.getByRole<HTMLButtonElement>("button", { name: "Signing in…" }).disabled).toBe(
-        true
-      );
-    });
-
-    it("offers the OAuth fallback link when the CLI cannot open a browser", () => {
-      renderView({
-        state: { kind: "ready", source: "custom" },
-        auth: {
-          status: { signedIn: false },
-          onSignIn: jest.fn(),
-          signingIn: true,
-          url: "https://claude.ai/oauth/authorize?code=example",
-        },
-      });
-
-      expect(screen.getByRole("link", { name: "Open sign-in page" }).getAttribute("href")).toBe(
-        "https://claude.ai/oauth/authorize?code=example"
-      );
-      expect(screen.queryByRole("button", { name: "Signing in…" })).toBeNull();
-    });
-
-    it("hides the in-app sign-in action when the backend is authenticated", () => {
-      renderView({
-        state: { kind: "ready", source: "custom" },
-        auth: {
-          status: { signedIn: true, label: "zero@example.com" },
-          onSignIn: jest.fn(),
-          signingIn: false,
-          url: null,
-        },
-      });
-
-      expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
-    });
-
-    it("hides the in-app sign-in action while auth status is still loading", () => {
-      renderView({
-        state: { kind: "ready", source: "custom" },
-        auth: { status: null, onSignIn: jest.fn(), signingIn: false, url: null },
-      });
-
-      expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
-    });
-
-    it("hides the in-app sign-in action until the Claude binary is ready", () => {
-      renderView({
-        state: { kind: "absent" },
-        auth: {
-          status: { signedIn: false },
-          onSignIn: jest.fn(),
-          signingIn: false,
-          url: null,
-        },
-      });
-
-      expect(screen.queryByRole("button", { name: "Sign in" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel sign-in" }));
+      expect(onCancel).toHaveBeenCalledTimes(1);
+      expect(
+        screen
+          .getByText(commandBlock(CLAUDE_AUTH_COMMAND))
+          .parentElement?.contains(screen.getByRole("button", { name: "Cancel sign-in" }))
+      ).toBe(false);
     });
 
     it("points an unsupported custom binary at its saved path instead of an upgrade button", () => {
@@ -161,14 +113,14 @@ describe("ClaudeConfigView", () => {
         hasBinaryPathOverride: true,
       });
 
-      const alert = screen.getByRole("alert");
+      const alert = screen.getAllByRole("alert")[0];
       expect(alert.textContent).toContain("Claude 2.1.205 is not supported");
       expect(alert.textContent).toContain("Update the binary at the saved path");
       expect(alert.textContent).toContain("clear the override");
       expect(screen.queryByRole("button", { name: /Upgrade/ })).toBeNull();
     });
 
-    it("shows no warning strip while the CLI is healthy", () => {
+    it("shows sign-in required without an install warning for a healthy signed-out CLI: https://github.com/Brevilabs/obsidian-copilot-private/issues/379", () => {
       renderView({
         state: { kind: "ready", source: "custom" },
         binaryPath: "/usr/local/bin/claude",
@@ -176,7 +128,7 @@ describe("ClaudeConfigView", () => {
       });
 
       expect(screen.queryByRole("alert")).toBeNull();
-      expect(screen.getByText("Ready")).toBeTruthy();
+      expect(screen.getByText("Sign in required")).toBeTruthy();
       expect(screen.getByRole("button", { name: "Clear" })).toBeTruthy();
     });
   });

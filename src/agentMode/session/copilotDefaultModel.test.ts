@@ -15,11 +15,6 @@ import { seedCopilotDefaultModel } from "./copilotDefaultModel";
 
 const FLASH_ID = "cm-flash";
 
-/**
- * A descriptor stub carrying only what the seed reads: its id and its wire id
- * for the model. `wireBaseId: null` is a backend that cannot route the model;
- * `undefined` is one that does not implement the lookup at all (claude, codex).
- */
 function descriptor(id: string, wireBaseId: string | null | undefined): BackendDescriptor {
   return {
     id,
@@ -31,7 +26,6 @@ function settingsWith(backends: Record<string, unknown>): CopilotSettings {
   return { agentMode: { backends } } as unknown as CopilotSettings;
 }
 
-/** Run the captured `setSettings` updater against `current` to see what was written. */
 function writtenBackends(current: CopilotSettings): Record<string, unknown> {
   const updater = mockSetSettings.mock.calls[0][0];
   const patch = updater(current) as { agentMode: { backends: Record<string, unknown> } };
@@ -53,29 +47,12 @@ describe("copilotDefaultModel", () => {
       ];
 
       expect(seedCopilotDefaultModel(descriptors, FLASH_ID)).toEqual(["opencode", "pi"]);
-      // Each backend gets its own wire form of the same model, not the shared
-      // configured-model id.
       expect(writtenBackends(current)).toEqual({
         opencode: {
           defaultModel: { baseModelId: "copilot-plus/copilot-plus-flash", effort: null },
         },
         pi: { defaultModel: { baseModelId: "copilot-plus-flash", effort: null } },
       });
-    });
-
-    it("leaves the effort unset so seeding never commits the user to a reasoning level", () => {
-      const current = settingsWith({});
-      mockGetSettings.mockReturnValue(current);
-
-      seedCopilotDefaultModel(
-        [descriptor("opencode", "copilot-plus/copilot-plus-flash")],
-        FLASH_ID
-      );
-
-      const written = writtenBackends(current).opencode as {
-        defaultModel: { effort: string | null };
-      };
-      expect(written.defaultModel.effort).toBeNull();
     });
 
     it("skips a backend that cannot route the model and one that does not answer at all", () => {
@@ -137,11 +114,6 @@ describe("copilotDefaultModel", () => {
       expect(mockSetSettings).toHaveBeenCalledTimes(1);
     });
 
-    // The stubs above fix the join's contract; this pins the real wiring the
-    // registry entry point depends on. Note the absent `backends.opencode`
-    // slice: provider sync configures a model before enrolling it anywhere, so
-    // seeding must work from the model alone — an enrollment-based lookup would
-    // skip OpenCode for anyone who confirmed before sync finished.
     it("seeds the real OpenCode descriptor from a model that is configured but not yet enrolled", () => {
       const settings = {
         configuredModels: [

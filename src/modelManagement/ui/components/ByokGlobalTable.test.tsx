@@ -6,7 +6,6 @@ import { createModelManagement } from "@/modelManagement/createModelManagement";
 import { AppContext } from "@/context";
 import type { App } from "obsidian";
 
-// Radix DropdownMenu portals resolve `activeDocument` at render time.
 beforeAll(() => {
   (window as unknown as { activeDocument: Document }).activeDocument = window.document;
 });
@@ -27,6 +26,7 @@ const group: ByokTableGroup = {
     requiresApiKey: true,
     apiKeyKeychainId: "key1",
   },
+  verification: { ok: true, checkedAt: 0 },
   models: [
     {
       configuredModelId: "m1",
@@ -56,121 +56,110 @@ const renderWithProvider = (ui: React.ReactElement) =>
   );
 
 describe("ByokGlobalTable", () => {
-  it("shows the empty state when there are no groups", () => {
-    renderWithProvider(
-      <ByokGlobalTable groups={[]} onConfigure={jest.fn()} onRemove={jest.fn()} />
-    );
-    expect(screen.getByTestId("byok-table-empty")).toBeTruthy();
-  });
+  describe("ByokGlobalTable()", () => {
+    it("shows the empty state when there are no groups", () => {
+      renderWithProvider(
+        <ByokGlobalTable groups={[]} onConfigure={jest.fn()} onRemove={jest.fn()} />
+      );
+      expect(screen.getByTestId("byok-table-empty")).toBeTruthy();
+    });
 
-  it("renders the provider name and model rows when expanded", () => {
-    renderWithProvider(
-      <ByokGlobalTable groups={[group]} onConfigure={jest.fn()} onRemove={jest.fn()} />
-    );
-    expect(screen.getByText("Anthropic")).toBeTruthy();
+    it("lists the provider's models after the provider card is expanded", () => {
+      renderWithProvider(
+        <ByokGlobalTable groups={[group]} onConfigure={jest.fn()} onRemove={jest.fn()} />
+      );
+      expect(screen.getByText("Anthropic")).toBeTruthy();
 
-    // Models are collapsed by default, expand first
-    fireEvent.click(screen.getByText("Anthropic"));
-    expect(screen.getByText("Claude Sonnet 4.5")).toBeTruthy();
-    expect(screen.getByText("Claude Opus 4.5")).toBeTruthy();
-  });
+      fireEvent.click(screen.getByText("Anthropic"));
+      expect(screen.getByText("Claude Sonnet 4.5")).toBeTruthy();
+      expect(screen.getByText("Claude Opus 4.5")).toBeTruthy();
+    });
 
-  it("shows model count and status badge", () => {
-    renderWithProvider(
-      <ByokGlobalTable groups={[group]} onConfigure={jest.fn()} onRemove={jest.fn()} />
-    );
-    expect(screen.getByText("2 models")).toBeTruthy();
-    // A configured (key-set) provider gets the green success pill.
-    const badge = screen.getByText("API key set");
-    expect(badge.className).toContain("tw-bg-success");
-    expect(badge.className).toContain("tw-text-success");
-  });
+    it("shows the model count and a Verified badge for a verified provider", () => {
+      renderWithProvider(
+        <ByokGlobalTable groups={[group]} onConfigure={jest.fn()} onRemove={jest.fn()} />
+      );
+      expect(screen.getByText("2 models")).toBeTruthy();
+      expect(screen.getByText("Verified")).toBeTruthy();
+    });
 
-  it("renders a neutral (non-success) badge when the provider has no key", () => {
-    const noKeyGroup: ByokTableGroup = {
-      provider: { ...group.provider, apiKeyKeychainId: undefined },
-      models: group.models,
-    };
-    renderWithProvider(
-      <ByokGlobalTable groups={[noKeyGroup]} onConfigure={jest.fn()} onRemove={jest.fn()} />
-    );
-    const badge = screen.getByText("No key");
-    expect(badge.className).not.toContain("tw-bg-success");
-  });
+    it("shows No key instead of Verified when verification reports a missing key (https://github.com/logancyang/obsidian-copilot/issues/3147)", () => {
+      const noKeyGroup: ByokTableGroup = {
+        provider: { ...group.provider, apiKeyKeychainId: undefined },
+        models: group.models,
+        verification: { ok: false, code: "missing_api_key", checkedAt: 0 },
+      };
+      renderWithProvider(
+        <ByokGlobalTable groups={[noKeyGroup]} onConfigure={jest.fn()} onRemove={jest.fn()} />
+      );
+      expect(screen.getByText("No key")).toBeTruthy();
+      expect(screen.queryByText("Verified")).toBeNull();
+    });
 
-  it("uses a clearer sub-line than '0 models' when a key-set provider has no models", () => {
-    const emptyGroup: ByokTableGroup = { provider: group.provider, models: [] };
-    renderWithProvider(
-      <ByokGlobalTable groups={[emptyGroup]} onConfigure={jest.fn()} onRemove={jest.fn()} />
-    );
-    expect(screen.getByText("No models added")).toBeTruthy();
-    expect(screen.queryByText("0 models")).toBeNull();
-    // Key is still set, so the green pill stays.
-    expect(screen.getByText("API key set")).toBeTruthy();
-  });
+    it("says No models added instead of 0 models when a keyed provider has none", () => {
+      const emptyGroup: ByokTableGroup = { ...group, models: [] };
+      renderWithProvider(
+        <ByokGlobalTable groups={[emptyGroup]} onConfigure={jest.fn()} onRemove={jest.fn()} />
+      );
+      expect(screen.getByText("No models added")).toBeTruthy();
+      expect(screen.queryByText("0 models")).toBeNull();
+      expect(screen.getByText("Verified")).toBeTruthy();
+    });
 
-  it("describes a local (keyless) provider with the green 'Running' pill and a self-describing sub-line", () => {
-    const localGroup: ByokTableGroup = {
-      provider: { ...group.provider, displayName: "Ollama", requiresApiKey: false },
-      models: [],
-    };
-    renderWithProvider(
-      <ByokGlobalTable groups={[localGroup]} onConfigure={jest.fn()} onRemove={jest.fn()} />
-    );
-    expect(screen.getByText("Local models on your machine")).toBeTruthy();
-    const badge = screen.getByText("Running");
-    expect(badge.className).toContain("tw-bg-success");
-  });
+    it("shows Checking… instead of Verified for a keyless provider until verification returns (https://github.com/logancyang/obsidian-copilot/issues/3147)", () => {
+      const localGroup: ByokTableGroup = {
+        provider: { ...group.provider, displayName: "Ollama", requiresApiKey: false },
+        models: [],
+      };
+      renderWithProvider(
+        <ByokGlobalTable groups={[localGroup]} onConfigure={jest.fn()} onRemove={jest.fn()} />
+      );
+      expect(screen.getByText("Local models on your machine")).toBeTruthy();
+      expect(screen.getByText("Checking…")).toBeTruthy();
+      expect(screen.queryByText("Verified")).toBeNull();
+    });
 
-  it("collapses and expands when the provider card is clicked", () => {
-    renderWithProvider(
-      <ByokGlobalTable groups={[group]} onConfigure={jest.fn()} onRemove={jest.fn()} />
-    );
+    it("toggles the model list each time the provider card is clicked", () => {
+      renderWithProvider(
+        <ByokGlobalTable groups={[group]} onConfigure={jest.fn()} onRemove={jest.fn()} />
+      );
 
-    // Initially collapsed
-    expect(screen.queryByText("Claude Sonnet 4.5")).toBeNull();
+      expect(screen.queryByText("Claude Sonnet 4.5")).toBeNull();
 
-    // Click to expand
-    fireEvent.click(screen.getByText("Anthropic"));
-    expect(screen.getByText("Claude Sonnet 4.5")).toBeTruthy();
+      fireEvent.click(screen.getByText("Anthropic"));
+      expect(screen.getByText("Claude Sonnet 4.5")).toBeTruthy();
 
-    // Click to collapse
-    fireEvent.click(screen.getByText("Anthropic"));
-    expect(screen.queryByText("Claude Sonnet 4.5")).toBeNull();
-  });
+      fireEvent.click(screen.getByText("Anthropic"));
+      expect(screen.queryByText("Claude Sonnet 4.5")).toBeNull();
+    });
 
-  it("exposes the header as a keyboard-operable button that toggles on Enter/Space", () => {
-    renderWithProvider(
-      <ByokGlobalTable groups={[group]} onConfigure={jest.fn()} onRemove={jest.fn()} />
-    );
+    it("toggles the model list from the keyboard with Enter and Space on the focusable card header", () => {
+      renderWithProvider(
+        <ByokGlobalTable groups={[group]} onConfigure={jest.fn()} onRemove={jest.fn()} />
+      );
 
-    // The header's accessible name includes its text ("2 models"); the
-    // overflow-menu trigger (also aria-expanded) is named "More actions…".
-    const header = screen.getByRole("button", { name: /2 models/i });
-    expect(header.getAttribute("tabindex")).toBe("0");
-    expect(header.getAttribute("aria-expanded")).toBe("false");
+      const header = screen.getByRole("button", { name: /2 models/i });
+      expect(header.getAttribute("tabindex")).toBe("0");
+      expect(header.getAttribute("aria-expanded")).toBe("false");
 
-    // Enter expands.
-    fireEvent.keyDown(header, { key: "Enter" });
-    expect(screen.getByText("Claude Sonnet 4.5")).toBeTruthy();
-    expect(header.getAttribute("aria-expanded")).toBe("true");
+      fireEvent.keyDown(header, { key: "Enter" });
+      expect(screen.getByText("Claude Sonnet 4.5")).toBeTruthy();
+      expect(header.getAttribute("aria-expanded")).toBe("true");
 
-    // Space collapses.
-    fireEvent.keyDown(header, { key: " " });
-    expect(screen.queryByText("Claude Sonnet 4.5")).toBeNull();
-    expect(header.getAttribute("aria-expanded")).toBe("false");
-  });
+      fireEvent.keyDown(header, { key: " " });
+      expect(screen.queryByText("Claude Sonnet 4.5")).toBeNull();
+      expect(header.getAttribute("aria-expanded")).toBe("false");
+    });
 
-  it("keeps the per-model remove button mounted (keyboard reachable) when expanded", () => {
-    renderWithProvider(
-      <ByokGlobalTable groups={[group]} onConfigure={jest.fn()} onRemove={jest.fn()} />
-    );
-    fireEvent.click(screen.getByText("Anthropic"));
+    it("offers a keyboard-reachable Remove button for each model once expanded", () => {
+      renderWithProvider(
+        <ByokGlobalTable groups={[group]} onConfigure={jest.fn()} onRemove={jest.fn()} />
+      );
+      fireEvent.click(screen.getByText("Anthropic"));
 
-    // Button is in the DOM without any hover — opacity, not conditional render,
-    // gates its visibility, so keyboard users can Tab to it.
-    const removeBtn = screen.getByRole("button", { name: "Remove Claude Sonnet 4.5" });
-    expect(removeBtn).toBeTruthy();
-    expect(removeBtn.getAttribute("tabindex")).toBe("0");
+      const removeBtn = screen.getByRole("button", { name: "Remove Claude Sonnet 4.5" });
+      expect(removeBtn).toBeTruthy();
+      expect(removeBtn.getAttribute("tabindex")).toBe("0");
+    });
   });
 });

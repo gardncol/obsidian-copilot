@@ -2,704 +2,558 @@ import { ChainType } from "@/chainType";
 import {
   COPILOT_FOLDER_ROOT,
   DEFAULT_QA_EXCLUSIONS_SETTING,
-  DEFAULT_SYSTEM_PROMPT,
   DEFAULT_SETTINGS,
   SEND_SHORTCUT,
+  BUILTIN_CHAT_MODELS,
 } from "@/constants";
 import {
   normalizeRootFolders,
   resetSettings,
   sanitizeEnvOverrides,
+  sanitizeBuiltinPreferences,
   sanitizeQaExclusions,
   sanitizeSettings,
   settingsAtom,
   settingsStore,
   validateCopilotFolder,
   CopilotSettings,
+  getModelKeyFromModel,
 } from "@/settings/model";
-import { getEffectiveUserPrompt, getSystemPrompt } from "@/system-prompts/systemPromptBuilder";
-import * as systemPromptsState from "@/system-prompts/state";
-import * as settingsModel from "@/settings/model";
+import { CustomModel } from "@/aiParams";
 
-// Mock system-prompts state
-jest.mock("@/system-prompts/state", () => ({
-  getEffectiveSystemPromptContent: jest.fn(() => ""),
-  getDisableBuiltinSystemPrompt: jest.fn(() => false),
-}));
-
-// Mock settings/model getSettings for legacy fallback tests
-jest.mock("@/settings/model", () => {
-  const actual = jest.requireActual<object>("@/settings/model");
-  return {
-    ...actual,
-    getSettings: jest.fn(() => ({ userSystemPrompt: "" })),
-  };
-});
-
-describe("sanitizeQaExclusions", () => {
-  it("defaults to copilot root when value is not a string", () => {
-    expect(sanitizeQaExclusions(undefined)).toBe(encodeURIComponent(DEFAULT_QA_EXCLUSIONS_SETTING));
-  });
-
-  it("keeps slash-only patterns distinct from canonical entries", () => {
-    const rawValue = `${encodeURIComponent("///")},${encodeURIComponent(COPILOT_FOLDER_ROOT)}`;
-
-    const sanitized = sanitizeQaExclusions(rawValue);
-
-    expect(sanitized.split(",")).toEqual([
-      encodeURIComponent("///"),
-      encodeURIComponent(COPILOT_FOLDER_ROOT),
-    ]);
-  });
-
-  it("normalizes trailing slashes to canonical path keys", () => {
-    const rawValue = `${encodeURIComponent("folder/")},${encodeURIComponent("folder//")}`;
-
-    const sanitized = sanitizeQaExclusions(rawValue);
-
-    expect(sanitized.split(",")).toEqual([encodeURIComponent("folder/")]);
-  });
-
-  it("no longer force-injects the copilot root (system exclusion covers it)", () => {
-    const rawValue = encodeURIComponent("folder");
-
-    const sanitized = sanitizeQaExclusions(rawValue);
-
-    expect(sanitized.split(",")).toEqual([encodeURIComponent("folder")]);
-  });
-});
-
-describe("sanitizeSettings - defaultSendShortcut migration", () => {
-  it("should use default when defaultSendShortcut is missing", () => {
-    const settingsWithoutShortcut = {
-      ...DEFAULT_SETTINGS,
-      defaultSendShortcut: undefined,
-    } as unknown as CopilotSettings;
-
-    const sanitized = sanitizeSettings(settingsWithoutShortcut);
-
-    expect(sanitized.defaultSendShortcut).toBe(SEND_SHORTCUT.ENTER);
-  });
-
-  it("should use default when defaultSendShortcut is invalid", () => {
-    const settingsWithInvalidShortcut = {
-      ...DEFAULT_SETTINGS,
-      defaultSendShortcut: "invalid-shortcut",
-    } as unknown as CopilotSettings;
-
-    const sanitized = sanitizeSettings(settingsWithInvalidShortcut);
-
-    expect(sanitized.defaultSendShortcut).toBe(SEND_SHORTCUT.ENTER);
-  });
-
-  it("should preserve valid ENTER shortcut", () => {
-    const settingsWithEnter = {
-      ...DEFAULT_SETTINGS,
-      defaultSendShortcut: SEND_SHORTCUT.ENTER,
-    };
-
-    const sanitized = sanitizeSettings(settingsWithEnter);
-
-    expect(sanitized.defaultSendShortcut).toBe(SEND_SHORTCUT.ENTER);
-  });
-
-  it("should preserve valid SHIFT_ENTER shortcut", () => {
-    const settingsWithShiftEnter = {
-      ...DEFAULT_SETTINGS,
-      defaultSendShortcut: SEND_SHORTCUT.SHIFT_ENTER,
-    };
-
-    const sanitized = sanitizeSettings(settingsWithShiftEnter);
-
-    expect(sanitized.defaultSendShortcut).toBe(SEND_SHORTCUT.SHIFT_ENTER);
-  });
-});
-
-describe("sanitizeSettings - autoAddActiveContentToContext migration", () => {
-  it("should migrate from old includeActiveNoteAsContext=true", () => {
-    const oldSettings = {
-      ...DEFAULT_SETTINGS,
-      autoAddActiveContentToContext: undefined,
-      includeActiveNoteAsContext: true,
-    } as unknown as CopilotSettings;
-
-    const sanitized = sanitizeSettings(oldSettings);
-
-    expect(sanitized.autoAddActiveContentToContext).toBe(true);
-  });
-
-  it("should migrate from old includeActiveNoteAsContext=false", () => {
-    const oldSettings = {
-      ...DEFAULT_SETTINGS,
-      autoAddActiveContentToContext: undefined,
-      includeActiveNoteAsContext: false,
-    } as unknown as CopilotSettings;
-
-    const sanitized = sanitizeSettings(oldSettings);
-
-    expect(sanitized.autoAddActiveContentToContext).toBe(false);
-  });
-
-  it("should use default when no old setting exists", () => {
-    const newSettings = {
-      ...DEFAULT_SETTINGS,
-      autoAddActiveContentToContext: undefined,
-    } as unknown as CopilotSettings;
-
-    const sanitized = sanitizeSettings(newSettings);
-
-    expect(sanitized.autoAddActiveContentToContext).toBe(
-      DEFAULT_SETTINGS.autoAddActiveContentToContext
-    );
-  });
-});
-
-describe("sanitizeSettings - autoAddSelectionToContext migration", () => {
-  it("should migrate from old autoIncludeTextSelection=true", () => {
-    const oldSettings = {
-      ...DEFAULT_SETTINGS,
-      autoAddSelectionToContext: undefined,
-      autoIncludeTextSelection: true,
-    } as unknown as CopilotSettings;
-
-    const sanitized = sanitizeSettings(oldSettings);
-
-    expect(sanitized.autoAddSelectionToContext).toBe(true);
-  });
-
-  it("should migrate from old autoIncludeTextSelection=false", () => {
-    const oldSettings = {
-      ...DEFAULT_SETTINGS,
-      autoAddSelectionToContext: undefined,
-      autoIncludeTextSelection: false,
-    } as unknown as CopilotSettings;
-
-    const sanitized = sanitizeSettings(oldSettings);
-
-    expect(sanitized.autoAddSelectionToContext).toBe(false);
-  });
-
-  it("should use default when no old setting exists", () => {
-    const newSettings = {
-      ...DEFAULT_SETTINGS,
-      autoAddSelectionToContext: undefined,
-    } as unknown as CopilotSettings;
-
-    const sanitized = sanitizeSettings(newSettings);
-
-    expect(sanitized.autoAddSelectionToContext).toBe(DEFAULT_SETTINGS.autoAddSelectionToContext);
-  });
-});
-
-describe("sanitizeSettings - agentMode shape migration", () => {
-  it("creates a default agentMode slice when missing", () => {
-    const sanitized = sanitizeSettings({
-      ...DEFAULT_SETTINGS,
-      agentMode: undefined as unknown as never,
-    });
-    expect(sanitized.agentMode).toEqual({
+function sanitizeClaudeSlice(autoModePermission: unknown): CopilotSettings {
+  return sanitizeSettings({
+    ...DEFAULT_SETTINGS,
+    agentMode: {
+      enabled: true,
       byok: {},
-      activeBackend: "opencode",
-      backends: {},
-      debugFullFrames: true,
-      welcomeDismissed: false,
-      skills: { folder: "copilot/skills" },
+      activeBackend: "claude",
+      backends: { claude: { autoModePermission } },
+    },
+  } as unknown as CopilotSettings);
+}
+
+describe("model", () => {
+  describe("sanitizeQaExclusions()", () => {
+    it("defaults to copilot root when value is not a string", () => {
+      expect(sanitizeQaExclusions(undefined)).toBe(
+        encodeURIComponent(DEFAULT_QA_EXCLUSIONS_SETTING)
+      );
+    });
+
+    it("keeps slash-only patterns distinct from canonical entries", () => {
+      const rawValue = `${encodeURIComponent("///")},${encodeURIComponent(COPILOT_FOLDER_ROOT)}`;
+
+      const sanitized = sanitizeQaExclusions(rawValue);
+
+      expect(sanitized.split(",")).toEqual([
+        encodeURIComponent("///"),
+        encodeURIComponent(COPILOT_FOLDER_ROOT),
+      ]);
+    });
+
+    it("normalizes trailing slashes to canonical path keys", () => {
+      const rawValue = `${encodeURIComponent("folder/")},${encodeURIComponent("folder//")}`;
+
+      const sanitized = sanitizeQaExclusions(rawValue);
+
+      expect(sanitized.split(",")).toEqual([encodeURIComponent("folder/")]);
+    });
+
+    it("does not add the copilot root to a custom exclusion list (the system exclusion covers it)", () => {
+      const rawValue = encodeURIComponent("folder");
+
+      const sanitized = sanitizeQaExclusions(rawValue);
+
+      expect(sanitized.split(",")).toEqual([encodeURIComponent("folder")]);
     });
   });
 
-  it("defaults debugFullFrames to on for new installs", () => {
-    expect(DEFAULT_SETTINGS.agentMode.debugFullFrames).toBe(true);
-  });
+  describe("sanitizeSettings()", () => {
+    it("falls back to ENTER when defaultSendShortcut is missing", () => {
+      const settingsWithoutShortcut = {
+        ...DEFAULT_SETTINGS,
+        defaultSendShortcut: undefined,
+      } as unknown as CopilotSettings;
 
-  it("preserves an explicit debugFullFrames=false (a user who turned it off stays off)", () => {
-    const sanitized = sanitizeSettings({
-      ...DEFAULT_SETTINGS,
-      agentMode: {
-        byok: {},
-        activeBackend: "opencode",
-        backends: {},
-        debugFullFrames: false,
-      },
-    } as unknown as CopilotSettings);
-    expect(sanitized.agentMode.debugFullFrames).toBe(false);
-  });
+      const sanitized = sanitizeSettings(settingsWithoutShortcut);
 
-  it("preserves an explicit debugFullFrames=true", () => {
-    const sanitized = sanitizeSettings({
-      ...DEFAULT_SETTINGS,
-      agentMode: {
+      expect(sanitized.defaultSendShortcut).toBe(SEND_SHORTCUT.ENTER);
+    });
+
+    it("falls back to ENTER when defaultSendShortcut is unrecognized", () => {
+      const settingsWithInvalidShortcut = {
+        ...DEFAULT_SETTINGS,
+        defaultSendShortcut: "invalid-shortcut",
+      } as unknown as CopilotSettings;
+
+      const sanitized = sanitizeSettings(settingsWithInvalidShortcut);
+
+      expect(sanitized.defaultSendShortcut).toBe(SEND_SHORTCUT.ENTER);
+    });
+
+    it("keeps a saved ENTER send shortcut", () => {
+      const settingsWithEnter = {
+        ...DEFAULT_SETTINGS,
+        defaultSendShortcut: SEND_SHORTCUT.ENTER,
+      };
+
+      const sanitized = sanitizeSettings(settingsWithEnter);
+
+      expect(sanitized.defaultSendShortcut).toBe(SEND_SHORTCUT.ENTER);
+    });
+
+    it("keeps a saved SHIFT_ENTER send shortcut", () => {
+      const settingsWithShiftEnter = {
+        ...DEFAULT_SETTINGS,
+        defaultSendShortcut: SEND_SHORTCUT.SHIFT_ENTER,
+      };
+
+      const sanitized = sanitizeSettings(settingsWithShiftEnter);
+
+      expect(sanitized.defaultSendShortcut).toBe(SEND_SHORTCUT.SHIFT_ENTER);
+    });
+
+    it("migrates legacy includeActiveNoteAsContext=true to autoAddActiveContentToContext=true", () => {
+      const oldSettings = {
+        ...DEFAULT_SETTINGS,
+        autoAddActiveContentToContext: undefined,
+        includeActiveNoteAsContext: true,
+      } as unknown as CopilotSettings;
+
+      const sanitized = sanitizeSettings(oldSettings);
+
+      expect(sanitized.autoAddActiveContentToContext).toBe(true);
+    });
+
+    it("migrates legacy includeActiveNoteAsContext=false to autoAddActiveContentToContext=false", () => {
+      const oldSettings = {
+        ...DEFAULT_SETTINGS,
+        autoAddActiveContentToContext: undefined,
+        includeActiveNoteAsContext: false,
+      } as unknown as CopilotSettings;
+
+      const sanitized = sanitizeSettings(oldSettings);
+
+      expect(sanitized.autoAddActiveContentToContext).toBe(false);
+    });
+
+    it("defaults autoAddActiveContentToContext when no legacy setting exists", () => {
+      const newSettings = {
+        ...DEFAULT_SETTINGS,
+        autoAddActiveContentToContext: undefined,
+      } as unknown as CopilotSettings;
+
+      const sanitized = sanitizeSettings(newSettings);
+
+      expect(sanitized.autoAddActiveContentToContext).toBe(
+        DEFAULT_SETTINGS.autoAddActiveContentToContext
+      );
+    });
+
+    it("creates a default agentMode slice when missing", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentMode: undefined as unknown as never,
+      });
+      expect(sanitized.agentMode).toEqual({
         byok: {},
         activeBackend: "opencode",
         backends: {},
         debugFullFrames: true,
-      },
-    } as unknown as CopilotSettings);
-    expect(sanitized.agentMode.debugFullFrames).toBe(true);
-  });
-
-  it("falls back to the on-by-default when debugFullFrames is absent or non-boolean", () => {
-    const sanitized = sanitizeSettings({
-      ...DEFAULT_SETTINGS,
-      agentMode: {
-        byok: {},
-        activeBackend: "opencode",
-        backends: {},
-        debugFullFrames: "yes" as unknown as boolean,
-      },
-    } as unknown as CopilotSettings);
-    expect(sanitized.agentMode.debugFullFrames).toBe(true);
-  });
-
-  it("leaves backends empty when no legacy fields and no existing slice", () => {
-    const sanitized = sanitizeSettings({
-      ...DEFAULT_SETTINGS,
-      agentMode: { enabled: true, byok: {} },
-    } as unknown as CopilotSettings);
-    expect(sanitized.agentMode.backends).toEqual({});
-  });
-
-  it("preserves an already-migrated backends.opencode slice", () => {
-    const migrated = {
-      ...DEFAULT_SETTINGS,
-      agentMode: {
-        enabled: true,
-        byok: {},
-        activeBackend: "opencode",
-        backends: {
-          opencode: { binaryPath: "/new/opencode", binaryVersion: "2.0.0", binarySource: "custom" },
+        notificationSound: true,
+        notificationSoundId: "piano",
+        welcomeDismissed: false,
+        skills: {
+          folder: "copilot/skills",
+          builtinPreferences: {
+            "copilot-web-search": { disabled: true },
+            "copilot-web-fetch": { disabled: true },
+            "copilot-read-pdf": { disabled: true },
+          },
         },
-      },
-    } as unknown as CopilotSettings;
-
-    const sanitized = sanitizeSettings(migrated);
-
-    expect(sanitized.agentMode.backends.opencode).toEqual({
-      binaryPath: "/new/opencode",
-      binaryVersion: "2.0.0",
-      binarySource: "custom",
+      });
     });
-  });
 
-  it("defaults binarySource to 'managed' when path is set but source is missing or invalid", () => {
-    const legacy = {
-      ...DEFAULT_SETTINGS,
-      agentMode: {
-        enabled: true,
-        byok: {},
-        backends: {
-          opencode: { binaryPath: "/p", binaryVersion: "1.0.0", binarySource: "garbage" },
+    it("defaults notificationSound to on so an unattended turn still calls the user back", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentMode: {
+          byok: {},
+          activeBackend: "opencode",
+          backends: {},
         },
-      },
-    } as unknown as CopilotSettings;
-
-    const sanitized = sanitizeSettings(legacy);
-
-    expect(sanitized.agentMode.backends.opencode?.binarySource).toBe("managed");
-  });
-
-  it("clears binarySource when no binaryPath is set", () => {
-    const settings = {
-      ...DEFAULT_SETTINGS,
-      agentMode: {
-        enabled: true,
-        byok: {},
-        backends: { opencode: { binarySource: "managed" } },
-      },
-    } as unknown as CopilotSettings;
-
-    const sanitized = sanitizeSettings(settings);
-
-    expect(sanitized.agentMode.backends.opencode).toEqual({
-      binaryPath: undefined,
-      binaryVersion: undefined,
-      binarySource: undefined,
+      } as unknown as CopilotSettings);
+      expect(sanitized.agentMode.notificationSound).toBe(true);
     });
-  });
-});
 
-describe("sanitizeEnvOverrides", () => {
-  it("returns undefined for non-objects", () => {
-    expect(sanitizeEnvOverrides(undefined)).toBeUndefined();
-    expect(sanitizeEnvOverrides(null)).toBeUndefined();
-    expect(sanitizeEnvOverrides("foo")).toBeUndefined();
-    expect(sanitizeEnvOverrides(42)).toBeUndefined();
-    expect(sanitizeEnvOverrides([1, 2])).toBeUndefined();
-  });
-
-  it("returns undefined when no valid entries remain", () => {
-    expect(sanitizeEnvOverrides({})).toBeUndefined();
-    expect(sanitizeEnvOverrides({ "": "v", "1FOO": "v", "BAR=BAZ": "v" })).toBeUndefined();
-  });
-
-  it("keeps valid POSIX identifiers and string values", () => {
-    expect(
-      sanitizeEnvOverrides({
-        CLAUDE_CONFIG_DIR: "/tmp/claude",
-        _PRIVATE: "x",
-        myVar2: "y",
-      })
-    ).toEqual({
-      CLAUDE_CONFIG_DIR: "/tmp/claude",
-      _PRIVATE: "x",
-      myVar2: "y",
-    });
-  });
-
-  it("drops keys with leading digits, equals signs, whitespace, or invalid characters", () => {
-    expect(
-      sanitizeEnvOverrides({
-        "1FOO": "v",
-        "FOO BAR": "v",
-        "FOO=BAR": "v",
-        "FOO-BAR": "v",
-        VALID: "v",
-      })
-    ).toEqual({ VALID: "v" });
-  });
-
-  it("drops entries whose value isn't a string or contains control chars", () => {
-    expect(
-      sanitizeEnvOverrides({
-        OK: "fine",
-        NUM: 42,
-        NULLED: null,
-        UNDEF: undefined,
-        TABS: "ok\twith\ttabs", // tab is a control char — drop
-        NEWLINE: "ok\nnewline", // drop
-      })
-    ).toEqual({ OK: "fine" });
-  });
-
-  it("caps at 64 entries to bound persisted size", () => {
-    const big: Record<string, string> = {};
-    for (let i = 0; i < 100; i++) big[`VAR_${i}`] = String(i);
-    const sanitized = sanitizeEnvOverrides(big);
-    expect(sanitized && Object.keys(sanitized).length).toBe(64);
-  });
-
-  it("round-trips through sanitizeSettings on the Claude backend slice", () => {
-    const settings = {
-      ...DEFAULT_SETTINGS,
-      agentMode: {
-        enabled: true,
-        byok: {},
-        activeBackend: "claude",
-        backends: {
-          claude: { envOverrides: { CLAUDE_CONFIG_DIR: "/x", "BAD KEY": "y" } },
+    it("keeps a chosen notification sound and drops one no longer in the catalog (https://github.com/logancyang/obsidian-copilot/issues/2987)", () => {
+      const chosen = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentMode: {
+          byok: {},
+          activeBackend: "opencode",
+          backends: {},
+          notificationSoundId: "doorbell",
         },
-      },
-    } as unknown as CopilotSettings;
+      } as unknown as CopilotSettings);
+      expect(chosen.agentMode.notificationSoundId).toBe("doorbell");
 
-    const sanitized = sanitizeSettings(settings);
-
-    expect(sanitized.agentMode.backends.claude?.envOverrides).toEqual({
-      CLAUDE_CONFIG_DIR: "/x",
+      const removed = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentMode: {
+          byok: {},
+          activeBackend: "opencode",
+          backends: {},
+          notificationSoundId: "removed-sound",
+        },
+      } as unknown as CopilotSettings);
+      expect(removed.agentMode.notificationSoundId).toBe(
+        DEFAULT_SETTINGS.agentMode.notificationSoundId
+      );
     });
-  });
-});
 
-describe("sanitizeSettings - legacy Miyo settings cleanup", () => {
-  it("migrates legacy Miyo settings and strips obsolete remote vault path state", () => {
-    const legacySettings = {
-      ...DEFAULT_SETTINGS,
-      enableMiyo: undefined,
-      enableMiyoSearch: true,
-      miyoServerUrl: "http://127.0.0.1:8742",
-      miyoRemoteVaultPath: "\\\\Mac\\Home\\Downloads\\graham-essays-main",
-    } as unknown as CopilotSettings;
+    it("preserves an explicit notificationSound=false (a user who muted it stays muted)", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentMode: {
+          byok: {},
+          activeBackend: "opencode",
+          backends: {},
+          notificationSound: false,
+        },
+      } as unknown as CopilotSettings);
+      expect(sanitized.agentMode.notificationSound).toBe(false);
+    });
 
-    const sanitized = sanitizeSettings(legacySettings);
+    it("preserves an explicit debugFullFrames=false (a user who turned it off stays off)", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentMode: {
+          byok: {},
+          activeBackend: "opencode",
+          backends: {},
+          debugFullFrames: false,
+        },
+      } as unknown as CopilotSettings);
+      expect(sanitized.agentMode.debugFullFrames).toBe(false);
+    });
 
-    expect(sanitized.enableMiyo).toBe(true);
-    expect(sanitized.miyoServerUrl).toBe("http://127.0.0.1:8742");
-    const sanitizedRecord = sanitized as unknown as Record<string, unknown>;
+    it("falls back to debugFullFrames=true when the persisted value is not a boolean", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentMode: {
+          byok: {},
+          activeBackend: "opencode",
+          backends: {},
+          debugFullFrames: "yes" as unknown as boolean,
+        },
+      } as unknown as CopilotSettings);
+      expect(sanitized.agentMode.debugFullFrames).toBe(true);
+    });
 
-    expect("miyoRemoteVaultPath" in sanitizedRecord).toBe(false);
-    expect("enableMiyoSearch" in sanitizedRecord).toBe(false);
-  });
+    it("leaves backends empty when no legacy fields and no existing slice", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentMode: { enabled: true, byok: {} },
+      } as unknown as CopilotSettings);
+      expect(sanitized.agentMode.backends).toEqual({});
+    });
 
-  it("defaults a missing or malformed miyoSyncedExclusions to an empty receipt", () => {
-    const withoutReceipt = {
-      ...DEFAULT_SETTINGS,
-      miyoSyncedExclusions: undefined,
-    } as unknown as CopilotSettings;
-    expect(sanitizeSettings(withoutReceipt).miyoSyncedExclusions).toBe("");
-
-    const malformed = {
-      ...DEFAULT_SETTINGS,
-      miyoSyncedExclusions: 42,
-    } as unknown as CopilotSettings;
-    expect(sanitizeSettings(malformed).miyoSyncedExclusions).toBe("");
-
-    const preserved = {
-      ...DEFAULT_SETTINGS,
-      miyoSyncedExclusions: '{"device":"d","roots":[]}',
-    };
-    expect(sanitizeSettings(preserved).miyoSyncedExclusions).toBe('{"device":"d","roots":[]}');
-  });
-
-  it("preserves embedding provider migrations while stripping obsolete Miyo keys", () => {
-    const legacySettings = {
-      ...DEFAULT_SETTINGS,
-      userId: "",
-      activeEmbeddingModels: [
-        {
-          name: "legacy-embedding",
-          provider: "azure_openai",
+    it("preserves an already-migrated backends.opencode slice", () => {
+      const migrated = {
+        ...DEFAULT_SETTINGS,
+        agentMode: {
           enabled: true,
+          byok: {},
+          activeBackend: "opencode",
+          backends: {
+            opencode: {
+              binaryPath: "/new/opencode",
+              binaryVersion: "2.0.0",
+              binarySource: "custom",
+            },
+          },
         },
-      ],
-      miyoRemoteVaultPath: "\\\\Mac\\Home\\Downloads\\graham-essays-main",
-    };
+      } as unknown as CopilotSettings;
 
-    const sanitized = sanitizeSettings(legacySettings);
-    const sanitizedRecord = sanitized as unknown as Record<string, unknown>;
+      const sanitized = sanitizeSettings(migrated);
 
-    expect(sanitized.userId).toBeTruthy();
-    expect(sanitized.activeEmbeddingModels[0].provider).not.toBe("azure_openai");
-    expect("miyoRemoteVaultPath" in sanitizedRecord).toBe(false);
-  });
-});
-
-describe("sanitizeSettings - legacy self-host migration", () => {
-  it("renames legacy enableSelfHostedSearch=true to enableSelfHostMode", () => {
-    const legacy = {
-      ...DEFAULT_SETTINGS,
-      enableSelfHostMode: undefined,
-      enableSelfHostedSearch: true,
-    } as unknown as CopilotSettings;
-
-    const sanitized = sanitizeSettings(legacy);
-
-    // Only the user preference carries over; entitlement comes from the signed
-    // token, so there is no local receipt for sanitize to seed.
-    expect(sanitized.enableSelfHostMode).toBe(true);
-  });
-});
-
-describe("getSystemPrompt", () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
-  it("returns only builtin prompt when no user prompt and builtin not disabled", () => {
-    (systemPromptsState.getEffectiveSystemPromptContent as jest.Mock).mockReturnValue("");
-    (systemPromptsState.getDisableBuiltinSystemPrompt as jest.Mock).mockReturnValue(false);
-
-    const result = getSystemPrompt();
-
-    expect(result).toBe(DEFAULT_SYSTEM_PROMPT);
-  });
-
-  it("returns builtin prompt with user custom instructions when user prompt exists", () => {
-    const userPrompt = "Always be concise and helpful.";
-    (systemPromptsState.getEffectiveSystemPromptContent as jest.Mock).mockReturnValue(userPrompt);
-    (systemPromptsState.getDisableBuiltinSystemPrompt as jest.Mock).mockReturnValue(false);
-
-    const result = getSystemPrompt();
-
-    expect(result).toBe(`${DEFAULT_SYSTEM_PROMPT}
-<user_custom_instructions>
-${userPrompt}
-</user_custom_instructions>`);
-  });
-
-  it("returns only user prompt when builtin is disabled", () => {
-    const userPrompt = "Custom system prompt only.";
-    (systemPromptsState.getEffectiveSystemPromptContent as jest.Mock).mockReturnValue(userPrompt);
-    (systemPromptsState.getDisableBuiltinSystemPrompt as jest.Mock).mockReturnValue(true);
-
-    const result = getSystemPrompt();
-
-    expect(result).toBe(userPrompt);
-    expect(result).not.toContain(DEFAULT_SYSTEM_PROMPT);
-  });
-
-  it("returns empty string when builtin is disabled and no user prompt", () => {
-    (systemPromptsState.getEffectiveSystemPromptContent as jest.Mock).mockReturnValue("");
-    (systemPromptsState.getDisableBuiltinSystemPrompt as jest.Mock).mockReturnValue(true);
-
-    const result = getSystemPrompt();
-
-    expect(result).toBe("");
-  });
-
-  it("wraps user prompt in user_custom_instructions tags", () => {
-    const userPrompt = "Be professional.";
-    (systemPromptsState.getEffectiveSystemPromptContent as jest.Mock).mockReturnValue(userPrompt);
-    (systemPromptsState.getDisableBuiltinSystemPrompt as jest.Mock).mockReturnValue(false);
-
-    const result = getSystemPrompt();
-
-    expect(result).toContain("<user_custom_instructions>");
-    expect(result).toContain("</user_custom_instructions>");
-    expect(result).toContain(userPrompt);
-  });
-
-  it("preserves multiline user prompts", () => {
-    const userPrompt = "Line 1\nLine 2\nLine 3";
-    (systemPromptsState.getEffectiveSystemPromptContent as jest.Mock).mockReturnValue(userPrompt);
-    (systemPromptsState.getDisableBuiltinSystemPrompt as jest.Mock).mockReturnValue(false);
-
-    const result = getSystemPrompt();
-
-    expect(result).toContain(userPrompt);
-    expect(result).toContain("Line 1\nLine 2\nLine 3");
-  });
-
-  it("calls getEffectiveSystemPromptContent to get user prompt", () => {
-    getSystemPrompt();
-
-    expect(systemPromptsState.getEffectiveSystemPromptContent).toHaveBeenCalled();
-  });
-
-  it("calls getDisableBuiltinSystemPrompt to check builtin status", () => {
-    getSystemPrompt();
-
-    expect(systemPromptsState.getDisableBuiltinSystemPrompt).toHaveBeenCalled();
-  });
-
-  it("respects priority: session > global default > empty", () => {
-    // This is tested indirectly through getEffectiveSystemPromptContent
-    // which is already tested in state.test.ts
-    const sessionPrompt = "Session prompt content";
-    (systemPromptsState.getEffectiveSystemPromptContent as jest.Mock).mockReturnValue(
-      sessionPrompt
-    );
-    (systemPromptsState.getDisableBuiltinSystemPrompt as jest.Mock).mockReturnValue(false);
-
-    const result = getSystemPrompt();
-
-    expect(result).toContain(sessionPrompt);
-  });
-});
-
-describe("getEffectiveUserPrompt - legacy fallback", () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
-  it("returns file-based prompt when available", () => {
-    const fileBasedPrompt = "File-based prompt content";
-    (systemPromptsState.getEffectiveSystemPromptContent as jest.Mock).mockReturnValue(
-      fileBasedPrompt
-    );
-    (settingsModel.getSettings as jest.Mock).mockReturnValue({
-      userSystemPrompt: "Legacy prompt",
+      expect(sanitized.agentMode.backends.opencode).toEqual({
+        binaryPath: "/new/opencode",
+        binaryVersion: "2.0.0",
+        binarySource: "custom",
+      });
     });
 
-    const result = getEffectiveUserPrompt();
+    it("defaults binarySource to 'managed' when path is set but source is missing or invalid", () => {
+      const legacy = {
+        ...DEFAULT_SETTINGS,
+        agentMode: {
+          enabled: true,
+          byok: {},
+          backends: {
+            opencode: { binaryPath: "/p", binaryVersion: "1.0.0", binarySource: "garbage" },
+          },
+        },
+      } as unknown as CopilotSettings;
 
-    expect(result).toBe(fileBasedPrompt);
-  });
+      const sanitized = sanitizeSettings(legacy);
 
-  it("falls back to legacy userSystemPrompt when file-based is empty", () => {
-    const legacyPrompt = "Legacy system prompt from settings";
-    (systemPromptsState.getEffectiveSystemPromptContent as jest.Mock).mockReturnValue("");
-    (settingsModel.getSettings as jest.Mock).mockReturnValue({
-      userSystemPrompt: legacyPrompt,
+      expect(sanitized.agentMode.backends.opencode?.binarySource).toBe("managed");
     });
 
-    const result = getEffectiveUserPrompt();
+    it("clears binarySource when no binaryPath is set", () => {
+      const settings = {
+        ...DEFAULT_SETTINGS,
+        agentMode: {
+          enabled: true,
+          byok: {},
+          backends: { opencode: { binarySource: "managed" } },
+        },
+      } as unknown as CopilotSettings;
 
-    expect(result).toBe(legacyPrompt);
-  });
+      const sanitized = sanitizeSettings(settings);
 
-  it("returns empty string when both file-based and legacy are empty", () => {
-    (systemPromptsState.getEffectiveSystemPromptContent as jest.Mock).mockReturnValue("");
-    (settingsModel.getSettings as jest.Mock).mockReturnValue({
-      userSystemPrompt: "",
+      expect(sanitized.agentMode.backends.opencode).toEqual({
+        binaryPath: undefined,
+        binaryVersion: undefined,
+        binarySource: undefined,
+      });
     });
 
-    const result = getEffectiveUserPrompt();
-
-    expect(result).toBe("");
-  });
-
-  it("file-based prompt takes priority over legacy prompt", () => {
-    const fileBasedPrompt = "File-based wins";
-    const legacyPrompt = "Legacy loses";
-    (systemPromptsState.getEffectiveSystemPromptContent as jest.Mock).mockReturnValue(
-      fileBasedPrompt
-    );
-    (settingsModel.getSettings as jest.Mock).mockReturnValue({
-      userSystemPrompt: legacyPrompt,
+    it("defaults agentMode.welcomeDismissed to false when absent", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentMode: { byok: {} } as unknown as CopilotSettings["agentMode"],
+      });
+      expect(sanitized.agentMode.welcomeDismissed).toBe(false);
     });
 
-    const result = getEffectiveUserPrompt();
-
-    expect(result).toBe(fileBasedPrompt);
-    expect(result).not.toBe(legacyPrompt);
-  });
-
-  it("handles undefined getSettings gracefully", () => {
-    (systemPromptsState.getEffectiveSystemPromptContent as jest.Mock).mockReturnValue("");
-    (settingsModel.getSettings as jest.Mock).mockReturnValue(undefined);
-
-    const result = getEffectiveUserPrompt();
-
-    expect(result).toBe("");
-  });
-});
-
-describe("normalizeModelProvider", () => {
-  it("maps azure_openai to the EmbeddingModelProviders.AZURE_OPENAI value", () => {
-    const { normalizeModelProvider } = jest.requireActual<{
-      normalizeModelProvider: (provider: string) => string;
-    }>("@/settings/model");
-    // Reason: EmbeddingModelProviders.AZURE_OPENAI = "azure openai" (with space)
-    expect(normalizeModelProvider("azure_openai")).toBe("azure openai");
-  });
-
-  it("passes through already-normalized and unrelated providers", () => {
-    const { normalizeModelProvider } = jest.requireActual<{
-      normalizeModelProvider: (provider: string) => string;
-    }>("@/settings/model");
-    expect(normalizeModelProvider("azure openai")).toBe("azure openai");
-    expect(normalizeModelProvider("openai")).toBe("openai");
-    expect(normalizeModelProvider("")).toBe("");
-  });
-});
-
-describe("sanitizeSettings - docProcessorBackend (v6 field)", () => {
-  it("defaults to 'plus' when missing", () => {
-    const out = sanitizeSettings({
-      ...DEFAULT_SETTINGS,
-      docProcessorBackend: undefined,
-    } as unknown as CopilotSettings);
-    expect(out.docProcessorBackend).toBe("plus");
-  });
-
-  it("resets an invalid value to 'plus'", () => {
-    const out = sanitizeSettings({
-      ...DEFAULT_SETTINGS,
-      docProcessorBackend: "bogus",
-    } as unknown as CopilotSettings);
-    expect(out.docProcessorBackend).toBe("plus");
-  });
-
-  it("preserves 'miyo'", () => {
-    const out = sanitizeSettings({
-      ...DEFAULT_SETTINGS,
-      docProcessorBackend: "miyo",
+    it("carries a persisted agentMode.welcomeDismissed=true through sanitize", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentMode: {
+          byok: {},
+          welcomeDismissed: true,
+        } as unknown as CopilotSettings["agentMode"],
+      });
+      expect(sanitized.agentMode.welcomeDismissed).toBe(true);
     });
-    expect(out.docProcessorBackend).toBe("miyo");
-  });
-});
 
-describe("model", () => {
-  describe("sanitizeSettings()", () => {
-    function sanitizeClaudeSlice(autoModePermission: unknown): CopilotSettings {
-      return sanitizeSettings({
+    it("ignores a non-boolean agentMode.welcomeDismissed, falling back to false", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentMode: {
+          byok: {},
+          welcomeDismissed: "yes",
+        } as unknown as CopilotSettings["agentMode"],
+      });
+      expect(sanitized.agentMode.welcomeDismissed).toBe(false);
+    });
+
+    it("drops invalid envOverrides keys from the Claude backend slice while keeping valid ones", () => {
+      const settings = {
         ...DEFAULT_SETTINGS,
         agentMode: {
           enabled: true,
           byok: {},
           activeBackend: "claude",
-          backends: { claude: { autoModePermission } },
+          backends: {
+            claude: { envOverrides: { CLAUDE_CONFIG_DIR: "/x", "BAD KEY": "y" } },
+          },
+        },
+      } as unknown as CopilotSettings;
+
+      const sanitized = sanitizeSettings(settings);
+
+      expect(sanitized.agentMode.backends.claude?.envOverrides).toEqual({
+        CLAUDE_CONFIG_DIR: "/x",
+      });
+    });
+
+    it("migrates legacy Miyo settings and strips obsolete remote vault path state", () => {
+      const legacySettings = {
+        ...DEFAULT_SETTINGS,
+        enableMiyo: undefined,
+        enableMiyoSearch: true,
+        miyoServerUrl: "http://127.0.0.1:8742",
+        miyoRemoteVaultPath: "\\\\Mac\\Home\\Downloads\\graham-essays-main",
+      } as unknown as CopilotSettings;
+
+      const sanitized = sanitizeSettings(legacySettings);
+
+      expect(sanitized.enableMiyo).toBe(true);
+      expect(sanitized.miyoServerUrl).toBe("http://127.0.0.1:8742");
+      const sanitizedRecord = sanitized as unknown as Record<string, unknown>;
+
+      expect("miyoRemoteVaultPath" in sanitizedRecord).toBe(false);
+      expect("enableMiyoSearch" in sanitizedRecord).toBe(false);
+    });
+
+    it("assigns a userId while stripping obsolete Miyo keys", () => {
+      const legacySettings = {
+        ...DEFAULT_SETTINGS,
+        userId: "",
+        miyoRemoteVaultPath: "\\\\Mac\\Home\\Downloads\\graham-essays-main",
+      };
+
+      const sanitized = sanitizeSettings(legacySettings);
+      const sanitizedRecord = sanitized as unknown as Record<string, unknown>;
+
+      expect(sanitized.userId).toBeTruthy();
+      expect("miyoRemoteVaultPath" in sanitizedRecord).toBe(false);
+    });
+
+    it("renames legacy enableSelfHostedSearch=true to enableSelfHostMode", () => {
+      const legacy = {
+        ...DEFAULT_SETTINGS,
+        enableSelfHostMode: undefined,
+        enableSelfHostedSearch: true,
+      } as unknown as CopilotSettings;
+
+      const sanitized = sanitizeSettings(legacy);
+
+      expect(sanitized.enableSelfHostMode).toBe(true);
+    });
+
+    it("defaults docProcessorBackend to 'plus' when missing", () => {
+      const out = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        docProcessorBackend: undefined,
+      } as unknown as CopilotSettings);
+      expect(out.docProcessorBackend).toBe("plus");
+    });
+
+    it("resets an invalid docProcessorBackend to 'plus'", () => {
+      const out = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        docProcessorBackend: "bogus",
+      } as unknown as CopilotSettings);
+      expect(out.docProcessorBackend).toBe("plus");
+    });
+
+    it("preserves docProcessorBackend='miyo'", () => {
+      const out = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        docProcessorBackend: "miyo",
+      });
+      expect(out.docProcessorBackend).toBe("miyo");
+    });
+
+    it.each(["http://miyo-home:8742", "http://127.0.0.1:8742"])(
+      "preserves the legacy endpoint %s without requiring local discovery — https://github.com/Brevilabs/obsidian-copilot-private/issues/466",
+      (miyoServerUrl) => {
+        const settings = sanitizeSettings({ ...DEFAULT_SETTINGS, miyoServerUrl });
+        expect(settings.miyoConnectionMode).toBe("remote");
+        expect(settings.miyoServerUrl).toBe(miyoServerUrl);
+      }
+    );
+
+    it("retains a saved server address while local mode stays selected after reload — https://github.com/Brevilabs/obsidian-copilot-private/issues/466", () => {
+      const settings = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        miyoServerUrl: "http://remote:8742",
+        miyoConnectionMode: "local",
+      });
+      expect(settings.miyoConnectionMode).toBe("local");
+      expect(settings.miyoServerUrl).toBe("http://remote:8742");
+      expect(sanitizeSettings(settings)).toEqual(settings);
+    });
+
+    it("starts a fresh configuration with this computer — https://github.com/Brevilabs/obsidian-copilot-private/issues/466", () => {
+      expect(sanitizeSettings({ ...DEFAULT_SETTINGS }).miyoConnectionMode).toBe("local");
+    });
+
+    it("defaults the startup notice marker without inheriting the Agent Home dismissal", () => {
+      const persisted = { ...DEFAULT_SETTINGS, lastDismissedVersion: "4.1.0" };
+      delete (persisted as Partial<CopilotSettings>).lastShownStartupVersion;
+      const loaded = sanitizeSettings(persisted);
+      expect(loaded.lastShownStartupVersion).toBeNull();
+      expect(loaded.lastDismissedVersion).toBe("4.1.0");
+    });
+
+    it("preserves distinct startup notice and Agent Home dismissal versions", () => {
+      const loaded = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        lastDismissedVersion: "4.0.9",
+        lastShownStartupVersion: "4.1.0",
+      });
+      expect(loaded.lastShownStartupVersion).toBe("4.1.0");
+      expect(loaded.lastDismissedVersion).toBe("4.0.9");
+    });
+
+    it("preserves valid built-in opt-outs and drops malformed preference values https://github.com/logancyang/obsidian-copilot/issues/3022", () => {
+      const result = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentMode: {
+          ...DEFAULT_SETTINGS.agentMode,
+          skills: {
+            folder: "copilot/skills",
+            builtinPreferences: {
+              "copilot-web-search": { disabled: true, disabledAgents: ["opencode", 3] },
+              invalid: null,
+              malformedArray: [],
+            },
+          },
         },
       } as unknown as CopilotSettings);
-    }
+      expect(result.agentMode.skills.builtinPreferences).toEqual({
+        "copilot-web-search": { disabled: true, disabledAgents: ["opencode"] },
+      });
+    });
+
+    it.each(["parallel", "exa"] as const)(
+      "preserves the %s self-host search provider (https://github.com/Brevilabs/obsidian-copilot-private/issues/285)",
+      (provider) => {
+        const sanitized = sanitizeSettings({
+          ...DEFAULT_SETTINGS,
+          selfHostSearchProvider: provider,
+        });
+
+        expect(sanitized.selfHostSearchProvider).toBe(provider);
+      }
+    );
+
+    it("falls back to Firecrawl for an unknown self-host search provider (https://github.com/Brevilabs/obsidian-copilot-private/issues/285)", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        selfHostSearchProvider: "unknown",
+      } as unknown as CopilotSettings);
+
+      expect(sanitized.selfHostSearchProvider).toBe("firecrawl");
+    });
+
+    it("turns live Relevant Notes updates on for settings written before the field existed (https://github.com/Brevilabs/obsidian-copilot-private/issues/362)", () => {
+      const withoutField = { ...DEFAULT_SETTINGS } as unknown as Record<string, unknown>;
+      delete withoutField.relevantNotesLiveUpdate;
+
+      const sanitized = sanitizeSettings(withoutField as unknown as CopilotSettings);
+
+      expect(sanitized.relevantNotesLiveUpdate).toBe(true);
+    });
+
+    it("preserves a persisted choice to switch live Relevant Notes updates off (https://github.com/Brevilabs/obsidian-copilot-private/issues/362)", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        relevantNotesLiveUpdate: false,
+      });
+
+      expect(sanitized.relevantNotesLiveUpdate).toBe(false);
+    });
+
+    it("drops a persisted global output cap so it cannot truncate answers again (https://github.com/logancyang/obsidian-copilot-preview/issues/312)", () => {
+      const withRetiredCap = {
+        ...DEFAULT_SETTINGS,
+        maxTokens: 6000,
+        contextTurns: 4,
+      } as unknown as CopilotSettings;
+
+      const sanitized = sanitizeSettings(withRetiredCap);
+
+      expect("maxTokens" in (sanitized as unknown as Record<string, unknown>)).toBe(false);
+      expect(sanitized.contextTurns).toBe(4);
+    });
 
     it("keeps a Claude auto permission mode the SDK understands", () => {
       const sanitized = sanitizeClaudeSlice("acceptEdits");
@@ -731,15 +585,7 @@ describe("model", () => {
       expect(out.defaultChainType).toBe(ChainType.COPILOT_PLUS_CHAIN);
     });
 
-    it("defaults to the historical root when empty", () => {
-      const out = sanitizeSettings({
-        ...DEFAULT_SETTINGS,
-        copilotFolder: "",
-      });
-      expect(out.copilotFolder).toBe(DEFAULT_SETTINGS.copilotFolder);
-    });
-
-    it("defaults to the historical root when whitespace-only", () => {
+    it("falls back to the default copilotFolder when it is whitespace-only", () => {
       const out = sanitizeSettings({
         ...DEFAULT_SETTINGS,
         copilotFolder: "   ",
@@ -747,7 +593,7 @@ describe("model", () => {
       expect(out.copilotFolder).toBe(DEFAULT_SETTINGS.copilotFolder);
     });
 
-    it("trims surrounding whitespace from a custom value", () => {
+    it("trims surrounding whitespace from a custom copilotFolder", () => {
       const out = sanitizeSettings({
         ...DEFAULT_SETTINGS,
         copilotFolder: "  my-ai  ",
@@ -755,7 +601,7 @@ describe("model", () => {
       expect(out.copilotFolder).toBe("my-ai");
     });
 
-    it("preserves a nested custom value", () => {
+    it("keeps a nested custom copilotFolder", () => {
       const out = sanitizeSettings({
         ...DEFAULT_SETTINGS,
         copilotFolder: "notes/ai",
@@ -763,7 +609,7 @@ describe("model", () => {
       expect(out.copilotFolder).toBe("notes/ai");
     });
 
-    it("preserves an existing config-like root without vault context", () => {
+    it("keeps an existing config-like copilotFolder without vault context", () => {
       const out = sanitizeSettings({
         ...DEFAULT_SETTINGS,
         copilotFolder: ".vault-config/plugins/copilot-data",
@@ -772,31 +618,7 @@ describe("model", () => {
       expect(out.copilotFolder).toBe(".vault-config/plugins/copilot-data");
     });
 
-    it("rejects a parent-traversal path", () => {
-      const out = sanitizeSettings({
-        ...DEFAULT_SETTINGS,
-        copilotFolder: "../escape",
-      });
-      expect(out.copilotFolder).toBe(DEFAULT_SETTINGS.copilotFolder);
-    });
-
-    it("rejects a Windows drive-absolute path", () => {
-      const out = sanitizeSettings({
-        ...DEFAULT_SETTINGS,
-        copilotFolder: "C:/Users/evil",
-      });
-      expect(out.copilotFolder).toBe(DEFAULT_SETTINGS.copilotFolder);
-    });
-
-    it("rejects a Unix-absolute path", () => {
-      const out = sanitizeSettings({
-        ...DEFAULT_SETTINGS,
-        copilotFolder: "/etc/passwd",
-      });
-      expect(out.copilotFolder).toBe(DEFAULT_SETTINGS.copilotFolder);
-    });
-
-    it("unions the active root into a normalized, deduped history", () => {
+    it("unions the active root into a normalized, deduped copilotRootHistory", () => {
       const out = sanitizeSettings({
         ...DEFAULT_SETTINGS,
         copilotFolder: "team-ai",
@@ -805,7 +627,7 @@ describe("model", () => {
       expect(new Set(out.copilotRootHistory)).toEqual(new Set(["copilot", "ai", "team-ai"]));
     });
 
-    it("guarantees the active root is present even when history is missing", () => {
+    it("adds the active root to copilotRootHistory even when the history is missing", () => {
       const raw = { ...DEFAULT_SETTINGS, copilotFolder: "ai" } as unknown as Record<
         string,
         unknown
@@ -815,7 +637,7 @@ describe("model", () => {
       expect(out.copilotRootHistory).toContain("ai");
     });
 
-    it("coerces a non-boolean upgrade flag to the default", () => {
+    it("coerces a non-boolean upgradedToV8FromLegacy to false", () => {
       const out = sanitizeSettings({
         ...DEFAULT_SETTINGS,
         upgradedToV8FromLegacy: undefined,
@@ -823,12 +645,195 @@ describe("model", () => {
       expect(out.upgradedToV8FromLegacy).toBe(false);
     });
 
-    it("preserves a true upgrade flag", () => {
+    it("preserves upgradedToV8FromLegacy=true", () => {
       const out = sanitizeSettings({
         ...DEFAULT_SETTINGS,
         upgradedToV8FromLegacy: true,
       });
       expect(out.upgradedToV8FromLegacy).toBe(true);
+    });
+
+    it("falls back to the default copilotFolder for every path validateCopilotFolder rejects and keeps a valid nested folder", () => {
+      for (const value of ["../escape", "/etc/passwd", "C:/x", "", "NUL", "copilot."]) {
+        const out = sanitizeSettings({ ...DEFAULT_SETTINGS, copilotFolder: value });
+        expect(out.copilotFolder).toBe(DEFAULT_SETTINGS.copilotFolder);
+      }
+      const kept = sanitizeSettings({ ...DEFAULT_SETTINGS, copilotFolder: "team/ai" });
+      expect(kept.copilotFolder).toBe("team/ai");
+    });
+
+    it.each([
+      ["a missing cache, as every pre-upgrade data.json has", undefined],
+      ["a non-object cache", "nope"],
+      ["a cache whose models are not a list", { models: "nope", defaultEnabledIds: [] }],
+      ["a model entry that is null", { models: [null], defaultEnabledIds: [] }],
+      [
+        "a model entry with no id",
+        { models: [{ displayName: "Nameless" }], defaultEnabledIds: [] },
+      ],
+      [
+        "a model entry with a non-string id",
+        { models: [{ id: 7, displayName: "Seven" }], defaultEnabledIds: [] },
+      ],
+      [
+        "a non-string default-enabled id",
+        { models: [{ id: "a", displayName: "A" }], defaultEnabledIds: [7] },
+      ],
+    ])(
+      "replaces %s with an empty Copilot Plus lineup (https://github.com/Brevilabs/obsidian-copilot-private/issues/319)",
+      (_case, copilotPlusCatalog) => {
+        const out = sanitizeSettings({
+          ...DEFAULT_SETTINGS,
+          copilotPlusCatalog,
+        } as unknown as CopilotSettings);
+
+        expect(out.copilotPlusCatalog).toEqual({ models: [], defaultEnabledIds: [] });
+      }
+    );
+
+    it("keeps a well-formed cached Copilot Plus lineup", () => {
+      const copilotPlusCatalog = {
+        models: [{ id: "glm-5.2", displayName: "GLM-5.2" }],
+        defaultEnabledIds: ["glm-5.2"],
+      };
+
+      const out = sanitizeSettings({ ...DEFAULT_SETTINGS, copilotPlusCatalog });
+
+      expect(out.copilotPlusCatalog).toEqual(copilotPlusCatalog);
+    });
+
+    it("preserves a valid deviceProfiles map and drops empty or invalid entries", () => {
+      const raw = {
+        agentMode: {
+          deviceProfiles: {
+            "device-a": {
+              claudeCliPath: "/a/claude",
+              opencode: { binaryPath: "/a/oc", binaryVersion: "1", binarySource: "custom" },
+              codex: { envOverrides: { GOOD: "1", "bad-key": "x" } },
+            },
+            "device-b": {},
+            "": { claudeCliPath: "/x" },
+          },
+        },
+      };
+
+      const out = sanitizeSettings(raw as unknown as CopilotSettings);
+      const profiles = out.agentMode.deviceProfiles ?? {};
+
+      expect(profiles["device-a"]?.claudeCliPath).toBe("/a/claude");
+      expect(profiles["device-a"]?.opencode?.binarySource).toBe("custom");
+      expect(profiles["device-a"]?.codex?.envOverrides).toEqual({ GOOD: "1" });
+      expect(profiles["device-b"]).toBeUndefined();
+      expect(profiles[""]).toBeUndefined();
+    });
+
+    it("marks every unannotated Codex path as custom ownership (https://github.com/Brevilabs/obsidian-copilot-private/issues/368)", () => {
+      const out = sanitizeSettings({
+        agentMode: {
+          backends: { codex: { binaryPath: "/flat/codex" } },
+          deviceProfiles: {
+            "device-a": { codex: { binaryPath: "/profile/codex" } },
+          },
+        },
+      } as unknown as CopilotSettings);
+
+      expect(out.agentMode.backends.codex?.binarySource).toBe("custom");
+      expect(out.agentMode.deviceProfiles?.["device-a"]?.codex?.binarySource).toBe("custom");
+    });
+  });
+
+  describe("sanitizeEnvOverrides()", () => {
+    it("returns undefined for non-objects", () => {
+      expect(sanitizeEnvOverrides(undefined)).toBeUndefined();
+      expect(sanitizeEnvOverrides(null)).toBeUndefined();
+      expect(sanitizeEnvOverrides("foo")).toBeUndefined();
+      expect(sanitizeEnvOverrides(42)).toBeUndefined();
+      expect(sanitizeEnvOverrides([1, 2])).toBeUndefined();
+    });
+
+    it("returns undefined when no valid entries remain", () => {
+      expect(sanitizeEnvOverrides({})).toBeUndefined();
+      expect(sanitizeEnvOverrides({ "": "v", "1FOO": "v", "BAR=BAZ": "v" })).toBeUndefined();
+    });
+
+    it("keeps valid POSIX identifiers and string values", () => {
+      expect(
+        sanitizeEnvOverrides({
+          CLAUDE_CONFIG_DIR: "/tmp/claude",
+          _PRIVATE: "x",
+          myVar2: "y",
+        })
+      ).toEqual({
+        CLAUDE_CONFIG_DIR: "/tmp/claude",
+        _PRIVATE: "x",
+        myVar2: "y",
+      });
+    });
+
+    it("drops keys with leading digits, equals signs, whitespace, or invalid characters", () => {
+      expect(
+        sanitizeEnvOverrides({
+          "1FOO": "v",
+          "FOO BAR": "v",
+          "FOO=BAR": "v",
+          "FOO-BAR": "v",
+          VALID: "v",
+        })
+      ).toEqual({ VALID: "v" });
+    });
+
+    it("drops entries whose value isn't a string or contains control chars", () => {
+      expect(
+        sanitizeEnvOverrides({
+          OK: "fine",
+          NUM: 42,
+          NULLED: null,
+          UNDEF: undefined,
+          TABS: "ok\twith\ttabs",
+          NEWLINE: "ok\nnewline",
+        })
+      ).toEqual({ OK: "fine" });
+    });
+
+    it("caps at 64 entries to bound persisted size", () => {
+      const big: Record<string, string> = {};
+      for (let i = 0; i < 100; i++) big[`VAR_${i}`] = String(i);
+      const sanitized = sanitizeEnvOverrides(big);
+      expect(sanitized && Object.keys(sanitized).length).toBe(64);
+    });
+  });
+
+  describe("sanitizeBuiltinPreferences()", () => {
+    it.each([
+      undefined,
+      null,
+      false,
+      [],
+      {},
+      { "copilot-web-search": { disabled: false, disabledAgents: [] } },
+    ])(
+      "keeps absent, malformed, or default preferences empty: %p https://github.com/logancyang/obsidian-copilot/issues/3022",
+      (raw) => {
+        expect(sanitizeBuiltinPreferences(raw)).toBe(sanitizeBuiltinPreferences({}));
+        expect(sanitizeBuiltinPreferences(raw)).toEqual({});
+      }
+    );
+
+    it("drops retired names and malformed entries while preserving sparse overrides for known skills and absent agents https://github.com/logancyang/obsidian-copilot/issues/3022", () => {
+      expect(
+        sanitizeBuiltinPreferences({
+          "copilot-web-search": { disabled: true },
+          "copilot-web-fetch": { disabled: false, disabledAgents: ["uninstalled-agent", 3] },
+          "miyo-search": { disabled: true, disabledAgents: [] },
+          "copilot-read-pdf": null,
+          "miyo-parse": [],
+          "retired-skill": { disabled: true },
+        })
+      ).toEqual({
+        "copilot-web-search": { disabled: true },
+        "copilot-web-fetch": { disabledAgents: ["uninstalled-agent"] },
+        "miyo-search": { disabled: true },
+      });
     });
   });
 
@@ -876,7 +881,6 @@ describe("model", () => {
       expect(validateCopilotFolder("team/CON").ok).toBe(false);
       expect(validateCopilotFolder("con.md").ok).toBe(false);
       expect(validateCopilotFolder("Com1").ok).toBe(false);
-      // Names that merely CONTAIN a reserved word stay valid.
       expect(validateCopilotFolder("console").ok).toBe(true);
       expect(validateCopilotFolder("nul-notes").ok).toBe(true);
     });
@@ -885,17 +889,6 @@ describe("model", () => {
       expect(validateCopilotFolder("copilot.").ok).toBe(false);
       expect(validateCopilotFolder("team /ai").ok).toBe(false);
       expect(validateCopilotFolder("team./ai").ok).toBe(false);
-    });
-
-    it("agrees with sanitizeSettings on the copilotFolder fallback contract", () => {
-      // sanitizeSettings must coerce every value validateCopilotFolder rejects to
-      // the default; a value it accepts must survive verbatim.
-      for (const value of ["../escape", "/etc/passwd", "C:/x", "", "NUL", "copilot."]) {
-        const out = sanitizeSettings({ ...DEFAULT_SETTINGS, copilotFolder: value });
-        expect(out.copilotFolder).toBe(DEFAULT_SETTINGS.copilotFolder);
-      }
-      const kept = sanitizeSettings({ ...DEFAULT_SETTINGS, copilotFolder: "team/ai" });
-      expect(kept.copilotFolder).toBe("team/ai");
     });
   });
 
@@ -935,10 +928,6 @@ describe("model", () => {
       expect(normalizeRootFolders(["a/./b"])).toEqual(["a/b"]);
     });
 
-    it("leaves an already-canonical legitimate root unchanged", () => {
-      expect(normalizeRootFolders(["a/b"])).toEqual(["a/b"]);
-    });
-
     it("canonicalizes before deduping and traversal filtering", () => {
       expect(normalizeRootFolders(["a//b", "a/./b", "x/../y", "a/b"])).toEqual(["a/b"]);
     });
@@ -956,8 +945,240 @@ describe("model", () => {
 
       const after = settingsStore.get(settingsAtom);
       expect(after.copilotFolder).toBe(DEFAULT_SETTINGS.copilotFolder);
-      // Legacy + historical + pre-reset active root all survive the reset.
       expect(new Set(after.copilotRootHistory)).toEqual(new Set(["copilot", "ai", "team-ai"]));
+    });
+
+    it("preserves the cached Copilot Plus lineup, which a reset does not re-fetch (https://github.com/Brevilabs/obsidian-copilot-private/issues/319)", () => {
+      const catalog = {
+        models: [{ id: "glm-5.2", displayName: "GLM-5.2", limits: { context: 262144 } }],
+        defaultEnabledIds: ["glm-5.2"],
+      };
+      settingsStore.set(settingsAtom, { ...DEFAULT_SETTINGS, copilotPlusCatalog: catalog });
+
+      resetSettings();
+
+      expect(settingsStore.get(settingsAtom).copilotPlusCatalog).toEqual(catalog);
+    });
+
+    it.each([false, true])(
+      "preserves a builtin model's credential routing, including enableCors=%s, while resetting its preferences (https://github.com/logancyang/obsidian-copilot-preview/issues/259)",
+      (enableCors) => {
+        const customGpt4: CustomModel = {
+          ...BUILTIN_CHAT_MODELS[0],
+          enabled: false,
+          apiKey: "sk-saved",
+          baseUrl: "https://proxy.example.test/v1",
+          openAIOrgId: "org-model",
+          enableCors,
+          displayName: "My renamed model",
+        };
+        settingsStore.set(settingsAtom, {
+          ...DEFAULT_SETTINGS,
+          activeModels: [customGpt4],
+        });
+
+        resetSettings();
+
+        const after = settingsStore.get(settingsAtom);
+        const restored = after.activeModels.find(
+          (m) => getModelKeyFromModel(m) === getModelKeyFromModel(BUILTIN_CHAT_MODELS[0])
+        );
+        expect(restored).toBeDefined();
+        expect(restored!.apiKey).toBe("sk-saved");
+        expect(restored!.baseUrl).toBe("https://proxy.example.test/v1");
+        expect(restored!.openAIOrgId).toBe("org-model");
+        expect(restored!.enableCors).toBe(enableCors);
+        expect(restored!.enabled).toBe(BUILTIN_CHAT_MODELS[0].enabled);
+        expect(restored!.displayName).toBe(BUILTIN_CHAT_MODELS[0].displayName);
+      }
+    );
+
+    it("preserves every custom model, including rows that carry no key (https://github.com/logancyang/obsidian-copilot-preview/issues/259)", () => {
+      const withKey: CustomModel = {
+        name: "my-llama",
+        provider: "openai",
+        enabled: true,
+        apiKey: "sk-custom",
+        baseUrl: "http://localhost:1234",
+      };
+      const withoutKey: CustomModel = {
+        name: "ollama-llama",
+        provider: "ollama",
+        enabled: true,
+      };
+      settingsStore.set(settingsAtom, {
+        ...DEFAULT_SETTINGS,
+        activeModels: [withKey, withoutKey],
+      });
+
+      resetSettings();
+
+      const after = settingsStore.get(settingsAtom);
+      const myLlama = after.activeModels.find((m) => m.name === "my-llama");
+      expect(myLlama?.apiKey).toBe("sk-custom");
+      expect(myLlama?.baseUrl).toBe("http://localhost:1234");
+      expect(after.activeModels.find((m) => m.name === "ollama-llama")).toBeDefined();
+    });
+
+    it("filters out null/undefined top-level secrets", () => {
+      settingsStore.set(settingsAtom, {
+        ...DEFAULT_SETTINGS,
+        openAIApiKey: "valid-key",
+        plusLicenseKey: "lic-12345",
+        anthropicApiKey: null as unknown as string,
+        googleApiKey: undefined as unknown as string,
+      });
+
+      resetSettings();
+
+      const after = settingsStore.get(settingsAtom);
+      expect(after.openAIApiKey).toBe("valid-key");
+      expect(after.plusLicenseKey).toBe("lic-12345");
+      expect(after.anthropicApiKey).toBe(DEFAULT_SETTINGS.anthropicApiKey);
+      expect(after.googleApiKey).toBe(DEFAULT_SETTINGS.googleApiKey);
+    });
+
+    it("preserves the top-level vendor config a retained key needs to reach its service (https://github.com/logancyang/obsidian-copilot-preview/issues/259)", () => {
+      const vendorConfig = {
+        openAIOrgId: "org-123",
+        azureOpenAIApiInstanceName: "my-instance",
+        azureOpenAIApiDeploymentName: "chat-deploy",
+        azureOpenAIApiVersion: "2025-01-01-preview",
+      };
+      settingsStore.set(settingsAtom, { ...DEFAULT_SETTINGS, ...vendorConfig });
+
+      resetSettings();
+
+      expect(settingsStore.get(settingsAtom)).toMatchObject(vendorConfig);
+    });
+
+    it("keeps a signed-in user's paid state and license but drops the entitlement token, so reset never reads as sign-out (https://github.com/logancyang/obsidian-copilot-preview/issues/259)", () => {
+      settingsStore.set(settingsAtom, {
+        ...DEFAULT_SETTINGS,
+        isPaidUser: true,
+        isPlusUser: true,
+        plusLicenseKey: "lic-12345",
+        entitlementToken: "test-stale-entitlement-token",
+        entitlementExpiresAt: 4_000_000_000_000,
+      });
+
+      resetSettings();
+
+      const after = settingsStore.get(settingsAtom);
+      expect(after.isPaidUser).toBe(true);
+      expect(after.entitlementExpiresAt).toBe(4_000_000_000_000);
+      expect(after.plusLicenseKey).toBe("lic-12345");
+      expect(after.isPlusUser).toBe(DEFAULT_SETTINGS.isPlusUser);
+      expect(after.entitlementToken).toBe(DEFAULT_SETTINGS.entitlementToken);
+    });
+
+    it("drops a bundle value whose type its consumer cannot handle (https://github.com/logancyang/obsidian-copilot-preview/issues/259)", () => {
+      settingsStore.set(settingsAtom, {
+        ...DEFAULT_SETTINGS,
+        openAIApiKey: "sk-openai",
+        openAIOrgId: {} as unknown as string,
+      });
+
+      resetSettings();
+
+      const after = settingsStore.get(settingsAtom);
+      expect(after.openAIApiKey).toBe("sk-openai");
+      expect(after.openAIOrgId).toBe(DEFAULT_SETTINGS.openAIOrgId);
+    });
+
+    it("filters out null/undefined model secrets", () => {
+      const modelWithNull: CustomModel = {
+        ...BUILTIN_CHAT_MODELS[0],
+        apiKey: null as unknown as string,
+      };
+      settingsStore.set(settingsAtom, {
+        ...DEFAULT_SETTINGS,
+        activeModels: [modelWithNull],
+      });
+
+      resetSettings();
+
+      const after = settingsStore.get(settingsAtom);
+      const restored = after.activeModels.find(
+        (m) => getModelKeyFromModel(m) === getModelKeyFromModel(BUILTIN_CHAT_MODELS[0])
+      );
+      expect(restored).toBeDefined();
+      expect(restored!.apiKey).toBe(BUILTIN_CHAT_MODELS[0].apiKey);
+    });
+
+    it("preserves configured models belonging to preserved providers (https://github.com/logancyang/obsidian-copilot-preview/issues/259)", () => {
+      const providerId1 = "prov-with-key";
+      const providerId2 = "prov-no-key";
+      settingsStore.set(settingsAtom, {
+        ...DEFAULT_SETTINGS,
+        providers: {
+          [providerId1]: {
+            providerId: providerId1,
+            providerType: "openai-compatible",
+            displayName: "Provider With Key",
+            apiKeyKeychainId: "kc-123",
+            origin: { kind: "byok" },
+            addedAt: Date.now(),
+          },
+          [providerId2]: {
+            providerId: providerId2,
+            providerType: "openai-compatible",
+            displayName: "Provider No Key (Ollama)",
+            origin: { kind: "byok" },
+            addedAt: Date.now(),
+          },
+        },
+        configuredModels: [
+          {
+            configuredModelId: "model-1",
+            providerId: providerId1,
+            info: { id: "gpt-4", displayName: "GPT-4" },
+            configuredAt: Date.now(),
+          },
+          {
+            configuredModelId: "model-2",
+            providerId: providerId2,
+            info: { id: "llama3", displayName: "Llama 3" },
+            configuredAt: Date.now(),
+          },
+        ],
+      });
+
+      resetSettings();
+
+      const after = settingsStore.get(settingsAtom);
+      expect(after.providers[providerId1]).toBeDefined();
+      expect(after.providers[providerId1].apiKeyKeychainId).toBe("kc-123");
+      expect(after.providers[providerId2]).toBeUndefined();
+      expect(after.configuredModels.length).toBe(1);
+      expect(after.configuredModels[0].configuredModelId).toBe("model-1");
+      expect(after.configuredModels[0].providerId).toBe(providerId1);
+    });
+
+    it("clears backends regardless of preserved providers", () => {
+      settingsStore.set(settingsAtom, {
+        ...DEFAULT_SETTINGS,
+        providers: {
+          prov1: {
+            providerId: "prov1",
+            providerType: "openai-compatible",
+            displayName: "Provider",
+            apiKeyKeychainId: "kc-123",
+            origin: { kind: "byok" },
+            addedAt: Date.now(),
+          },
+        },
+        backends: {
+          chat: { enabledModels: ["model-1", "model-2"] },
+          opencode: { enabledModels: ["model-3"] },
+        },
+      });
+
+      resetSettings();
+
+      const after = settingsStore.get(settingsAtom);
+      expect(after.providers.prov1).toBeDefined();
+      expect(after.backends).toEqual(DEFAULT_SETTINGS.backends);
     });
   });
 });

@@ -1,46 +1,70 @@
-import type { ModeMapping, RawModeState } from "@/agentMode/session/types";
+import type {
+  BackendConfigOption,
+  BackendState,
+  CopilotMode,
+  ModeMapping,
+  RawModeState,
+} from "@/agentMode/session/types";
 
-const CODEX_MODE_CANDIDATES = {
-  default: ["agent", "auto", "default"],
-  plan: ["plan", "read-only"],
-  auto: ["agent-full-access", "full-access", "bypassPermissions"],
-} as const;
-
-const LEGACY_CODEX_MODES = {
-  default: "auto",
-  plan: "read-only",
-  auto: "full-access",
-} as const;
-
-function firstAdvertised(
-  advertised: ReadonlySet<string>,
-  candidates: readonly string[]
-): string | undefined {
-  return candidates.find((candidate) => advertised.has(candidate));
-}
-
-/**
- * Codex ACP adapters have used multiple native mode vocabularies. Resolve
- * against the live inventory so an adapter rename cannot silently remove the
- * user's path out of a restrictive mode.
- */
-export function buildCodexModeMapping(modeState: RawModeState | null): ModeMapping {
-  if (!modeState) {
-    return {
-      kind: "setMode",
-      canonical: LEGACY_CODEX_MODES,
-      readOnlyModeId: "read-only",
-    };
-  }
-
-  const advertised = new Set(modeState.availableModes.map((mode) => mode.id));
+export function buildCodexModeMapping(): ModeMapping {
   return {
     kind: "setMode",
-    canonical: {
-      default: firstAdvertised(advertised, CODEX_MODE_CANDIDATES.default),
-      plan: firstAdvertised(advertised, CODEX_MODE_CANDIDATES.plan),
-      auto: firstAdvertised(advertised, CODEX_MODE_CANDIDATES.auto),
+    // `applyMode` performs one inventory-free lookup before dispatch. Do not
+    // replace the live session's translated ids with guessed legacy ids here.
+    // https://github.com/logancyang/obsidian-copilot/issues/2916
+    canonical: {},
+    readOnlyModeId: "read-only",
+  };
+}
+
+// ACP's "read-only" mode asks before each workspace edit, matching Default on
+// other agents. Planning is Codex's separate collaboration workflow.
+// https://github.com/Brevilabs/obsidian-copilot-private/issues/618
+const CURRENT_MODE: Record<string, CopilotMode> = {
+  "read-only/default": "default",
+  "agent/plan": "plan",
+  "agent/default": "auto",
+};
+
+export function buildCodexModeState(
+  modeState: RawModeState | null,
+  configOptions: BackendConfigOption[] | null
+): BackendState["mode"] {
+  const advertised = new Set(modeState?.availableModes.map((mode) => mode.id));
+  const collaboration = configOptions?.find((option) => option.id === "collaboration_mode");
+  if (!modeState || !collaboration || !advertised.has("read-only") || !advertised.has("agent")) {
+    return null;
+  }
+  const configId = collaboration.id;
+  return {
+    current: CURRENT_MODE[`${modeState.currentModeId}/${collaboration.currentValue}`] ?? null,
+    options: [
+      { value: "default", label: "Default" },
+      { value: "plan", label: "Plan" },
+      { value: "auto", label: "Auto" },
+    ],
+    apply: {
+      default: {
+        kind: "sequence",
+        steps: [
+          { kind: "setMode", nativeId: "read-only" },
+          { kind: "setConfigOption", configId, value: "default" },
+        ],
+      },
+      plan: {
+        kind: "sequence",
+        steps: [
+          { kind: "setMode", nativeId: "agent" },
+          { kind: "setConfigOption", configId, value: "plan" },
+        ],
+      },
+      auto: {
+        kind: "sequence",
+        steps: [
+          { kind: "setConfigOption", configId, value: "default" },
+          { kind: "setMode", nativeId: "agent" },
+        ],
+      },
     },
-    readOnlyModeId: advertised.has("read-only") ? "read-only" : null,
   };
 }

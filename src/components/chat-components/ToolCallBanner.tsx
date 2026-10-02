@@ -1,11 +1,9 @@
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
 import { ToolResultFormatter } from "@/tools/ToolResultFormatter";
-import { Check, ChevronRight, X } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import React, { useMemo, useState } from "react";
 
-// Animation constants
-// The shimmer keyframe is defined in the global CSS (see styles.css)
 const SHIMMER_ANIMATION = "shimmer 2s ease-in-out infinite";
 
 interface ToolCallBannerProps {
@@ -15,25 +13,10 @@ interface ToolCallBannerProps {
   isExecuting: boolean;
   result: string | null;
   confirmationMessage?: string | null;
-  onAccept?: () => void;
-  onReject?: () => void;
 }
 
-/**
- * Produce a display-friendly tool result, falling back to raw strings when they are already concise.
- * @param toolName Name of the tool that produced the result
- * @param result Raw tool result string (possibly null if tool still running)
- * @returns Formatted result or null when there is nothing to show yet
- */
 const MAX_DISPLAY_CHARS = 5_000;
 
-/**
- * Produce a display-friendly tool result while guarding against oversized payloads.
- * Large strings are summarized instead of rendered to keep the UI responsive.
- * @param toolName Name of the tool that produced the result
- * @param result Raw tool result string (possibly null if tool still running)
- * @returns Formatted result or a guardrail message; null when there is nothing to show yet
- */
 const formatToolResult = (toolName: string, result: string | null): string | null => {
   if (!result) {
     return null;
@@ -66,18 +49,13 @@ export const ToolCallBanner: React.FC<ToolCallBannerProps> = ({
   isExecuting,
   result,
   confirmationMessage,
-  onAccept,
-  onReject,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
 
   const formattedResult = useMemo(() => formatToolResult(toolName, result), [toolName, result]);
 
-  // Defensive check: If we have a result, the tool is definitely done executing
-  // This prevents infinite rolling animation if marker update fails or is delayed
   const actuallyExecuting = isExecuting && !result;
 
-  // Don't allow expanding while executing
   const canExpand = !actuallyExecuting && formattedResult !== null;
 
   return (
@@ -94,7 +72,6 @@ export const ToolCallBanner: React.FC<ToolCallBannerProps> = ({
           actuallyExecuting && "tw-relative tw-overflow-hidden"
         )}
       >
-        {/* Shimmer effect overlay */}
         {actuallyExecuting && (
           <div className="tw-absolute tw-inset-0 tw-z-[1] tw-overflow-hidden">
             <div
@@ -129,34 +106,6 @@ export const ToolCallBanner: React.FC<ToolCallBannerProps> = ({
           </div>
 
           <div className="tw-flex tw-items-center tw-gap-2">
-            {/* Future: Accept/Reject buttons */}
-            {!actuallyExecuting && onAccept && onReject && (
-              <>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onAccept();
-                  }}
-                  className="hover:tw-bg-green-rgb/20 tw-rounded tw-p-1"
-                  title="Accept"
-                >
-                  <Check className="tw-size-4 tw-text-success" />
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onReject();
-                  }}
-                  className="hover:tw-bg-red-rgb/20 tw-rounded tw-p-1"
-                  title="Reject"
-                >
-                  <X className="tw-size-4 tw-text-error" />
-                </button>
-              </>
-            )}
-
             {canExpand && (
               <ChevronRight
                 className={cn(

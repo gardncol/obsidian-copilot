@@ -1,3 +1,4 @@
+import { ChatInputProvider } from "@/context/ChatInputContext";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppContext, EventTargetContext, useApp } from "@/context";
 import * as React from "react";
@@ -6,12 +7,6 @@ interface GalleryProvidersProps {
   children: React.ReactNode;
 }
 
-/**
- * Supplies the runtime contexts that composite gallery stories opt into.
- *
- * @param props - Story content that needs gallery-owned providers.
- * @returns Provider-wrapped story content.
- */
 export function GalleryProviders({ children }: GalleryProvidersProps): React.ReactElement {
   const app = useApp();
   const eventTarget = React.useMemo(() => new EventTarget(), []);
@@ -40,3 +35,11 @@ export const galleryHostFixtures = Object.freeze({
     title: "Allow model fallback",
   }),
 });
+
+export function GalleryChatInputProvider({ children }: GalleryProvidersProps): React.ReactElement {
+  return (
+    <GalleryProviders>
+      <ChatInputProvider>{children}</ChatInputProvider>
+    </GalleryProviders>
+  );
+}

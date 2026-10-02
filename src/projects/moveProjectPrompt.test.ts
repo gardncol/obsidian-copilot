@@ -8,13 +8,6 @@ jest.mock("@/projects/ProjectFileManager", () => ({
   ProjectFileManager: { getInstance: () => ({ updateProject: mockUpdateProject }) },
 }));
 
-jest.mock("@/projects/projectPaths", () => ({
-  getProjectAnchorFromConfigPath: (configPath: string) => ({
-    projectFolderPath: configPath.split("/").slice(0, -1).join("/"),
-    projectsRoot: configPath.split("/").slice(0, -2).join("/"),
-  }),
-}));
-
 jest.mock("@/logger", () => ({
   logInfo: jest.fn(),
   logWarn: jest.fn(),
@@ -93,9 +86,6 @@ describe("moveProjectPrompt", () => {
     });
 
     it("writes beside the record's own project.md, not under the live projects root", async () => {
-      // A Copilot-folder change activates before ProjectRegister reloads its cache, so a
-      // record can name the old tree while the live root already names the new one. The
-      // session cwd follows the record, so the file has to as well.
       const { app, files } = makeApp();
 
       await moveProjectPromptToAgentsFile(
@@ -108,8 +98,6 @@ describe("moveProjectPrompt", () => {
     });
 
     it("converts a legacy generated mirror rather than treating it as the user's file", async () => {
-      // The mirror is Copilot's own output. Leaving it in place would strand the legacy text
-      // AND leave the mirror for a later blank ensure to overwrite.
       const { app, files } = makeApp({
         "copilot-projects/Research/AGENTS.md": `${MIRROR_HEADER}stale generated body`,
       });
@@ -128,7 +116,6 @@ describe("moveProjectPrompt", () => {
       await moveProjectPromptToAgentsFile(app, makeRecord("Stale legacy text"));
 
       expect(files.get("copilot-projects/Research/AGENTS.md")).toBe("The user's own instructions");
-      // Clearing here would delete the legacy text with nowhere to have moved it.
       expect(mockUpdateProject).not.toHaveBeenCalled();
     });
 
@@ -137,7 +124,6 @@ describe("moveProjectPrompt", () => {
       const record = makeRecord("Cite every source.");
 
       await moveProjectPromptToAgentsFile(app, record);
-      // The caller re-reads the record from cache, so a stale copy can carry the old text.
       await moveProjectPromptToAgentsFile(app, record);
 
       expect(files.get("copilot-projects/Research/AGENTS.md")).toBe("Cite every source.");

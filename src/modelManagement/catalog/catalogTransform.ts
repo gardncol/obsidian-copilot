@@ -1,41 +1,34 @@
-/**
- * Pure transform from the `models.dev/api.json` wire shape to the
- * module's persisted-snapshot-compatible `CatalogProvider[]` view.
- */
-
 import { logWarn } from "@/logger";
 
 import type { CatalogProvider, ModelInfo, ProviderType } from "@/modelManagement/types/catalog";
 import { isPlainObject, type WireModel, type WireProvider } from "./modelsDevWire";
 
-/**
- * Heuristic shared by the catalog transform and the catalog-less BYOK
- * template flow: an id whose token set contains `embed` / `embedding` is
- * an embedding model. Token-bounded so `embedded-*` chat models (the
- * `embed` substring not in an embedding context) don't get mis-flagged
- * out of chat backends. It's the only signal available for hand-typed
- * / `GET /models`-fetched ids, which carry no capability metadata on
- * the wire.
- */
 const EMBEDDING_TOKEN = /(^|[-_/.\s])embed(ding)?($|[-_/.\s])/i;
 
 export function looksLikeEmbeddingModel(idOrHaystack: string): boolean {
   return EMBEDDING_TOKEN.test(idOrHaystack);
 }
 
-/**
- * Maps the `models.dev` `npm` field to the closed `ProviderType` union.
- */
+// Bedrock routes by per-account region and Azure by per-deployment URL, neither of which the BYOK dialog can enter:
+// https://github.com/logancyang/obsidian-copilot/issues/2928
+// https://github.com/logancyang/obsidian-copilot/issues/2932
+const UNROUTABLE_PROVIDER_NPM: ReadonlySet<string> = new Set([
+  "@ai-sdk/amazon-bedrock",
+  "@ai-sdk/azure",
+]);
+
+function isUnroutableProvider(wire: unknown): boolean {
+  if (!isPlainObject(wire)) return false;
+  const npm = (wire as { npm?: unknown }).npm;
+  return typeof npm === "string" && UNROUTABLE_PROVIDER_NPM.has(npm);
+}
+
 function mapNpmToProviderType(npm: string | undefined): ProviderType {
   switch (npm) {
     case "@ai-sdk/anthropic":
       return "anthropic";
     case "@ai-sdk/google":
       return "google";
-    case "@ai-sdk/azure":
-      return "azure";
-    case "@ai-sdk/amazon-bedrock":
-      return "bedrock";
     default:
       return "openai-compatible";
   }
@@ -68,8 +61,6 @@ function transformModel(wire: WireModel): ModelInfo | null {
 
   if (typeof wire.reasoning === "boolean") info.reasoning = wire.reasoning;
   if (typeof wire.tool_call === "boolean") info.toolCall = wire.tool_call;
-  // The `family` field is unreliable — it's often the base family
-  // (`gemini`, `qwen`) or absent — so match the id too.
   if (looksLikeEmbeddingModel(`${wire.id} ${typeof wire.family === "string" ? wire.family : ""}`)) {
     info.isEmbedding = true;
   }
@@ -123,18 +114,11 @@ function transformProvider(providerKey: string, wire: unknown): CatalogProvider 
   return result;
 }
 
-/**
- * Convert an arbitrary wire payload into the in-memory provider list.
- * Accepts `unknown` so call sites don't repeat the top-level shape
- * check; non-object payloads return `[]`. Result is sorted alphabetically
- * by `displayName`. Top-level keys that don't look like providers (e.g.
- * a future `_meta` blob, non-object values) are silently dropped;
- * entries that look provider-shaped but fail finer validation are logged.
- */
 export function transformWireToCatalog(wire: unknown): CatalogProvider[] {
   if (!isPlainObject(wire)) return [];
   const providers: CatalogProvider[] = [];
   for (const [key, wireProvider] of Object.entries(wire)) {
+    if (isUnroutableProvider(wireProvider)) continue;
     const provider = transformProvider(key, wireProvider);
     if (provider) {
       providers.push(provider);

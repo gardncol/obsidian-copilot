@@ -11,11 +11,13 @@ describe("CopilotPlusWelcomeModal", () => {
       expect(screen.getByText(/default model for chat and your agents/)).toBeTruthy();
     });
 
-    it("names what the license includes, including the symposium link", () => {
+    it("names what the license includes, including the OpenArtifacts link", () => {
       render(<CopilotPlusWelcomeModalContent onConfirm={jest.fn()} onCancel={jest.fn()} />);
 
-      const link = screen.getByRole("link", { name: "symposium.md" });
-      expect(link.getAttribute("href")).toBe("https://symposium.md");
+      const link = screen.getByRole("link", { name: "OpenArtifacts" });
+      expect(link.getAttribute("href")).toBe(
+        "https://openartifacts.ai/?utm_source=obsidian_copilot&utm_medium=welcome_modal"
+      );
       expect(screen.getByText(/Copilot exclusive/)).toBeTruthy();
       expect(screen.getByText(/cross-agent skills/)).toBeTruthy();
     });
@@ -25,9 +27,6 @@ describe("CopilotPlusWelcomeModal", () => {
         <CopilotPlusWelcomeModalContent onConfirm={jest.fn()} onCancel={jest.fn()} />
       );
 
-      // Multi-agent is tier >= Plus (see `canUseMultiAgent`), so a Lite user
-      // opening this modal must not be told they have it. Same for a blanket
-      // "full power" claim, which is true of no single tier.
       expect(container.textContent).not.toMatch(/multi-agent|full power|full potential/i);
     });
 
@@ -36,10 +35,6 @@ describe("CopilotPlusWelcomeModal", () => {
         <CopilotPlusWelcomeModalContent onConfirm={jest.fn()} onCancel={jest.fn()} />
       );
 
-      // The settings this used to apply, by the labels it applied them under —
-      // "embedding models" still appears in the feature list, which is true and
-      // not a promise to change one. `\b` keeps "default mode" from matching
-      // inside the offer's own "default model".
       expect(container.textContent).not.toMatch(/default mode\b|embedding model:|rebuild/i);
     });
 

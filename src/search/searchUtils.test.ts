@@ -12,15 +12,11 @@ import {
   getSystemExcludedFolders,
   isInternalExcludedPath,
   parsePropertyPattern,
-  previewPatternValue,
   shouldIndexFile,
 } from "./searchUtils";
 
-// Mock Obsidian's TFile and Modal classes
 jest.mock("obsidian", () => ({
   normalizePath: (path: string) => path.replace(/\/+/g, "/").replace(/^\/|\/$/g, ""),
-  // Mutable so a test can assert the case-sensitive and case-insensitive
-  // behaviours of system-root matching on one platform.
   Platform: { isWin: false, isMacOS: true, isIosApp: false },
   TFile: class TFile {
     path: string;
@@ -44,7 +40,6 @@ jest.mock("@/LLMProviders/brevilabsClient", () => ({
   },
 }));
 
-// Create test files using the mocked TFile
 const createTestFile = (path: string) => {
   const file = new TFile();
   file.path = path;
@@ -52,7 +47,6 @@ const createTestFile = (path: string) => {
   return file;
 };
 
-// Mock the global app object
 const mockGetAbstractFileByPath = jest.fn();
 const mockApp = {
   vault: {
@@ -60,7 +54,6 @@ const mockApp = {
   },
 } as unknown as typeof window.app;
 
-// Mock getTagsFromNote utility function
 jest.mock(
   "@/utils",
   (): Record<string, unknown> => ({
@@ -71,7 +64,6 @@ jest.mock(
   })
 );
 
-// Add mock for settings
 jest.mock(
   "@/settings/model",
   (): Record<string, unknown> => ({
@@ -97,7 +89,6 @@ describe("searchUtils", () => {
   beforeEach(() => {
     mockGetAbstractFileByPath.mockReset();
     (utils.getTagsFromNote as jest.Mock).mockReset();
-    // Reset the settings mock before each test
     (settingsModel.getSettings as jest.Mock).mockReset();
     (settingsModel.getSettings as jest.Mock).mockReturnValue({
       qaInclusions: "",
@@ -105,8 +96,8 @@ describe("searchUtils", () => {
     });
   });
 
-  describe("shouldIndexFile", () => {
-    it("should return true when no inclusions or exclusions are specified", () => {
+  describe("shouldIndexFile()", () => {
+    it("indexes a file when no inclusion or exclusion rules are set", () => {
       const file = createTestFile("test.md");
       expect(shouldIndexFile(window.app, file, null, null)).toBe(true);
     });
@@ -138,7 +129,7 @@ describe("searchUtils", () => {
       ).toBe(false);
     });
 
-    it("should return false when file matches exclusion pattern", () => {
+    it("skips a file inside an excluded folder", () => {
       const file = createTestFile("private/secret.md");
       const exclusions = {
         folderPatterns: ["private"],
@@ -146,7 +137,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, null, exclusions)).toBe(false);
     });
 
-    it("should return false when file matches exclusion extension pattern", () => {
+    it("skips a file whose multi-dot extension matches an excluded extension pattern", () => {
       const file = createTestFile("Excalidraw/Drawing 2025-02-21 20.59.40.excalidraw.md");
       const exclusions = {
         extensionPatterns: ["*.excalidraw.md"],
@@ -154,7 +145,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, null, exclusions)).toBe(false);
     });
 
-    it("should return true when file matches inclusion pattern", () => {
+    it("indexes a file inside an included folder", () => {
       const file = createTestFile("notes/important.md");
       const inclusions = {
         folderPatterns: ["notes"],
@@ -162,7 +153,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(true);
     });
 
-    it("should return false when file doesn't match inclusion pattern", () => {
+    it("skips a file outside every included folder", () => {
       const file = createTestFile("random/file.md");
       const inclusions = {
         folderPatterns: ["notes"],
@@ -170,7 +161,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(false);
     });
 
-    it("should prioritize exclusions over inclusions", () => {
+    it("skips a file that is both included and excluded", () => {
       const file = createTestFile("notes/private/secret.md");
       const inclusions = {
         folderPatterns: ["notes"],
@@ -181,7 +172,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, inclusions, exclusions)).toBe(false);
     });
 
-    it("should handle multiple inclusion patterns", () => {
+    it("indexes a file that matches any one of several included folders", () => {
       const file = createTestFile("blog/post.md");
       const inclusions = {
         folderPatterns: ["notes", "blog", "docs"],
@@ -189,7 +180,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(true);
     });
 
-    it("should handle inclusion patterns with folders with slashes and spaces", () => {
+    it("indexes a file inside an included nested folder whose name has spaces", () => {
       const file = createTestFile("folder/with/100 spaces/post.md");
       const inclusions = {
         folderPatterns: ["folder/with/100 spaces"],
@@ -197,7 +188,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(true);
     });
 
-    it("should handle multiple exclusion patterns", () => {
+    it("skips a file that matches any one of several excluded folders", () => {
       const file = createTestFile("temp/draft.md");
       const exclusions = {
         folderPatterns: ["private", "temp", "archive"],
@@ -205,7 +196,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, null, exclusions)).toBe(false);
     });
 
-    it("should handle tag-based inclusion patterns", () => {
+    it("indexes a note carrying an included tag", () => {
       const file = createTestFile("notes/tagged.md");
       mockGetAbstractFileByPath.mockReturnValue(file);
       (utils.getTagsFromNote as jest.Mock).mockReturnValue(["important", "review"]);
@@ -216,7 +207,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(true);
     });
 
-    it("should handle tag-based exclusion patterns", () => {
+    it("skips a note carrying an excluded tag", () => {
       const file = createTestFile("notes/tagged.md");
       mockGetAbstractFileByPath.mockReturnValue(file);
       (utils.getTagsFromNote as jest.Mock).mockReturnValue(["private", "draft"]);
@@ -227,7 +218,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, null, exclusions)).toBe(false);
     });
 
-    it("should handle file extension patterns in inclusions", () => {
+    it("indexes a file with an included extension", () => {
       const file = createTestFile("notes/document.pdf");
       const inclusions = {
         extensionPatterns: ["*.pdf"],
@@ -235,15 +226,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(true);
     });
 
-    it("should handle file extension patterns in exclusions", () => {
-      const file = createTestFile("notes/document.pdf");
-      const exclusions = {
-        extensionPatterns: ["*.pdf"],
-      };
-      expect(shouldIndexFile(window.app, file, null, exclusions)).toBe(false);
-    });
-
-    it("should return false when the note has no matching tags", () => {
+    it("skips a note without any included tag", () => {
       const file = createTestFile("notes/tagged.md");
       (utils.getTagsFromNote as jest.Mock).mockReturnValue([]);
 
@@ -253,7 +236,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(false);
     });
 
-    it("should handle note-based inclusion patterns", () => {
+    it("indexes a note named by an included note pattern", () => {
       const file = createTestFile("notes/referenced.md");
       mockGetAbstractFileByPath.mockReturnValue(file);
 
@@ -263,7 +246,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(true);
     });
 
-    it("should handle note-based exclusion patterns", () => {
+    it("skips a note named by an excluded note pattern", () => {
       const file = createTestFile("notes/draft.md");
       mockGetAbstractFileByPath.mockReturnValue(file);
 
@@ -273,7 +256,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, null, exclusions)).toBe(false);
     });
 
-    it("should include a note whose property value matches", () => {
+    it("indexes a note whose property value matches an included property pattern", () => {
       const file = createTestFile("notes/physics.md");
       (utils.getPropertyValuesFromNote as jest.Mock).mockReturnValue(["Physics", "Math"]);
 
@@ -281,7 +264,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(true);
     });
 
-    it("should match a property value case-insensitively", () => {
+    it("matches an included property value case-insensitively", () => {
       const file = createTestFile("notes/physics.md");
       (utils.getPropertyValuesFromNote as jest.Mock).mockReturnValue(["physics"]);
 
@@ -289,7 +272,7 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(true);
     });
 
-    it("should exclude a note whose property value does not match", () => {
+    it("skips a note whose property value differs from the included property pattern", () => {
       const file = createTestFile("notes/chem.md");
       (utils.getPropertyValuesFromNote as jest.Mock).mockReturnValue(["Chemistry"]);
 
@@ -297,16 +280,15 @@ describe("searchUtils", () => {
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(false);
     });
 
-    it("should include any note that has the key for a key-only property pattern", () => {
+    it("indexes any note that has the key of a key-only property pattern", () => {
       const file = createTestFile("notes/any.md");
-      // A key-only pattern matches on key presence, even when the value is empty.
       (utils.noteHasProperty as jest.Mock).mockReturnValue(true);
 
       const inclusions = { propertyPatterns: ["[Topics:]"] };
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(true);
     });
 
-    it("should exclude a note missing the key for a key-only property pattern", () => {
+    it("skips a note missing the key of a key-only property pattern", () => {
       const file = createTestFile("notes/none.md");
       (utils.noteHasProperty as jest.Mock).mockReturnValue(false);
 
@@ -315,52 +297,8 @@ describe("searchUtils", () => {
     });
   });
 
-  describe("categorizePatterns", () => {
-    it("should correctly categorize tag patterns", () => {
-      const patterns = ["#important", "#draft", "#review"];
-      const { tagPatterns, extensionPatterns, folderPatterns, notePatterns } =
-        categorizePatterns(patterns);
-
-      expect(tagPatterns).toEqual(patterns);
-      expect(extensionPatterns).toEqual([]);
-      expect(folderPatterns).toEqual([]);
-      expect(notePatterns).toEqual([]);
-    });
-
-    it("should correctly categorize extension patterns", () => {
-      const patterns = ["*.pdf", "*.md", "*.doc"];
-      const { tagPatterns, extensionPatterns, folderPatterns, notePatterns } =
-        categorizePatterns(patterns);
-
-      expect(tagPatterns).toEqual([]);
-      expect(extensionPatterns).toEqual(patterns);
-      expect(folderPatterns).toEqual([]);
-      expect(notePatterns).toEqual([]);
-    });
-
-    it("should correctly categorize folder patterns", () => {
-      const patterns = ["folder1", "folder2/subfolder", "documents"];
-      const { tagPatterns, extensionPatterns, folderPatterns, notePatterns } =
-        categorizePatterns(patterns);
-
-      expect(tagPatterns).toEqual([]);
-      expect(extensionPatterns).toEqual([]);
-      expect(folderPatterns).toEqual(patterns);
-      expect(notePatterns).toEqual([]);
-    });
-
-    it("should correctly categorize note patterns", () => {
-      const patterns = ["[[Note 1]]", "[[Important Note]]", "[[Draft]]"];
-      const { tagPatterns, extensionPatterns, folderPatterns, notePatterns } =
-        categorizePatterns(patterns);
-
-      expect(tagPatterns).toEqual([]);
-      expect(extensionPatterns).toEqual([]);
-      expect(folderPatterns).toEqual([]);
-      expect(notePatterns).toEqual(patterns);
-    });
-
-    it("should correctly categorize property patterns", () => {
+  describe("categorizePatterns()", () => {
+    it("groups key-only and valued property patterns as property patterns", () => {
       const patterns = ["[Topics:Physics]", "[Subject:Einstein]", "[Token:]"];
       const { propertyPatterns, tagPatterns, folderPatterns, notePatterns } =
         categorizePatterns(patterns);
@@ -371,23 +309,21 @@ describe("searchUtils", () => {
       expect(notePatterns).toEqual([]);
     });
 
-    it("should not mistake a double-bracket note pattern for a property", () => {
-      // A note title may itself contain a colon; the double-bracket form must
-      // still win over the single-bracket property form.
+    it("keeps double-bracket note patterns out of property patterns", () => {
       const { notePatterns, propertyPatterns } = categorizePatterns(["[[Note 1]]", "[[Topics:x]]"]);
 
       expect(notePatterns).toEqual(["[[Note 1]]", "[[Topics:x]]"]);
       expect(propertyPatterns).toEqual([]);
     });
 
-    it("should treat a bracketed value with an empty key as a folder, not a property", () => {
+    it("treats a bracketed value with an empty key as a folder pattern", () => {
       const { folderPatterns, propertyPatterns } = categorizePatterns(["[:onlyvalue]"]);
 
       expect(propertyPatterns).toEqual([]);
       expect(folderPatterns).toEqual(["[:onlyvalue]"]);
     });
 
-    it("should correctly categorize mixed patterns", () => {
+    it("sorts a mixed pattern list into tag, extension, folder, note, and property groups", () => {
       const patterns = ["#important", "*.pdf", "folder1", "[[Note 1]]", "[Topics:Physics]"];
       const { tagPatterns, extensionPatterns, folderPatterns, notePatterns, propertyPatterns } =
         categorizePatterns(patterns);
@@ -425,44 +361,8 @@ describe("searchUtils", () => {
     });
   });
 
-  describe("previewPatternValue", () => {
-    it("should correctly preview a single pattern", () => {
-      const value = "folder1";
-      expect(previewPatternValue(value)).toBe("folder1");
-    });
-
-    it("should correctly preview multiple patterns", () => {
-      const value = "folder1,folder2,folder3";
-      expect(previewPatternValue(value)).toBe("folder1, folder2, folder3");
-    });
-
-    it("should handle encoded patterns", () => {
-      const value = "folder%201,folder%202,folder%203";
-      expect(previewPatternValue(value)).toBe("folder 1, folder 2, folder 3");
-    });
-
-    it("should handle empty string", () => {
-      expect(previewPatternValue("")).toBe("");
-    });
-
-    it("should handle patterns with spaces and special characters", () => {
-      const value = "folder%20with%20spaces,special%23chars,%23tag";
-      expect(previewPatternValue(value)).toBe("folder with spaces, special#chars, #tag");
-    });
-  });
-
-  describe("createPatternSettingsValue", () => {
-    it("should create settings value from single category", () => {
-      const result = createPatternSettingsValue({
-        tagPatterns: ["#important"],
-        extensionPatterns: [],
-        folderPatterns: [],
-        notePatterns: [],
-      });
-      expect(result).toBe("%23important");
-    });
-
-    it("should create settings value from multiple categories", () => {
+  describe("createPatternSettingsValue()", () => {
+    it("joins encoded tag, extension, note, and folder patterns in that order", () => {
       const result = createPatternSettingsValue({
         tagPatterns: ["#important"],
         extensionPatterns: ["*.pdf"],
@@ -472,7 +372,7 @@ describe("searchUtils", () => {
       expect(result).toBe("%23important,*.pdf,%5B%5BNote%201%5D%5D,folder1");
     });
 
-    it("should handle empty arrays", () => {
+    it("returns an empty string when every category is empty", () => {
       const result = createPatternSettingsValue({
         tagPatterns: [],
         extensionPatterns: [],
@@ -482,7 +382,7 @@ describe("searchUtils", () => {
       expect(result).toBe("");
     });
 
-    it("should properly encode special characters", () => {
+    it("percent-encodes spaces and hashes in patterns", () => {
       const result = createPatternSettingsValue({
         tagPatterns: ["#special tag"],
         extensionPatterns: [],
@@ -492,7 +392,7 @@ describe("searchUtils", () => {
       expect(result).toBe("%23special%20tag,folder%20with%20spaces");
     });
 
-    it("should maintain pattern order", () => {
+    it("keeps the order of patterns within a category", () => {
       const result = createPatternSettingsValue({
         tagPatterns: ["#tag1", "#tag2"],
         extensionPatterns: ["*.pdf"],
@@ -502,53 +402,46 @@ describe("searchUtils", () => {
       expect(result).toBe("%23tag1,%23tag2,*.pdf,%5B%5BNote%201%5D%5D,folder1");
     });
 
-    it("should round-trip a property pattern through categorizePatterns", () => {
+    it("round-trips a property pattern through decoding and categorization", () => {
       const value = createPatternSettingsValue({ propertyPatterns: ["[Topics:Physics]"] });
       expect(categorizePatterns(getDecodedPatterns(value)).propertyPatterns).toEqual([
         "[Topics:Physics]",
       ]);
     });
 
-    it("should round-trip a property value containing commas and percent signs", () => {
-      // The stored form is a comma-joined, percent-encoded list, so a value with
-      // its own commas or percent signs must survive encode -> decode intact.
+    it("round-trips a property value containing commas and percent signs", () => {
       const pattern = "[Topics:a, b 50%]";
       const value = createPatternSettingsValue({ propertyPatterns: [pattern] });
       expect(categorizePatterns(getDecodedPatterns(value)).propertyPatterns).toEqual([pattern]);
     });
   });
 
-  describe("getDecodedPatterns", () => {
-    it("should decode a single pattern", () => {
-      const value = "folder1";
-      expect(getDecodedPatterns(value)).toEqual(["folder1"]);
-    });
-
-    it("should decode multiple patterns", () => {
+  describe("getDecodedPatterns()", () => {
+    it("splits a comma-separated value into patterns", () => {
       const value = "folder1,folder2,folder3";
       expect(getDecodedPatterns(value)).toEqual(["folder1", "folder2", "folder3"]);
     });
 
-    it("should handle URL encoded characters", () => {
+    it("decodes percent-encoded characters", () => {
       const value = "folder%20with%20spaces,special%23chars,%23tag";
       expect(getDecodedPatterns(value)).toEqual(["folder with spaces", "special#chars", "#tag"]);
     });
 
-    it("should handle empty string", () => {
+    it("returns no patterns for an empty string", () => {
       expect(getDecodedPatterns("")).toEqual([]);
     });
 
-    it("should trim whitespace from patterns", () => {
+    it("trims whitespace around each pattern", () => {
       const value = " folder1 , folder2 , folder3 ";
       expect(getDecodedPatterns(value)).toEqual(["folder1", "folder2", "folder3"]);
     });
 
-    it("should filter out empty patterns", () => {
+    it("drops empty and blank patterns", () => {
       const value = "folder1,,folder2, ,folder3";
       expect(getDecodedPatterns(value)).toEqual(["folder1", "folder2", "folder3"]);
     });
 
-    it("should handle complex patterns", () => {
+    it("decodes a mixed list of tag, note, extension, and nested folder patterns", () => {
       const value = "%23important,%5B%5BNote%201%5D%5D,*.pdf,folder/with/100%20spaces";
       expect(getDecodedPatterns(value)).toEqual([
         "#important",
@@ -558,23 +451,20 @@ describe("searchUtils", () => {
       ]);
     });
 
-    it("should handle malformed URI sequences gracefully", () => {
-      // Invalid % sequences that would throw URIError
+    it("keeps malformed percent sequences as literal text", () => {
       const value = "bad%2,valid,bad%zz,%E0%A4";
       expect(getDecodedPatterns(value)).toEqual(["bad%2", "valid", "bad%zz", "%E0%A4"]);
     });
   });
 
-  describe("getMatchingPatterns", () => {
-    it("should return null inclusions and exclusions when no patterns are set", () => {
-      // No need to set mock return value as it's set in beforeEach
+  describe("getMatchingPatterns()", () => {
+    it("returns null inclusions and exclusions when no patterns are set", () => {
       const { inclusions, exclusions } = getMatchingPatterns();
       expect(inclusions).toBeNull();
       expect(exclusions).toBeNull();
     });
 
-    it("should return categorized inclusion patterns", () => {
-      // Mock settings with inclusions
+    it("categorizes the inclusion setting", () => {
       (settingsModel.getSettings as jest.Mock).mockReturnValue({
         qaInclusions: "notes,*.pdf,%23important,%5B%5BNote%201%5D%5D",
         qaExclusions: "",
@@ -591,8 +481,7 @@ describe("searchUtils", () => {
       expect(exclusions).toBeNull();
     });
 
-    it("should return categorized exclusion patterns", () => {
-      // Mock settings with exclusions
+    it("categorizes the exclusion setting", () => {
       (settingsModel.getSettings as jest.Mock).mockReturnValue({
         qaInclusions: "",
         qaExclusions: "private,%23draft,*.tmp",
@@ -609,8 +498,7 @@ describe("searchUtils", () => {
       });
     });
 
-    it("should handle both inclusions and exclusions", () => {
-      // Mock settings with both inclusions and exclusions
+    it("categorizes inclusion and exclusion settings independently", () => {
       (settingsModel.getSettings as jest.Mock).mockReturnValue({
         qaInclusions: "notes,%23important",
         qaExclusions: "private,%23draft",
@@ -634,7 +522,7 @@ describe("searchUtils", () => {
     });
   });
 
-  describe("getSystemExcludedFolders", () => {
+  describe("getSystemExcludedFolders()", () => {
     it("always includes the historical copilot root", () => {
       const folders = getSystemExcludedFolders({
         copilotFolder: "copilot",
@@ -656,12 +544,11 @@ describe("searchUtils", () => {
         copilotFolder: "Copilot/",
         copilotRootHistory: ["copilot", "Copilot"],
       } as unknown as Parameters<typeof getSystemExcludedFolders>[0]);
-      // "Copilot" (trailing slash stripped) and "copilot" stay distinct entries.
       expect(new Set(folders)).toEqual(new Set(["copilot", "Copilot"]));
     });
   });
 
-  describe("isInternalExcludedPath", () => {
+  describe("isInternalExcludedPath()", () => {
     it("excludes project-config files under the projects folder derived from the default root", () => {
       (settingsModel.getSettings as jest.Mock).mockReturnValue({
         qaInclusions: "",
@@ -676,12 +563,9 @@ describe("searchUtils", () => {
         qaInclusions: "",
         qaExclusions: "",
         copilotFolder: "team-ai",
-        // Retired field left pointing at the stale default path; derivation must ignore it.
         projectsFolder: "copilot/projects",
       });
-      // Excluded under the derived custom-root path.
       expect(isInternalExcludedPath("team-ai/projects/my-project/project.md")).toBe(true);
-      // NOT excluded under the stale retired path, proving derivation from the root.
       expect(isInternalExcludedPath("copilot/projects/my-project/project.md")).toBe(false);
     });
 
@@ -695,7 +579,7 @@ describe("searchUtils", () => {
     });
   });
 
-  describe("createCopilotPatternFilter", () => {
+  describe("createCopilotPatternFilter()", () => {
     it("excludes the active and historical roots even with no user patterns", () => {
       (settingsModel.getSettings as jest.Mock).mockReturnValue({
         qaInclusions: "",
@@ -704,7 +588,6 @@ describe("searchUtils", () => {
         copilotRootHistory: ["copilot", "ai"],
       });
       const filter = createCopilotPatternFilter(window.app);
-      // System roots dropped on the raw path — no TFile resolution required.
       expect(filter("ai/memory/note.md")).toBe(false);
       expect(filter("copilot/copilot-conversations/chat.md")).toBe(false);
       expect(filter("notes/idea.md")).toBe(true);
@@ -712,9 +595,6 @@ describe("searchUtils", () => {
     });
 
     it("excludes root instruction files even with no user patterns configured", () => {
-      // Default QA settings take the no-pattern fast path; the instruction-file
-      // exclusion must hold there too, or vault-root AGENTS.md/CLAUDE.md surface
-      // in relevant-note and Miyo results despite being agent-facing content.
       (settingsModel.getSettings as jest.Mock).mockReturnValue({
         qaInclusions: "",
         qaExclusions: "",
@@ -736,13 +616,49 @@ describe("searchUtils", () => {
         copilotRootHistory: ["copilot"],
       });
       const filter = createCopilotPatternFilter(window.app);
-      // Segment boundary: "mycopilot/" is not the "copilot" root.
       expect(filter("mycopilot/note.md")).toBe(true);
     });
 
+    it("applies path-only QA rules when a current-vault path is unresolved (https://github.com/Brevilabs/obsidian-copilot-private/issues/284)", () => {
+      (settingsModel.getSettings as jest.Mock).mockReturnValue({
+        qaInclusions: "notes,[[Pinned]]",
+        qaExclusions: "private,*.tmp,[[Secret]]",
+        copilotFolder: "copilot",
+        copilotRootHistory: ["copilot"],
+      });
+      mockGetAbstractFileByPath.mockReturnValue(null);
+
+      const filter = createCopilotPatternFilter(window.app);
+
+      expect(filter("notes/idea.md")).toBe(true);
+      expect(filter("archive/Pinned.md")).toBe(true);
+      expect(filter("private/idea.md")).toBe(false);
+      expect(filter("notes/draft.tmp")).toBe(false);
+      expect(filter("notes/Secret.md")).toBe(false);
+      expect(filter("archive/other.md")).toBe(false);
+    });
+
+    it("fails closed when unresolved paths require metadata QA rules (https://github.com/Brevilabs/obsidian-copilot-private/issues/284)", () => {
+      mockGetAbstractFileByPath.mockReturnValue(null);
+
+      (settingsModel.getSettings as jest.Mock).mockReturnValue({
+        qaInclusions: "#published",
+        qaExclusions: "",
+        copilotFolder: "copilot",
+        copilotRootHistory: ["copilot"],
+      });
+      expect(createCopilotPatternFilter(window.app)("notes/unknown.md")).toBe(false);
+
+      (settingsModel.getSettings as jest.Mock).mockReturnValue({
+        qaInclusions: "",
+        qaExclusions: "[private:true]",
+        copilotFolder: "copilot",
+        copilotRootHistory: ["copilot"],
+      });
+      expect(createCopilotPatternFilter(window.app)("notes/unknown.md")).toBe(false);
+    });
+
     it("excludes differently-cased instruction files where the filesystem is case-insensitive", () => {
-      // On macOS a pre-existing `agents.md` IS the file the backends read when they ask for
-      // `AGENTS.md`, so exact-case comparison would let live instructions into search.
       (obsidian.Platform as { isMacOS: boolean }).isMacOS = true;
       (settingsModel.getSettings as jest.Mock).mockReturnValue({
         qaInclusions: "",
@@ -757,9 +673,6 @@ describe("searchUtils", () => {
     });
 
     it("excludes a differently-cased root where the filesystem is case-insensitive", () => {
-      // On macOS/Windows, "Copilot/" and "copilot/" are the same folder. Nothing
-      // reconciles the stored spelling against the real one, so comparing
-      // exact-case here would fail OPEN and let chats reach QA indexing.
       (obsidian.Platform as { isMacOS: boolean }).isMacOS = true;
       (settingsModel.getSettings as jest.Mock).mockReturnValue({
         qaInclusions: "",
@@ -772,8 +685,6 @@ describe("searchUtils", () => {
     });
 
     it("keeps a differently-cased folder where the filesystem is case-sensitive", () => {
-      // On Linux the two really are separate folders, so folding would exclude
-      // notes the user never put under a Copilot root.
       const platform = obsidian.Platform as { isWin: boolean; isMacOS: boolean; isIosApp: boolean };
       const restore = { ...platform };
       Object.assign(platform, { isWin: false, isMacOS: false, isIosApp: false });

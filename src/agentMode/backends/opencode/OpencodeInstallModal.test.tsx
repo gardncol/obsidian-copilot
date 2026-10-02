@@ -20,17 +20,19 @@ import {
   AbortError,
   OperationInFlightError,
   type OpencodeBinaryManager,
-  type ProgressEvent,
   type RuntimeState,
 } from "@/agentMode/backends/opencode/OpencodeBinaryManager";
-import { OpencodeConfigContainer } from "@/agentMode/backends/opencode/OpencodeInstallModal";
+import type { ManagedInstallProgress } from "@/agentMode/backends/shared/installProgress";
+import {
+  OpencodeConfigContainer,
+  OpencodeInstallModal,
+} from "@/agentMode/backends/opencode/OpencodeInstallModal";
 import { getSettings, settingsAtom, settingsStore } from "@/settings/model";
 import type { OpencodeBackendSettings } from "@/settings/model";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { App, Notice } from "obsidian";
 import React from "react";
 
-// A path computeInstallState's on-disk existence check accepts without stubbing fs.
 const EXISTING_BINARY_PATH = __filename;
 
 interface Deferred<T> {
@@ -40,7 +42,10 @@ interface Deferred<T> {
 
 const makeManager = (): {
   manager: OpencodeBinaryManager;
-  installCalls: Array<{ signal?: AbortSignal; onProgress?: (e: ProgressEvent) => void }>;
+  installCalls: Array<{
+    signal?: AbortSignal;
+    onProgress?: (progress: ManagedInstallProgress) => void;
+  }>;
   installDeferred: () => Deferred<{ version: string; path: string }>;
   publish: (state: RuntimeState) => void;
   cancelCurrentOperation: jest.Mock;
@@ -49,17 +54,17 @@ const makeManager = (): {
   setCustomBinaryPath: jest.Mock;
   uninstall: jest.Mock;
 } => {
-  const installCalls: Array<{ signal?: AbortSignal; onProgress?: (e: ProgressEvent) => void }> = [];
+  const installCalls: Array<{
+    signal?: AbortSignal;
+    onProgress?: (progress: ManagedInstallProgress) => void;
+  }> = [];
   const deferreds: Deferred<{ version: string; path: string }>[] = [];
-  const upgradeManaged = jest.fn().mockResolvedValue({ version: "1.16.0", path: "/managed" });
+  const upgradeManaged = jest.fn().mockResolvedValue({ version: "2.0.3", path: "/managed" });
   const upgradeCustomBinary = jest.fn().mockResolvedValue({ version: "1.16.0", path: "/custom" });
   const setCustomBinaryPath = jest.fn().mockResolvedValue(undefined);
   const uninstall = jest.fn().mockResolvedValue(undefined);
   const cancelCurrentOperation = jest.fn();
 
-  // The dialog reads progress off the manager now, so the fake has to be a
-  // store: `subscribeRuntimeState`/`getRuntimeState` must keep stable
-  // identities or `useSyncExternalStore` resubscribes on every commit.
   let runtime: RuntimeState = { kind: "idle" };
   const listeners = new Set<() => void>();
   const publish = (state: RuntimeState) => {
@@ -74,13 +79,15 @@ const makeManager = (): {
     },
     getRuntimeState: () => runtime,
     cancelCurrentOperation,
-    install: jest.fn((opts: { signal?: AbortSignal; onProgress?: (e: ProgressEvent) => void }) => {
-      installCalls.push(opts);
-      publish({ kind: "installing", progress: null });
-      return new Promise<{ version: string; path: string }>((resolve, reject) => {
-        deferreds.push({ resolve, reject });
-      });
-    }),
+    install: jest.fn(
+      (opts: { signal?: AbortSignal; onProgress?: (progress: ManagedInstallProgress) => void }) => {
+        installCalls.push(opts);
+        publish({ kind: "installing", progress: null });
+        return new Promise<{ version: string; path: string }>((resolve, reject) => {
+          deferreds.push({ resolve, reject });
+        });
+      }
+    ),
     upgradeManaged,
     upgradeCustomBinary,
     setCustomBinaryPath,
@@ -132,8 +139,22 @@ describe("OpencodeInstallModal", () => {
     setOpencodeSettings(undefined);
   });
 
+  describe("OpencodeInstallModal", () => {
+    describe("constructor()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/317 uses the reusable full-bleed modal frame", () => {
+        const { manager } = makeManager();
+        const modal = new OpencodeInstallModal(new App(), manager, {
+          platform: "darwin",
+          arch: "arm64",
+        });
+
+        expect(modal.modalEl.className).toBe("modal copilot-modal-full-bleed");
+      });
+    });
+  });
+
   describe("OpencodeConfigContainer()", () => {
-    it("opens on the managed source when nothing was ever configured", () => {
+    it("opens on the managed source with a download action when nothing is configured", () => {
       const { manager } = makeManager();
       renderContainer(manager);
 
@@ -174,37 +195,29 @@ describe("OpencodeInstallModal", () => {
       expect(getSettings().agentMode.backends?.opencode?.binaryPath).toBe(EXISTING_BINARY_PATH);
     });
 
-    it("translates download progress events into the label and percent it renders", async () => {
+    it("shows the manager's install progress and confirms with a notice when the install completes", async () => {
       const { manager, publish, installDeferred } = makeManager();
       renderContainer(manager);
 
       fireEvent.click(screen.getByRole("button", { name: "Download & install" }));
       expect(screen.getByText("Starting…")).toBeTruthy();
 
-      // Progress arrives through the manager's runtime state now, so the row
-      // and this dialog show the same run rather than each tracking its own.
       publish({
         kind: "installing",
-        progress: {
-          phase: "download",
-          received: 300,
-          total: 1000,
-          assetName: "opencode-darwin-arm64.zip",
-        },
+        progress: { label: "Downloading opencode — 300 B / 1000 B", percent: 29 },
       });
-      expect(
-        screen.getByText("Downloading opencode-darwin-arm64.zip — 300 B / 1000 B (30%)")
-      ).toBeTruthy();
+      expect(screen.getByText("Downloading opencode — 300 B / 1000 B")).toBeTruthy();
+      expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("29");
 
       await act(async () => {
-        installDeferred().resolve({ version: "1.16.0", path: "/managed/opencode" });
+        installDeferred().resolve({ version: "2.0.3", path: "/managed/opencode" });
       });
       publish({ kind: "idle" });
-      expect(noticeMessages()).toContain("opencode v1.16.0 installed.");
+      expect(noticeMessages()).toContain("opencode v2.0.3 installed.");
       expect(screen.getByRole("button", { name: "Download & install" })).toBeTruthy();
     });
 
-    it("cancels through the manager so closing the dialog cannot kill the run", async () => {
+    it("cancels through the manager and does not cancel when the dialog unmounts", async () => {
       const { manager, cancelCurrentOperation, publish, installDeferred } = makeManager();
       const { unmount } = renderContainer(manager);
 
@@ -219,14 +232,12 @@ describe("OpencodeInstallModal", () => {
       expect(screen.getByRole("button", { name: "Download & install" })).toBeTruthy();
       expect(screen.queryByText("Aborted")).toBeNull();
 
-      // Unmounting is not a cancellation: the settings row may still be showing
-      // this same operation.
       cancelCurrentOperation.mockClear();
       unmount();
       expect(cancelCurrentOperation).not.toHaveBeenCalled();
     });
 
-    it("surfaces an install failure and keeps the retry available", async () => {
+    it("shows an install failure and keeps the download action available", async () => {
       const { manager, publish, installDeferred } = makeManager();
       renderContainer(manager);
 
@@ -234,7 +245,7 @@ describe("OpencodeInstallModal", () => {
       await act(async () => {
         installDeferred().reject(new Error("tar exited with 1"));
       });
-      publish({ kind: "error", message: "tar exited with 1" });
+      publish({ kind: "error", operation: "install", message: "tar exited with 1" });
 
       expect(screen.getByText("tar exited with 1")).toBeTruthy();
       expect(screen.getByRole("button", { name: "Download & install" })).toBeTruthy();
@@ -250,12 +261,12 @@ describe("OpencodeInstallModal", () => {
       renderContainer(manager);
 
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Upgrade to latest" }));
+        fireEvent.click(screen.getByRole("button", { name: "Upgrade to v2.0.3" }));
       });
 
       expect(upgradeManaged).toHaveBeenCalledTimes(1);
       expect(upgradeCustomBinary).not.toHaveBeenCalled();
-      expect(noticeMessages()).toContain("opencode upgraded to v1.16.0.");
+      expect(noticeMessages()).toContain("opencode upgraded to v2.0.3.");
     });
     it("drops a failed upgrade's reason once an install has replaced the binary", async () => {
       setOpencodeSettings({
@@ -267,18 +278,16 @@ describe("OpencodeInstallModal", () => {
       upgradeManaged.mockRejectedValue(new Error("tar exited with 1"));
       renderContainer(manager);
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Upgrade to latest" }));
+        fireEvent.click(screen.getByRole("button", { name: "Upgrade to v2.0.3" }));
       });
       expect(screen.getByText("tar exited with 1")).toBeTruthy();
 
       fireEvent.click(screen.getByRole("button", { name: "Reinstall" }));
       await act(async () => {
-        installDeferred().resolve({ version: "1.16.0", path: "/managed" });
+        installDeferred().resolve({ version: "2.0.3", path: "/managed" });
       });
       publish({ kind: "idle" });
 
-      // The reason described a binary this install has replaced. It survives a
-      // *failed* install on purpose: nothing changed, so it is still true.
       expect(screen.queryByText("tar exited with 1")).toBeNull();
     });
 
@@ -292,11 +301,9 @@ describe("OpencodeInstallModal", () => {
       upgradeManaged.mockRejectedValue(new OperationInFlightError());
       renderContainer(manager);
 
-      // The reinstall takes the lock; the upgrade clicked underneath it never
-      // owns the run, so it must not take the run's display with it.
       fireEvent.click(screen.getByRole("button", { name: "Reinstall" }));
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Upgrade to latest" }));
+        fireEvent.click(screen.getByRole("button", { name: "Upgrade to v2.0.3" }));
       });
 
       expect(screen.getAllByRole("progressbar")).toHaveLength(1);
@@ -314,13 +321,11 @@ describe("OpencodeInstallModal", () => {
       renderContainer(manager);
 
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Upgrade to latest" }));
+        fireEvent.click(screen.getByRole("button", { name: "Upgrade to v2.0.3" }));
       });
 
-      // Cancel is the user's own doing; the strip must go back to offering the
-      // upgrade rather than reporting "Aborted" as a failure.
       expect(screen.queryByText("Aborted")).toBeNull();
-      expect(screen.getByRole("button", { name: "Upgrade to latest" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Upgrade to v2.0.3" })).toBeTruthy();
     });
 
     it("drops a failed upgrade's reason once another binary is applied", async () => {
@@ -333,7 +338,7 @@ describe("OpencodeInstallModal", () => {
       upgradeManaged.mockRejectedValue(new Error("GitHub API rate-limited"));
       renderContainer(manager);
       await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: "Upgrade to latest" }));
+        fireEvent.click(screen.getByRole("button", { name: "Upgrade to v2.0.3" }));
       });
       expect(screen.getByText("GitHub API rate-limited")).toBeTruthy();
 
@@ -345,7 +350,6 @@ describe("OpencodeInstallModal", () => {
         fireEvent.click(screen.getByRole("button", { name: "Apply" }));
       });
 
-      // The reason belonged to the managed download, not to the binary now in play.
       expect(screen.queryByText("GitHub API rate-limited")).toBeNull();
     });
 
@@ -430,8 +434,6 @@ describe("OpencodeInstallModal", () => {
         fireEvent.click(screen.getByRole("button", { name: "Clear" }));
       });
 
-      // The caller awaits this with no catch of its own, so an unreported
-      // rejection would leave the button resetting with nothing said.
       expect(noticeMessages().join(" ")).toContain("Couldn't clear the custom path");
       expect(noticeMessages()).not.toContain("Custom opencode path cleared.");
     });
@@ -445,8 +447,6 @@ describe("OpencodeInstallModal", () => {
         installDeferred().reject(new OperationInFlightError());
       });
 
-      // This is the one failure the shared runtime state cannot render: it
-      // belongs to the operation that won, not to this dialog.
       expect(noticeMessages().join(" ")).toContain("already running");
     });
 

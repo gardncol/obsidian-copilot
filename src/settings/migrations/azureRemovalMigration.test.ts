@@ -1,0 +1,191 @@
+import { DEFAULT_SETTINGS } from "@/constants";
+import type {
+  ConfiguredModel,
+  ModelManagementApi,
+  Provider,
+  ProviderType,
+} from "@/modelManagement";
+import { KeychainService } from "@/services/keychainService";
+import { type CopilotSettings, setSettings } from "@/settings/model";
+
+import { executeAzureRemoval, planAzureRemoval } from "./azureRemovalMigration";
+
+jest.mock("@/logger", () => ({
+  logInfo: jest.fn(),
+  logWarn: jest.fn(),
+  logError: jest.fn(),
+}));
+
+jest.mock("@/settings/model", () => {
+  const actual = jest.requireActual<typeof import("@/settings/model")>("@/settings/model");
+  return { ...actual, setSettings: jest.fn() };
+});
+
+jest.mock("@/services/keychainService", () => ({
+  KeychainService: { getInstance: jest.fn() },
+}));
+
+const mockSetSettings = setSettings as jest.MockedFunction<typeof setSettings>;
+const mockGetInstance = KeychainService.getInstance as jest.MockedFunction<
+  typeof KeychainService.getInstance
+>;
+
+type KeychainStub = { isAvailable: jest.Mock; deleteSecret: jest.Mock };
+
+function keychain(overrides: Partial<KeychainStub> = {}): KeychainStub {
+  const instance: KeychainStub = {
+    isAvailable: jest.fn(() => true),
+    deleteSecret: jest.fn(),
+    ...overrides,
+  };
+  mockGetInstance.mockReturnValue(instance as unknown as KeychainService);
+  return instance;
+}
+
+function makeApi() {
+  const removeProvider = jest.fn(async () => undefined);
+  const api = { coordinator: { removeProvider } } as unknown as ModelManagementApi;
+  return { api, removeProvider };
+}
+
+function provider(providerId: string, providerType: string, apiKeyKeychainId?: string): Provider {
+  return {
+    providerId,
+    providerType: providerType as ProviderType,
+    displayName: providerId,
+    origin: { kind: "byok" },
+    addedAt: 0,
+    ...(apiKeyKeychainId ? { apiKeyKeychainId } : {}),
+  };
+}
+
+function configuredModel(configuredModelId: string, providerId: string): ConfiguredModel {
+  return {
+    configuredModelId,
+    providerId,
+    info: { id: `${configuredModelId}-wire`, displayName: configuredModelId },
+    configuredAt: 0,
+  };
+}
+
+function settingsWith(
+  overrides: Partial<CopilotSettings> & Record<string, unknown> = {}
+): CopilotSettings {
+  return { ...DEFAULT_SETTINGS, ...overrides };
+}
+
+function embeddingSelection(plan: ReturnType<typeof planAzureRemoval>): string | undefined {
+  return (plan?.patch as Partial<CopilotSettings> & { embeddingModelKey?: string })
+    .embeddingModelKey;
+}
+
+describe("azureRemovalMigration", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  describe("planAzureRemoval()", () => {
+    it("returns null for a vault that never configured Azure", () => {
+      expect(
+        planAzureRemoval(
+          settingsWith({
+            providers: { ant: provider("ant", "anthropic") },
+            configuredModels: [configuredModel("cm-ant", "ant")],
+          })
+        )
+      ).toBeNull();
+    });
+
+    it("drops the Azure provider row and its models", () => {
+      const plan = planAzureRemoval(
+        settingsWith({
+          providers: { az: provider("az", "azure", "kc-az"), ant: provider("ant", "anthropic") },
+          configuredModels: [configuredModel("cm-az", "az"), configuredModel("cm-ant", "ant")],
+        })
+      );
+      expect(plan?.providerIds).toEqual(["az"]);
+      expect(plan?.patch.providers).toBeUndefined();
+      expect(plan?.patch.configuredModels).toBeUndefined();
+    });
+
+    it("repoints an embedding selection that named Azure at the default model (https://github.com/logancyang/obsidian-copilot/issues/2932)", () => {
+      const plan = planAzureRemoval(
+        settingsWith({ embeddingModelKey: "azure-openai|azure openai" })
+      );
+      expect(embeddingSelection(plan)).toBe("");
+    });
+
+    it("repoints the pre-rename `azure_openai` embedding selection too (https://github.com/logancyang/obsidian-copilot/issues/2932)", () => {
+      const plan = planAzureRemoval(
+        settingsWith({ embeddingModelKey: "azure-openai|azure_openai" })
+      );
+      expect(embeddingSelection(plan)).toBe("");
+    });
+
+    it("acts on an embedding selection even when no Azure provider row exists (https://github.com/logancyang/obsidian-copilot/issues/2932)", () => {
+      const plan = planAzureRemoval(
+        settingsWith({ providers: {}, embeddingModelKey: "azure-openai|azure openai" })
+      );
+      expect(plan).not.toBeNull();
+      expect(embeddingSelection(plan)).toBe("");
+    });
+
+    it("leaves an embedding selection on another provider alone", () => {
+      const plan = planAzureRemoval(
+        settingsWith({
+          providers: { az: provider("az", "azure") },
+          embeddingModelKey: "text-embedding-3-small|openai",
+        })
+      );
+      expect(embeddingSelection(plan)).toBeUndefined();
+    });
+
+    it("removes a legacy Azure chat model and the selection naming it (https://github.com/logancyang/obsidian-copilot/issues/2932)", () => {
+      const plan = planAzureRemoval(
+        settingsWith({
+          activeModels: [
+            { name: "gpt-4o", provider: "azure openai", enabled: true, isBuiltIn: false },
+            { name: "gpt-5", provider: "openai", enabled: true, isBuiltIn: false },
+          ],
+          defaultModelKey: "gpt-4o|azure openai",
+        })
+      );
+      expect(plan?.patch.activeModels?.map((m) => m.name)).toEqual(["gpt-5"]);
+      expect(plan?.patch.defaultModelKey).toBe("");
+    });
+  });
+
+  describe("executeAzureRemoval()", () => {
+    it("hands each Azure row to the cascade rather than deleting it directly", async () => {
+      keychain();
+      const { api, removeProvider } = makeApi();
+      await executeAzureRemoval(
+        api,
+        settingsWith({
+          providers: { az: provider("az", "azure", "kc-az") },
+          configuredModels: [configuredModel("cm-az", "az")],
+        })
+      );
+      expect(removeProvider).toHaveBeenCalledWith("az");
+    });
+
+    it("writes the embedding repoint (https://github.com/logancyang/obsidian-copilot/issues/2932)", async () => {
+      keychain();
+      const { api } = makeApi();
+      await executeAzureRemoval(
+        api,
+        settingsWith({ embeddingModelKey: "azure-openai|azure openai" })
+      );
+      expect(mockSetSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ embeddingModelKey: "" })
+      );
+    });
+
+    it("deletes the pre-BYOK top-level key even for a vault with nothing else to clean (https://github.com/logancyang/obsidian-copilot/issues/2932)", async () => {
+      const store = keychain();
+      const { api } = makeApi();
+      await executeAzureRemoval(api, settingsWith({}));
+      expect(store.deleteSecret).toHaveBeenCalledWith("azureOpenAIApiKey");
+    });
+  });
+});

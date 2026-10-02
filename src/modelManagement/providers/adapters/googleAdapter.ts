@@ -1,14 +1,4 @@
-/**
- * Google Generative AI adapter. Dispatch key:
- * `ProviderType === "google"`.
- *
- * Backs Gemini via `@langchain/google-genai`. No provider-level extras.
- *
- * Verification hits `GET /v1beta/models?key=…` — Google takes the API
- * key as a query parameter rather than a header.
- */
-
-import { z } from "zod";
+import * as z from "zod";
 
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 

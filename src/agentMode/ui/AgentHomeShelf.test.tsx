@@ -3,8 +3,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { fireEvent, render, screen } from "@testing-library/react";
 import React from "react";
 
-// The tooltip portal targets Obsidian's `activeDocument` global (popout-safe);
-// jsdom has no such global, so point it at the test document.
 beforeAll(() => {
   (window as unknown as { activeDocument: Document }).activeDocument = window.document;
 });
@@ -78,6 +76,36 @@ describe("AgentHomeShelf", () => {
       expect(screen.queryByText("CHATS BODY")).not.toBeNull();
     });
 
+    it("restores the remembered Relevant Notes tab after temporary pane suppression — https://github.com/Brevilabs/obsidian-copilot-private/issues/468", () => {
+      const relevantNotes: AgentHomeShelfSection = {
+        id: "relevant-notes",
+        icon: <span />,
+        title: "Relevant Notes",
+        renderBody: () => <div>RELEVANT NOTES BODY</div>,
+      };
+      const onSectionSelect = jest.fn();
+      const shelf = (sections: AgentHomeShelfSection[]) => (
+        <TooltipProvider>
+          <AgentHomeShelf
+            sections={sections}
+            activeSectionId="relevant-notes"
+            onSectionSelect={onSectionSelect}
+          />
+        </TooltipProvider>
+      );
+      const { rerender } = render(shelf([chats, relevantNotes]));
+      expect(screen.queryByText("RELEVANT NOTES BODY")).not.toBeNull();
+
+      rerender(shelf([chats]));
+      expect(screen.queryByText("RELEVANT NOTES BODY")).toBeNull();
+      expect(screen.queryByText("CHATS BODY")).not.toBeNull();
+
+      rerender(shelf([chats, relevantNotes]));
+      expect(screen.queryByText("RELEVANT NOTES BODY")).not.toBeNull();
+      expect(screen.queryByText("CHATS BODY")).toBeNull();
+      expect(onSectionSelect).not.toHaveBeenCalled();
+    });
+
     it("reports controlled clicks without switching sections until the parent updates", () => {
       const onSectionSelect = jest.fn();
       renderShelf([chats, projectsEnabled], { activeSectionId: "chats", onSectionSelect });
@@ -90,6 +118,22 @@ describe("AgentHomeShelf", () => {
     it("renders Recent Chats without a cumulative count when the caller omits it", () => {
       renderShelf([chats]);
       expect(screen.getByRole("tab", { name: /Recent Chats/ }).textContent ?? "").not.toMatch(/\d/);
+    });
+
+    it("uses the shared ten-row viewport for every section body", () => {
+      renderShelf([chats, projectsEnabled]);
+      const panel = screen.getByRole("tabpanel");
+      const panelBody = panel.firstElementChild as HTMLElement;
+
+      expect(panel.classList.contains("tw-h-96")).toBe(true);
+      expect(panel.classList.contains("tw-max-h-96")).toBe(true);
+      expect(panel.classList.contains("tw-overflow-y-auto")).toBe(true);
+      expect(panelBody.classList.contains("tw-h-full")).toBe(true);
+      expect(panelBody.classList.contains("tw-min-h-full")).toBe(true);
+
+      fireEvent.click(screen.getByRole("tab", { name: /Projects/ }));
+      expect(screen.getByRole("tabpanel")).toBe(panel);
+      expect(screen.queryByText("PROJECTS BODY")).not.toBeNull();
     });
 
     it("hides the count badge when the count is zero", () => {

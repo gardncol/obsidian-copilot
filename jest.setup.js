@@ -4,8 +4,25 @@ import { TextEncoder, TextDecoder } from "util";
 window.TextEncoder = TextEncoder;
 window.TextDecoder = TextDecoder;
 
-// Polyfill Obsidian's Node.doc / Node.win augmentation so plugin code that
-// reads `element.doc` / `element.win` works under jsdom.
+if (typeof window.matchMedia !== "function") {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: (query) => {
+      const events = new EventTarget();
+      return {
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: (listener) => events.addEventListener("change", listener),
+        removeListener: (listener) => events.removeEventListener("change", listener),
+        addEventListener: events.addEventListener.bind(events),
+        removeEventListener: events.removeEventListener.bind(events),
+        dispatchEvent: events.dispatchEvent.bind(events),
+      };
+    },
+  });
+}
+
 if (typeof Node !== "undefined" && !Object.prototype.hasOwnProperty.call(Node.prototype, "doc")) {
   Object.defineProperty(Node.prototype, "doc", {
     get() {
@@ -23,9 +40,6 @@ if (typeof Node !== "undefined" && !Object.prototype.hasOwnProperty.call(Node.pr
   });
 }
 
-// Polyfill Obsidian's DOM creation helpers. Obsidian installs `createEl` and
-// friends on every window and on `Node.prototype`; jsdom has neither, so plugin
-// code that builds elements through them would throw under test.
 function applyDomElementInfo(el, info) {
   if (info.cls) {
     el.className = Array.isArray(info.cls) ? info.cls.join(" ") : info.cls;
@@ -60,8 +74,6 @@ if (typeof window.createEl !== "function") {
     const options = toDomElementInfo(info);
     const el = window.document.createElement(tag);
     applyDomElementInfo(el, options);
-    // Obsidian runs the callback before attaching, so callers can finish
-    // building the element without the parent seeing a half-built child.
     callback?.(el);
     if (options.parent) {
       if (options.prepend) {
@@ -92,9 +104,6 @@ if (typeof Node !== "undefined" && typeof Node.prototype.createEl !== "function"
   };
 }
 
-// Polyfill Obsidian's `HTMLElement.setCssProps` augmentation (sets one or more
-// CSS custom properties) so plugin code that calls it — e.g. the autosizing
-// `Textarea` — works under jsdom.
 if (typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.setCssProps !== "function") {
   HTMLElement.prototype.setCssProps = function (props) {
     for (const [name, value] of Object.entries(props)) {
@@ -103,8 +112,6 @@ if (typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.setCssPro
   };
 }
 
-// Polyfill the Obsidian `HTMLElement` augmentations that plugin code reaches for
-// when building chrome by hand, so those paths are exercisable under jsdom.
 if (typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.addClass !== "function") {
   HTMLElement.prototype.addClass = function (...classes) {
     this.classList.add(...classes);
@@ -116,11 +123,6 @@ if (typeof HTMLElement !== "undefined" && typeof HTMLElement.prototype.setText !
   };
 }
 
-// Obsidian exposes `activeDocument` / `activeWindow` globals pointing at the
-// focused popout's document/window. Under jsdom there's only one document, so
-// alias them onto `window` (the jsdom global object) — plugin code that portals
-// into `activeDocument.body` (e.g. the Radix tooltip) would otherwise throw
-// `activeDocument is not defined`.
 if (typeof window.activeDocument === "undefined") {
   window.activeDocument = window.document;
 }

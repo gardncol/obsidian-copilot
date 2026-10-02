@@ -7,24 +7,34 @@ import type CopilotPlugin from "@/main";
 import { render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 
-// Readiness of the backend the pane would run, swapped per test. Declared with
-// the `mock` prefix so Jest allows the mock factory below to close over it.
+let mockInstallAction = { kind: "idle" } as { kind: string; label?: string; percent?: number };
+let mockAuthStatus: { signedIn: boolean } | null = { signedIn: true };
+let mockHasAuth = false;
+let mockAuthChecking = false;
+jest.mock("@/agentMode/session/useBackendAuthState", () => ({
+  useBackendAuthState: jest.fn(() => ({ status: mockAuthStatus, checking: mockAuthChecking })),
+}));
+
+let mockManagedInstall: object | undefined;
 let mockInstallState: InstallState = { kind: "ready", source: "custom" };
 
-// Stub the descriptor hooks so the effect's `preloadReady`/install gates are
-// satisfied without the real backend registry / jotai atoms. The mock factory
-// names must match the real `use*` exports, so the no-hook `use` prefix is
-// expected here.
 /* eslint-disable @eslint-react/hooks-extra/no-unnecessary-use-prefix */
 jest.mock("@/agentMode/ui/useBackendDescriptor", () => ({
-  useSessionBackendDescriptor: () => ({ id: "claude", openInstallUI: jest.fn() }),
+  useSessionBackendDescriptor: () => ({
+    id: "claude",
+    displayName: "Claude",
+    auth: mockHasAuth ? {} : undefined,
+    managedInstall: mockManagedInstall,
+    openInstallUI: jest.fn(),
+  }),
   useBackendInstallState: () => mockInstallState,
+  useManagedInstallActionState: () => mockInstallAction,
 }));
 /* eslint-enable @eslint-react/hooks-extra/no-unnecessary-use-prefix */
 
-// Heavy children are irrelevant to the guards under test — render markers so
-// the no-session fallback's branch is observable without their real trees.
-jest.mock("@/agentMode/ui/AgentHome", () => ({ AgentHome: () => null }));
+jest.mock("@/agentMode/ui/AgentHome", () => ({
+  AgentHome: () => <div data-testid="agent-home" />,
+}));
 jest.mock("@/agentMode/ui/AgentModeStatus", () => ({
   AgentModeStatus: () => <div data-testid="status-card" />,
 }));
@@ -75,7 +85,6 @@ function renderChat(manager: AgentSessionManager) {
   );
 }
 
-/** Render the no-session fallback with the given readiness and boot error. */
 function renderFallback(installState: InstallState, lastError: string | null, starting = false) {
   mockInstallState = installState;
   const { manager } = makeManager({
@@ -89,15 +98,60 @@ function renderFallback(installState: InstallState, lastError: string | null, st
 }
 
 describe("AgentModeChat", () => {
-  afterEach(() => {
-    mockInstallState = { kind: "ready", source: "custom" };
-  });
+  describe("AgentModeChat()", () => {
+    afterEach(() => {
+      mockHasAuth = false;
+      mockAuthChecking = false;
+      mockAuthStatus = { signedIn: true };
+      mockManagedInstall = undefined;
+      mockInstallAction = { kind: "idle" };
+      mockInstallState = { kind: "ready", source: "custom" };
+    });
 
-  describe("auto-spawn guard (scope-aware)", () => {
+    it("shows download progress before model loading and starts chat when the download settles (https://github.com/Brevilabs/obsidian-copilot-private/issues/530)", async () => {
+      mockInstallState = { kind: "ready", source: "managed" };
+      mockInstallAction = { kind: "running", label: "Downloading agent…", percent: 42 };
+      const { manager, getOrCreateActiveSession } = makeManager({
+        activeProjectId: GLOBAL_SCOPE,
+        scopeSessions: [],
+        poolSessions: [],
+      });
+      (manager.isPreloadReady as jest.Mock).mockReturnValue(false);
+      const { rerender } = renderChat(manager);
+      expect(screen.getByText("Downloading agent…")).toBeTruthy();
+      expect(screen.getByRole("progressbar")).toBeTruthy();
+      expect(screen.queryByText("Loading agent models…")).toBeNull();
+      expect(getOrCreateActiveSession).not.toHaveBeenCalled();
+      mockInstallAction = { kind: "idle" };
+      (manager.isPreloadReady as jest.Mock).mockReturnValue(true);
+      rerender(
+        <AgentModeChat
+          plugin={{ app: {}, agentSessionManager: manager } as unknown as CopilotPlugin}
+          onSaveChat={() => {}}
+          updateUserMessageHistory={() => {}}
+        />
+      );
+      await waitFor(() => expect(getOrCreateActiveSession).toHaveBeenCalledTimes(1));
+      expect(screen.queryByRole("progressbar")).toBeNull();
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/368 keeps a cold-start managed upgrade on the shared status card", () => {
+      mockManagedInstall = {};
+      renderFallback(
+        {
+          kind: "incompatible",
+          source: "managed",
+          currentVersion: "1",
+          minVersion: "2",
+          message: "Update required",
+        },
+        null
+      );
+      expect(screen.getByTestId("status-card")).toBeTruthy();
+      expect(screen.queryByTestId("select-panel")).toBeNull();
+    });
+
     it("regression: spawns the current project scope's session even when another scope still has sessions", async () => {
-      // The closed scope (project-1) is empty, but the global pool still holds a
-      // session. A whole-pool guard would skip the spawn and strand the pane on
-      // the no-session fallback; the scope-aware guard must re-spawn project-1.
       const { manager, getOrCreateActiveSession } = makeManager({
         activeProjectId: "project-1",
         scopeSessions: [],
@@ -130,13 +184,139 @@ describe("AgentModeChat", () => {
 
       renderChat(manager);
 
-      // Flush effects, then assert the guard short-circuited.
       await waitFor(() => expect(manager.getSessionsForScope).toHaveBeenCalled());
       expect(getOrCreateActiveSession).not.toHaveBeenCalled();
     });
-  });
 
-  describe("no-session fallback", () => {
+    it("routes an outdated auto-detected backend without managed installation to setup (https://github.com/Brevilabs/obsidian-copilot-private/issues/532)", () => {
+      renderFallback(
+        {
+          kind: "incompatible",
+          source: "managed",
+          currentVersion: "1",
+          minVersion: "2",
+          message: "Too old",
+        },
+        null
+      );
+      expect(screen.getByTestId("select-panel")).toBeTruthy();
+    });
+    it("waits for fresh authentication despite cached sign-in (https://github.com/Brevilabs/obsidian-copilot-private/issues/532)", () => {
+      mockHasAuth = true;
+      mockAuthChecking = true;
+      const { manager, getOrCreateActiveSession } = makeManager({
+        activeProjectId: GLOBAL_SCOPE,
+        scopeSessions: [],
+        poolSessions: [],
+      });
+      renderChat(manager);
+      expect(screen.getByText("Checking agent sign-in…")).toBeTruthy();
+      expect(getOrCreateActiveSession).not.toHaveBeenCalled();
+    });
+
+    const failures: Array<[string, InstallState, boolean]> = [
+      ["missing", { kind: "absent" }, false],
+      ["corrupt", { kind: "error", message: "Cannot execute binary" }, false],
+      [
+        "outdated custom",
+        {
+          kind: "incompatible",
+          source: "custom",
+          currentVersion: "1",
+          minVersion: "2",
+          message: "Too old",
+        },
+        false,
+      ],
+      ["signed out", { kind: "ready", source: "custom" }, true],
+    ];
+    it.each(
+      failures.flatMap(([name, state, signedOut]) =>
+        [false, true].flatMap((preloadReady) =>
+          [null, "Previous failure"].map((lastError) => ({
+            name,
+            state,
+            signedOut,
+            preloadReady,
+            lastError,
+          }))
+        )
+      )
+    )(
+      "shows $name with preload=$preloadReady and error=$lastError (https://github.com/Brevilabs/obsidian-copilot-private/issues/532)",
+      ({ state, signedOut, preloadReady, lastError }) => {
+        mockInstallState = state;
+        mockManagedInstall = {};
+        mockHasAuth = signedOut;
+        mockAuthStatus = { signedIn: !signedOut };
+        const { manager, getOrCreateActiveSession } = makeManager({
+          activeProjectId: GLOBAL_SCOPE,
+          scopeSessions: [],
+          poolSessions: [],
+          lastError,
+          starting: true,
+        });
+        (manager.isPreloadReady as jest.Mock).mockReturnValue(preloadReady);
+        renderChat(manager);
+        expect(screen.getByTestId("select-panel")).toBeTruthy();
+        expect(screen.queryByText("Loading agent models…")).toBeNull();
+        expect(getOrCreateActiveSession).not.toHaveBeenCalled();
+      }
+    );
+    it.each(failures)(
+      "keeps the chat mounted when %s becomes known during preload (https://github.com/Brevilabs/obsidian-copilot-private/issues/532)",
+      (_name, state, signedOut) => {
+        const active = { internalId: "s-1", chatInputId: "chat-1" } as AgentSession;
+        const { manager } = makeManager({
+          activeProjectId: GLOBAL_SCOPE,
+          scopeSessions: [active],
+          poolSessions: [active],
+        });
+        (manager.getActiveSession as jest.Mock).mockReturnValue(active);
+        (manager.getActiveChatUIState as jest.Mock).mockReturnValue({});
+        const { rerender } = renderChat(manager);
+        const home = screen.getByTestId("agent-home");
+        mockInstallState = state;
+        mockHasAuth = signedOut;
+        mockAuthStatus = { signedIn: !signedOut };
+        (manager.isPreloadReady as jest.Mock).mockReturnValue(false);
+        rerender(
+          <AgentModeChat
+            plugin={{ agentSessionManager: manager } as unknown as CopilotPlugin}
+            onSaveChat={() => {}}
+            updateUserMessageHistory={() => {}}
+          />
+        );
+        expect(screen.getByTestId("agent-home")).toBe(home);
+      }
+    );
+    it("waits for authentication before auto-starting and starts after sign-in (https://github.com/Brevilabs/obsidian-copilot-private/issues/532)", () => {
+      mockHasAuth = true;
+      mockAuthStatus = null;
+      const { manager, getOrCreateActiveSession } = makeManager({
+        activeProjectId: GLOBAL_SCOPE,
+        scopeSessions: [],
+        poolSessions: [],
+      });
+      const { rerender } = renderChat(manager);
+      expect(getOrCreateActiveSession).not.toHaveBeenCalled();
+      const renderAgain = () =>
+        rerender(
+          <AgentModeChat
+            plugin={{ agentSessionManager: manager } as unknown as CopilotPlugin}
+            onSaveChat={() => {}}
+            updateUserMessageHistory={() => {}}
+          />
+        );
+      mockAuthStatus = { signedIn: false };
+      renderAgain();
+      expect(screen.getByTestId("select-panel")).toBeTruthy();
+      expect(getOrCreateActiveSession).not.toHaveBeenCalled();
+      mockAuthStatus = { signedIn: true };
+      renderAgain();
+      expect(getOrCreateActiveSession).toHaveBeenCalledTimes(1);
+    });
+
     it("takes the pane over with the agent select view when no agent is set up", () => {
       renderFallback({ kind: "absent" }, null);
 
@@ -144,48 +324,8 @@ describe("AgentModeChat", () => {
       expect(screen.queryByTestId("status-card")).toBeNull();
     });
 
-    it("takes the pane over when the agent's binary is too old to run", () => {
-      renderFallback(
-        {
-          kind: "incompatible",
-          source: "custom",
-          currentVersion: "2.1.205",
-          minVersion: "2.1.206",
-          message: "too old",
-        },
-        null
-      );
-
-      expect(screen.getByTestId("select-panel")).toBeTruthy();
-    });
-
-    it("takes the pane over when the agent's readiness check failed", () => {
-      renderFallback({ kind: "error", message: "not executable" }, null);
-
-      expect(screen.getByTestId("select-panel")).toBeTruthy();
-    });
-
     it("keeps the compact card while a readiness check is in flight", () => {
-      // `checking` resolves on its own; flashing the select view and swapping it
-      // straight back out is worse than the card's one-line "Checking…".
       renderFallback({ kind: "checking", source: "custom" }, null);
-
-      expect(screen.getByTestId("status-card")).toBeTruthy();
-      expect(screen.queryByTestId("select-panel")).toBeNull();
-    });
-
-    it("keeps the compact card while a backend session is already starting", () => {
-      renderFallback({ kind: "absent" }, null, true);
-
-      expect(screen.getByTestId("status-card")).toBeTruthy();
-      expect(screen.queryByTestId("select-panel")).toBeNull();
-    });
-
-    it("regression: keeps the compact card when a boot error coincides with an absent backend", () => {
-      // Deleting the binary under a running agent sets both. A setup screen
-      // would bury the failure that just happened; the card still surfaces the
-      // Install call to action for an absent backend.
-      renderFallback({ kind: "absent" }, "opencode backend exited unexpectedly.");
 
       expect(screen.getByTestId("status-card")).toBeTruthy();
       expect(screen.queryByTestId("select-panel")).toBeNull();

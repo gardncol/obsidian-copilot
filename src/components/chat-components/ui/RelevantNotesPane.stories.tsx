@@ -1,0 +1,201 @@
+import { Button } from "@/components/ui/button";
+import { createProductUrl, PRODUCT_URLS } from "@/lib/productLinks";
+import {
+  RelevantNotesPane,
+  type RelevantNotesPaneProps,
+} from "@/components/chat-components/ui/RelevantNotesPane";
+import type { Meta, StoryObj } from "@/lib/story";
+import { FileInput, FileOutput } from "lucide-react";
+import React, { useState } from "react";
+
+function NoteRows(): React.ReactNode[] {
+  return [
+    { title: "Design principles", score: 0.86, outgoing: true, backlink: false },
+    { title: "Product research", score: 0.72, outgoing: false, backlink: true },
+  ].map((note) => (
+    <div
+      key={note.title}
+      className="tw-flex tw-min-h-8 tw-items-center tw-gap-2 tw-rounded-md tw-px-2.5 tw-py-1.5"
+    >
+      <span className="tw-min-w-0 tw-flex-1 tw-truncate tw-text-sm tw-font-medium tw-text-normal">
+        {note.title}
+      </span>
+      {note.outgoing && <FileOutput className="tw-size-3 tw-text-faint" />}
+      {note.backlink && <FileInput className="tw-size-3 tw-text-faint" />}
+      <span className="tw-text-xs tw-font-medium tw-tabular-nums tw-text-muted">
+        {Math.round(note.score * 100)}%
+      </span>
+    </div>
+  ));
+}
+
+const baseArgs: RelevantNotesPaneProps = {
+  status: "matches",
+  noteRows: NoteRows(),
+  actions: {
+    miyoDownloadUrl: createProductUrl(PRODUCT_URLS.MIYO, "relevant_notes"),
+    onOpenMiyoSettings: () => undefined,
+    onRefresh: () => undefined,
+    reviewIndexing: {
+      destination: "miyo",
+      onSelect: () => undefined,
+    },
+  },
+};
+
+const meta = {
+  title: "Chat/Relevant Notes Pane",
+  component: RelevantNotesPane,
+  args: baseArgs,
+  parameters: { gallery: { host: "leaf", layout: "fullscreen" } },
+} satisfies Meta<RelevantNotesPaneProps>;
+
+export default meta;
+
+export const ConnectedScoredResults: StoryObj<RelevantNotesPaneProps> = {};
+
+export const SkippedChatAttachments: StoryObj<RelevantNotesPaneProps> = {
+  args: { details: { skippedAttachments: 2 } },
+};
+
+export const NoUsableChatContext: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "no-usable-context", details: { skippedAttachments: 2 }, noteRows: [] },
+};
+
+export const ChatContextTooLarge: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "request-too-large", noteRows: [] },
+};
+
+export const ChatRequestFailure: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "request-error", noteRows: [] },
+};
+
+export const MatchedFilesUnavailable: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "matches", noteRows: [] },
+};
+
+export const NoActiveNote: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "idle", noteRows: [] },
+};
+
+export const Loading: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "loading", noteRows: [] },
+};
+
+export const NoMiyoEmptyGuidance: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "disabled", noteRows: [] },
+};
+
+export const MiyoUnavailableEmptyGuidance: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "unavailable", noteRows: [] },
+};
+
+export const EmptyNoSemanticMatches: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "no-matches", noteRows: [] },
+};
+
+export const NotIndexedGuidance: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "not-indexed", noteRows: [] },
+};
+
+export const NoTextGuidance: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "no-text", noteRows: [] },
+};
+
+export const IndexingGuidance: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "indexing", noteRows: [] },
+};
+
+export const IndexErrorGuidance: StoryObj<RelevantNotesPaneProps> = {
+  args: {
+    status: "index-error",
+    details: { errorMessage: "Markdown parser failed" },
+    noteRows: [],
+  },
+};
+
+export const IndexErrorRemoteGuidance: StoryObj<RelevantNotesPaneProps> = {
+  args: {
+    status: "index-error",
+    details: { errorMessage: "Markdown parser failed" },
+    noteRows: [],
+    actions: {
+      ...baseArgs.actions,
+      reviewIndexing: { ...baseArgs.actions.reviewIndexing, destination: "settings" },
+    },
+  },
+};
+
+export const ExcludedGuidance: StoryObj<RelevantNotesPaneProps> = {
+  args: {
+    status: "excluded",
+    details: { exclusionReason: "exclude_pattern", exclusionRule: "**/journal/**" },
+    noteRows: [],
+  },
+};
+
+export const ExcludedRemoteGuidance: StoryObj<RelevantNotesPaneProps> = {
+  args: {
+    status: "excluded",
+    details: { exclusionReason: "exclude_pattern", exclusionRule: "**/journal/**" },
+    noteRows: [],
+    actions: {
+      ...baseArgs.actions,
+      reviewIndexing: { ...baseArgs.actions.reviewIndexing, destination: "settings" },
+    },
+  },
+};
+
+export const NotIndexedRemoteGuidance: StoryObj<RelevantNotesPaneProps> = {
+  args: {
+    status: "not-indexed",
+    noteRows: [],
+    actions: {
+      ...baseArgs.actions,
+      reviewIndexing: { ...baseArgs.actions.reviewIndexing, destination: "settings" },
+    },
+  },
+};
+
+export const VaultNotRegistered: StoryObj<RelevantNotesPaneProps> = {
+  args: { status: "vault-not-registered", details: { folderName: "Work Vault" }, noteRows: [] },
+};
+
+export const VaultNotRegisteredRemote: StoryObj<RelevantNotesPaneProps> = {
+  args: {
+    status: "vault-not-registered",
+    details: { folderName: "Research and long-term project planning" },
+    noteRows: [],
+    actions: {
+      ...baseArgs.actions,
+      reviewIndexing: { ...baseArgs.actions.reviewIndexing, destination: "settings" },
+    },
+  },
+};
+
+export const StateTransitions: StoryObj<RelevantNotesPaneProps> = {
+  render: function StateTransitionsStory() {
+    const states = ["loading", "request-error", "no-matches", "matches"] as const;
+    const [index, setIndex] = useState(0);
+    const status = states[index];
+    return (
+      <div className="tw-flex tw-h-full tw-min-h-0 tw-flex-col tw-gap-2">
+        <Button
+          variant="secondary"
+          size="sm"
+          className="tw-self-start"
+          onClick={() => setIndex((value) => (value + 1) % states.length)}
+        >
+          Next state
+        </Button>
+        <div className="tw-min-h-0 tw-flex-1">
+          <RelevantNotesPane
+            {...baseArgs}
+            status={status}
+            noteRows={status === "matches" ? baseArgs.noteRows : []}
+          />
+        </div>
+      </div>
+    );
+  },
+};

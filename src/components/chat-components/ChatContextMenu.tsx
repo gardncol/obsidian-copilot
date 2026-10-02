@@ -1,4 +1,3 @@
-import { Loader2 } from "lucide-react";
 import { TFile, TFolder } from "obsidian";
 import React, { useRef, useState } from "react";
 import { isDesktopRuntime } from "@/utils/desktopRuntime";
@@ -13,8 +12,7 @@ import {
   ContextSelectedTextBadge,
 } from "@/components/chat-components/ContextBadges";
 import { SelectedTextContext, WebTabContext } from "@/types/message";
-import { Separator } from "@/components/ui/separator";
-import { useChainType, useIndexingProgress } from "@/aiParams";
+import { useChainType } from "@/aiParams";
 import { useApp } from "@/context";
 import { isPlusChain, openFileInWorkspace } from "@/utils";
 import { mergeWebTabContexts } from "@/utils/urlNormalization";
@@ -34,18 +32,12 @@ interface ChatContextMenuProps {
   contextWebTabs: WebTabContext[];
   selectedTextContexts?: SelectedTextContext[];
   onRemoveContext: (category: string, data: string) => void;
-  showIndexingCard?: () => void;
   onTypeaheadSelect: (
     category: string,
     data: TFile | string | TFolder | WebTabContext | null
   ) => void;
   lexicalEditorRef?: React.RefObject<{ focus: () => void }>;
   hideAddContextButton?: boolean;
-  /**
-   * True in Agent Mode. Collapses the row entirely when there are no badges —
-   * Agent Mode has no "@ Add context" button here, so an empty row would just
-   * push the editor down (#205).
-   */
   isAgentMode?: boolean;
 }
 
@@ -60,7 +52,6 @@ export const ChatContextMenu: React.FC<ChatContextMenuProps> = ({
   contextWebTabs,
   selectedTextContexts = EMPTY_SELECTED_TEXT_CONTEXTS,
   onRemoveContext,
-  showIndexingCard,
   onTypeaheadSelect,
   lexicalEditorRef,
   hideAddContextButton = false,
@@ -68,7 +59,6 @@ export const ChatContextMenu: React.FC<ChatContextMenuProps> = ({
 }) => {
   const app = useApp();
   const [currentChain] = useChainType();
-  const [indexingState] = useIndexingProgress();
   const [showTypeahead, setShowTypeahead] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const isCopilotPlus = isPlusChain(currentChain);
@@ -77,15 +67,12 @@ export const ChatContextMenu: React.FC<ChatContextMenuProps> = ({
     setShowTypeahead(false);
   };
 
-  // Simple wrapper that adds focus management to the ContextControl handler
   const handleTypeaheadSelect = (
     category: string,
     data: TFile | string | TFolder | WebTabContext
   ) => {
-    // Delegate to ContextControl handler
     onTypeaheadSelect(category, data);
 
-    // Return focus to the editor after selection
     window.setTimeout(() => {
       if (lexicalEditorRef?.current) {
         lexicalEditorRef.current.focus();
@@ -93,9 +80,6 @@ export const ChatContextMenu: React.FC<ChatContextMenuProps> = ({
     }, 100);
   };
 
-  /**
-   * Handles clicking on a badge to open the file in a new tab (or focus existing tab)
-   */
   const handleBadgeClick = (file: TFile) => {
     void openFileInWorkspace(app, file);
   };
@@ -107,13 +91,13 @@ export const ChatContextMenu: React.FC<ChatContextMenuProps> = ({
 
   const uniqueUrls = React.useMemo(() => Array.from(new Set(contextUrls)), [contextUrls]);
 
-  // Defensive dedupe for web tabs (by URL) using shared normalization policy
   const uniqueWebTabs = React.useMemo(() => mergeWebTabContexts(contextWebTabs), [contextWebTabs]);
 
-  // Any selection hides both active note and active web tab
   const hasAnySelection = selectedTextContexts.length > 0;
 
-  const activeNoteVisible = includeActiveNote && !hasAnySelection && Boolean(currentActiveFile);
+  // Removing an excerpt must not change whether the full note is attached.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/465
+  const activeNoteVisible = includeActiveNote && Boolean(currentActiveFile);
   const activeWebTabVisible =
     includeActiveWebTab && !hasAnySelection && Boolean(activeWebTab) && isDesktopRuntime();
 
@@ -126,9 +110,6 @@ export const ChatContextMenu: React.FC<ChatContextMenuProps> = ({
     activeNoteVisible ||
     activeWebTabVisible;
 
-  // Agent Mode only: with no "@ Add context" button and the status trigger
-  // living outside this row, an empty row is pure dead height above the
-  // editor — drop it. Legacy Chat must keep rendering (the "@" button below).
   if (isAgentMode && !hasContext) {
     return null;
   }
@@ -210,16 +191,6 @@ export const ChatContextMenu: React.FC<ChatContextMenuProps> = ({
           />
         ))}
       </div>
-
-      {indexingState.isActive && showIndexingCard && (
-        <>
-          <Separator orientation="vertical" />
-          <Button variant="ghost2" size="fit" className="tw-text-muted" onClick={showIndexingCard}>
-            <Loader2 className="tw-size-3 tw-animate-spin" />
-            <span className="tw-text-xs">Indexing...</span>
-          </Button>
-        </>
-      )}
     </div>
   );
 };

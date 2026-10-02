@@ -25,12 +25,8 @@ export interface MobileCardProps<T extends object> {
   id: string;
   item: T;
   title: string;
-  subtitle?: string;
-  badge?: React.ReactNode;
-  icon?: React.ReactNode;
   isDraggable?: boolean;
   isExpandable?: boolean;
-  defaultExpanded?: boolean;
   expandedContent?: React.ReactNode;
   primaryAction?: {
     icon: React.ReactNode;
@@ -40,27 +36,21 @@ export interface MobileCardProps<T extends object> {
   dropdownActions?: Array<MobileCardDropdownAction<T>>;
   containerRef?: React.RefObject<HTMLDivElement>;
   className?: string;
-  onExpandToggle?: (expanded: boolean) => void;
 }
 
 export function MobileCard<T extends object>({
   id,
   item,
   title,
-  subtitle,
-  badge,
-  icon,
   isDraggable = false,
   isExpandable = false,
-  defaultExpanded = false,
   expandedContent,
   primaryAction,
   dropdownActions = EMPTY_DROPDOWN_ACTIONS,
   containerRef,
   className,
-  onExpandToggle,
 }: MobileCardProps<T>) {
-  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id,
@@ -74,9 +64,7 @@ export function MobileCard<T extends object>({
 
   const handleExpandToggle = () => {
     if (isExpandable) {
-      const newExpanded = !isExpanded;
-      setIsExpanded(newExpanded);
-      onExpandToggle?.(newExpanded);
+      setIsExpanded(!isExpanded);
     }
   };
 
@@ -104,7 +92,6 @@ export function MobileCard<T extends object>({
     >
       <CardHeader className="tw-p-3">
         <div className="tw-flex tw-items-center tw-justify-between">
-          {/* Drag handle */}
           {isDraggable && (
             <div
               className="tw-mr-2 tw-cursor-grab tw-touch-none active:tw-cursor-grabbing"
@@ -115,14 +102,12 @@ export function MobileCard<T extends object>({
             </div>
           )}
 
-          {/* Main content area */}
           <div
             className="tw-flex-1 tw-touch-auto"
             onClick={isExpandable ? handleExpandToggle : undefined}
             style={{ cursor: isExpandable ? "pointer" : "default" }}
           >
             <div className="tw-flex tw-items-center tw-gap-2">
-              {/* Expand/collapse icon */}
               {isExpandable && (
                 <div className="tw-flex tw-size-3 tw-items-center tw-justify-center">
                   {isExpanded ? (
@@ -133,25 +118,12 @@ export function MobileCard<T extends object>({
                 </div>
               )}
 
-              {/* Custom icon */}
-              {icon && <div className="tw-flex tw-items-center tw-justify-center">{icon}</div>}
-
-              {/* Title and subtitle area */}
               <div className="tw-min-w-0 tw-flex-1">
-                <div className="tw-break-words tw-font-medium tw-leading-relaxed">
-                  {title}
-                  {badge && <span className="tw-ml-1 tw-inline-flex tw-items-center">{badge}</span>}
-                </div>
-                {subtitle && (
-                  <div className="tw-flex tw-items-center tw-gap-2">
-                    <span className="tw-bg-secondary tw-text-sm tw-text-muted">{subtitle}</span>
-                  </div>
-                )}
+                <div className="tw-break-words tw-font-medium tw-leading-relaxed">{title}</div>
               </div>
             </div>
           </div>
 
-          {/* Action buttons */}
           <div className="tw-flex tw-items-center tw-gap-2">
             {primaryAction && (
               <Button
@@ -197,7 +169,6 @@ export function MobileCard<T extends object>({
         </div>
       </CardHeader>
 
-      {/* Expandable content */}
       {isExpandable && (
         <div
           className={cn(

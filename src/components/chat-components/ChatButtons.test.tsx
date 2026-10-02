@@ -5,9 +5,6 @@ import { ChatButtons } from "@/components/chat-components/ChatButtons";
 import { USER_SENDER } from "@/constants";
 import type { ChatMessage } from "@/types/message";
 
-// `cleanMessageForCopy` is a thin stand-in here — its real sanitization is
-// covered in utils.test.ts. This keeps the heavy `@/utils` module (langchain,
-// luxon, obsidian) out of the component test.
 jest.mock("@/utils", () => ({
   cleanMessageForCopy: (s: string) => s,
 }));
@@ -29,12 +26,11 @@ function renderButtons(props: Partial<React.ComponentProps<typeof ChatButtons>>)
 }
 
 beforeAll(() => {
-  // Radix tooltip portals render into Obsidian's `activeDocument` global.
   (window as unknown as { activeDocument: Document }).activeDocument = window.document;
 });
 
-describe("ChatButtons lifecycle-action gating", () => {
-  describe("user message", () => {
+describe("ChatButtons", () => {
+  describe("ChatButtons() for a user message", () => {
     it("shows Edit and Delete when their handlers are provided", () => {
       renderButtons({ message: message(USER_SENDER), onEdit: () => {}, onDelete: () => {} });
       expect(screen.getByTitle("Copy")).toBeTruthy();
@@ -50,7 +46,7 @@ describe("ChatButtons lifecycle-action gating", () => {
     });
   });
 
-  describe("assistant message", () => {
+  describe("ChatButtons() for an assistant message", () => {
     it("shows Regenerate and Delete when their handlers are provided", () => {
       renderButtons({
         message: message("AI"),

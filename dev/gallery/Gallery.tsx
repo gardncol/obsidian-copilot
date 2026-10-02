@@ -40,7 +40,6 @@ export interface StoryDefinition {
   host: Host;
   id: string;
   layout: Layout;
-  /** Extra class for the `modal` host's frame; see `GalleryParameters`. */
   modalClass?: string;
   name: string;
   render(): React.ReactNode;
@@ -296,6 +295,17 @@ class GalleryStoryModal extends ReactModal {
     private readonly onDidClose: () => void
   ) {
     super(app, story.name, story.modalClass);
+    this.syncFrameWidth();
+  }
+
+  private getContentWidth(): string {
+    return this.story.layout === "fullscreen" ? "100%" : `${this.width}px`;
+  }
+
+  private syncFrameWidth(): void {
+    if (this.story.layout === "fullscreen") {
+      this.modalEl.style.width = `${this.width}px`;
+    }
   }
 
   protected renderContent(): React.ReactElement {
@@ -307,7 +317,7 @@ class GalleryStoryModal extends ReactModal {
         data-gallery-owner={this.ownerId}
         data-story={this.story.id}
         data-story-width={this.width}
-        style={{ maxWidth: "100%", width: this.width }}
+        style={{ maxWidth: "100%", width: this.getContentWidth() }}
       >
         {renderStoryContent(this.story)}
       </div>
@@ -321,10 +331,11 @@ class GalleryStoryModal extends ReactModal {
 
   setWidth(width: number): void {
     this.width = width;
+    this.syncFrameWidth();
     const storyElement = this.contentEl.querySelector<HTMLElement>("[data-story]");
     if (storyElement) {
       storyElement.dataset.storyWidth = String(width);
-      storyElement.style.width = `${width}px`;
+      storyElement.style.width = this.getContentWidth();
     }
   }
 }
@@ -679,12 +690,6 @@ function StoryTree({
   );
 }
 
-/**
- * Converts dynamically imported story modules into the stable catalog consumed by the gallery.
- *
- * @param storyModules - Loaded CSF modules paired with generator-derived component identities.
- * @param presentationalComponentCount - Number of presentational components found by the indexer.
- */
 export function createGalleryCatalog(
   storyModules: LoadedStoryModule[],
   presentationalComponentCount: number
@@ -744,12 +749,6 @@ export function createGalleryCatalog(
   };
 }
 
-/**
- * Restores only valid gallery state and falls back to the first available story when needed.
- *
- * @param value - ItemView state supplied by Obsidian or the current controlled gallery state.
- * @param stories - Available stories used to validate persisted identities.
- */
 export function resolveGalleryViewState(
   value: unknown,
   stories: StoryDefinition[]
@@ -777,11 +776,6 @@ export function resolveGalleryViewState(
   };
 }
 
-/**
- * Renders the gallery navigation and canvas while the ItemView remains the persistence owner.
- *
- * @param props - Catalog, persisted state, and the callback used to save user navigation changes.
- */
 export function Gallery({
   catalog,
   onHostChange,

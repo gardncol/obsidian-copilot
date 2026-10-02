@@ -1,11 +1,4 @@
-/**
- * Rotating opening lines for the Agent Home landing title. A frozen pool the UI
- * picks from at random each time the landing opens (see AgentHome) — no live LLM
- * call, matching how Claude/ChatGPT rotate their greetings from a curated set.
- * Keep entries short, friendly, and assistant-neutral (no name interpolation —
- * Obsidian doesn't expose one).
- */
-export const LANDING_GREETINGS: readonly string[] = Object.freeze([
+const LANDING_GREETINGS: readonly string[] = Object.freeze([
   "What can I help with?",
   "Where should we start?",
   "What's on your mind?",
@@ -22,7 +15,6 @@ export const LANDING_GREETINGS: readonly string[] = Object.freeze([
   "Ask me anything.",
 ]);
 
-/** Pick a random greeting from the pool. The pool is guaranteed non-empty. */
 export function pickRandomGreeting(): string {
   const index = Math.floor(Math.random() * LANDING_GREETINGS.length);
   return LANDING_GREETINGS[index];

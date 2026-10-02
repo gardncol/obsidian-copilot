@@ -58,7 +58,6 @@ Before doing any version bumping, validate the repo is releasable. Stop and surf
    ```
 
    Confirm that:
-
    - `isDesktopOnly` is declared (currently `false`; do not silently change this).
    - `minAppVersion` matches the Obsidian APIs the code actually uses. If a commit since the last release introduced a call that needs a newer minimum, the `minAppVersion` bump belongs in its own dedicated PR with its own review window, not bundled inside this release PR. Stop and tell the user.
 
@@ -225,7 +224,7 @@ EOF
 
 ### Step 8: Report Back
 
-Share the PR URL with the user and summarize what was included in the release.
+Share the PR URL with the user and summarize what was included in the release. Mention that commenting `/canary` on the PR publishes its current head as a BRAT-installable prerelease (`X.Y.Z-canary.N`) for testing before merge.
 
 ## Important Rules
 

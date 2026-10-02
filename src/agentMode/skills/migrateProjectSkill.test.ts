@@ -1,4 +1,10 @@
-import { migrateProjectSkill, type MigrateSkillFs } from "./migrateProjectSkill";
+import {
+  duplicateSourceDirsFor,
+  migrateProjectSkill,
+  type MigrateProjectSkillOptions,
+  type MigrateSkillFs,
+} from "./migrateProjectSkill";
+import type { Skill } from "./types";
 
 jest.mock("@/logger", () => ({
   logInfo: jest.fn(),
@@ -6,11 +12,6 @@ jest.mock("@/logger", () => ({
   logError: jest.fn(),
 }));
 
-/**
- * Capture a per-test mutable handle to the active in-memory FS so the
- * mocked `renameWithRetry` can operate on the same map as the FS adapter.
- * Set inside `mkFs` before any migration runs.
- */
 let activeRename: ((from: string, to: string) => void) | null = null;
 
 jest.mock("./renameWithRetry", () => ({
@@ -27,11 +28,6 @@ type Node =
   | { kind: "dir" }
   | { kind: "symlink"; target: string };
 
-/**
- * Build a small in-memory FS that's just rich enough for the migration
- * orchestration. Files are stored by absolute path; ancestor directories
- * are synthesized.
- */
 function mkFs(initial: Record<string, Node> = {}): MigrateSkillFs & {
   dump(): Record<string, Node>;
   blockSymlink(blocked: boolean): void;
@@ -48,11 +44,6 @@ function mkFs(initial: Record<string, Node> = {}): MigrateSkillFs & {
 
   let symlinkBlocked = false;
 
-  /**
-   * Move every entry in `map` whose key matches `from` or `from/...` to
-   * the corresponding `to` / `to/...` key. Synthesizes ancestor dirs of
-   * `to`. Mirrors POSIX `rename` for a directory subtree.
-   */
   function renameSubtree(from: string, to: string): void {
     if (!map.has(from)) {
       throw Object.assign(new Error(`ENOENT: ${from}`), { code: "ENOENT" });
@@ -103,7 +94,6 @@ function mkFs(initial: Record<string, Node> = {}): MigrateSkillFs & {
       if (map.has(linkPath)) {
         throw Object.assign(new Error(`EEXIST: ${linkPath}`), { code: "EEXIST" });
       }
-      // Ensure parent dir exists (mimics mkdir + symlink).
       const parent = linkPath.slice(0, linkPath.lastIndexOf("/"));
       if (parent.length > 0 && !map.has(parent)) map.set(parent, { kind: "dir" });
       map.set(linkPath, { kind: "symlink", target });
@@ -128,7 +118,6 @@ function mkFs(initial: Record<string, Node> = {}): MigrateSkillFs & {
       return e.content;
     },
     async writeFile(p, content) {
-      // Synthesize parent dir if missing.
       const parent = p.slice(0, p.lastIndexOf("/"));
       if (parent.length > 0 && !map.has(parent)) map.set(parent, { kind: "dir" });
       map.set(p, { kind: "file", content });
@@ -175,239 +164,169 @@ const skillMd = (name: string, agents = ""): string =>
     "body",
   ].join("\n");
 
+const CANONICAL = "/vault/copilot/skills";
+const CLAUDE_DIR = "/vault/.claude/skills";
+const CODEX_DIR = "/vault/.agents/skills";
+const OPENCODE_DIR = "/vault/.opencode/skills";
+const AGENT_DIRS = { claude: CLAUDE_DIR, codex: CODEX_DIR, opencode: OPENCODE_DIR };
+
+const migrate = (
+  fs: MigrateSkillFs,
+  overrides: Partial<MigrateProjectSkillOptions> = {}
+): ReturnType<typeof migrateProjectSkill> =>
+  migrateProjectSkill({
+    sourceName: "foo",
+    sourceDirAbs: `${CLAUDE_DIR}/foo`,
+    duplicateSourceDirsAbs: [],
+    canonicalAbsRoot: CANONICAL,
+    enabledAgentsAfter: ["claude"],
+    targetAgentDirsAbs: AGENT_DIRS,
+    preTakenNames: [],
+    fs,
+    ...overrides,
+  });
+
+const fileContent = (node: Node | undefined): string | undefined =>
+  node?.kind === "file" ? node.content : undefined;
+
+const symlinkTarget = (node: Node | undefined): string | undefined =>
+  node?.kind === "symlink" ? node.target : undefined;
+
 describe("migrateProjectSkill", () => {
-  const CANONICAL = "/vault/copilot/skills";
-  const CLAUDE_DIR = "/vault/.claude/skills";
-  const CODEX_DIR = "/vault/.agents/skills";
-  const OPENCODE_DIR = "/vault/.opencode/skills";
+  describe("migrateProjectSkill()", () => {
+    it("moves a single-source project skill into the canonical store and links it for every enabled agent", async () => {
+      const fs = mkFs({
+        [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
+      });
 
-  it("migrates a single-source project skill and creates symlinks at every enabled agent", async () => {
-    const fs = mkFs({
-      [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
+      const result = await migrate(fs, { enabledAgentsAfter: ["claude", "codex"] });
+
+      expect(result).toMatchObject({
+        ok: true,
+        resolvedName: "foo",
+        newDirPath: `${CANONICAL}/foo`,
+      });
+      const dump = fs.dump();
+      expect(fileContent(dump[`${CANONICAL}/foo/SKILL.md`])).toContain(`"claude,codex"`);
+      expect(dump[`${CLAUDE_DIR}/foo/SKILL.md`]).toBeUndefined();
+      expect(symlinkTarget(dump[`${CLAUDE_DIR}/foo`])).toBe(`${CANONICAL}/foo`);
+      expect(symlinkTarget(dump[`${CODEX_DIR}/foo`])).toBe(`${CANONICAL}/foo`);
     });
 
-    const result = await migrateProjectSkill({
-      sourceName: "foo",
-      sourceDirAbs: `${CLAUDE_DIR}/foo`,
-      duplicateSourceDirsAbs: [],
-      canonicalAbsRoot: CANONICAL,
-      enabledAgentsAfter: ["claude", "codex"],
-      targetAgentDirsAbs: {
-        claude: CLAUDE_DIR,
-        codex: CODEX_DIR,
-        opencode: OPENCODE_DIR,
-      },
-      preTakenNames: [],
-      fs,
+    it("deletes the mirrored duplicate and links every enabled agent to the canonical copy", async () => {
+      const fs = mkFs({
+        [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
+        [`${CODEX_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
+      });
+
+      const result = await migrate(fs, {
+        duplicateSourceDirsAbs: [`${CODEX_DIR}/foo`],
+        enabledAgentsAfter: ["claude", "codex", "opencode"],
+      });
+
+      expect(result.ok).toBe(true);
+      const dump = fs.dump();
+      expect(dump[`${CODEX_DIR}/foo/SKILL.md`]).toBeUndefined();
+      expect(dump[`${CLAUDE_DIR}/foo`]?.kind).toBe("symlink");
+      expect(dump[`${CODEX_DIR}/foo`]?.kind).toBe("symlink");
+      expect(dump[`${OPENCODE_DIR}/foo`]?.kind).toBe("symlink");
     });
 
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.resolvedName).toBe("foo");
-    expect(result.newDirPath).toBe(`${CANONICAL}/foo`);
+    it("stamps an empty enabled-agents list and creates no links when the last agent was disabled", async () => {
+      const fs = mkFs({
+        [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo", "claude") },
+      });
 
-    const dump = fs.dump();
-    // Canonical SKILL.md exists and was stamped with both agents.
-    const canonicalFile = dump[`${CANONICAL}/foo/SKILL.md`];
-    expect(canonicalFile?.kind).toBe("file");
-    if (canonicalFile?.kind === "file") {
-      expect(canonicalFile.content).toContain(`"claude,codex"`);
-    }
+      const result = await migrate(fs, { enabledAgentsAfter: [] });
 
-    // Source SKILL.md was consumed by the move (its contents now live
-    // under canonical). After replaceAgentLink, the agent dir holds a
-    // symlink at `<agent>/foo` pointing to canonical — see the symlink
-    // assertions just below.
-    expect(dump[`${CLAUDE_DIR}/foo/SKILL.md`]).toBeUndefined();
+      expect(result.ok).toBe(true);
+      const dump = fs.dump();
+      expect(fileContent(dump[`${CANONICAL}/foo/SKILL.md`])).toContain(
+        'copilot-enabled-agents: ""'
+      );
+      expect(dump[`${CLAUDE_DIR}/foo`]).toBeUndefined();
+    });
 
-    // After replaceAgentLink, each agent dir holds a symlink at
-    // <agent>/foo pointing into canonical (replacing the real dir we
-    // just moved out from under).
-    const claudeLink = dump[`${CLAUDE_DIR}/foo`];
-    const codexLink = dump[`${CODEX_DIR}/foo`];
-    expect(claudeLink?.kind).toBe("symlink");
-    expect(codexLink?.kind).toBe("symlink");
-    if (claudeLink?.kind === "symlink") {
-      expect(claudeLink.target).toBe(`${CANONICAL}/foo`);
-    }
-    if (codexLink?.kind === "symlink") {
-      expect(codexLink.target).toBe(`${CANONICAL}/foo`);
-    }
+    it("renames the skill with a numeric suffix when the canonical name is already taken", async () => {
+      const fs = mkFs({
+        [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
+        [`${CANONICAL}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
+      });
+
+      const result = await migrate(fs, { preTakenNames: ["foo"] });
+
+      expect(result).toMatchObject({
+        ok: true,
+        resolvedName: "foo-2",
+        newDirPath: `${CANONICAL}/foo-2`,
+      });
+      const dump = fs.dump();
+      expect(dump[`${CANONICAL}/foo-2/SKILL.md`]?.kind).toBe("file");
+      expect(dump[`${CLAUDE_DIR}/foo-2`]?.kind).toBe("symlink");
+    });
+
+    it("keeps a different real skill of the same name in a target agent slot instead of clobbering it", async () => {
+      const fs = mkFs({
+        [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
+        [`${CODEX_DIR}/foo/SKILL.md`]: { kind: "file", content: "DIFFERENT CONTENT B" },
+      });
+
+      const result = await migrate(fs, { enabledAgentsAfter: ["claude", "codex"] });
+
+      expect(result.ok).toBe(true);
+      const dump = fs.dump();
+      expect(dump[`${CANONICAL}/foo/SKILL.md`]?.kind).toBe("file");
+      expect(dump[`${CLAUDE_DIR}/foo`]?.kind).toBe("symlink");
+      expect(dump[`${CODEX_DIR}/foo`]?.kind).toBe("dir");
+      expect(fileContent(dump[`${CODEX_DIR}/foo/SKILL.md`])).toBe("DIFFERENT CONTENT B");
+    });
+
+    it("rolls the directory back to its source and fails when the moved SKILL.md cannot be parsed", async () => {
+      const fs = mkFs({
+        [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: "not valid frontmatter" },
+      });
+
+      const result = await migrate(fs);
+
+      expect(result.ok).toBe(false);
+      const dump = fs.dump();
+      expect(dump[`${CLAUDE_DIR}/foo/SKILL.md`]?.kind).toBe("file");
+      expect(dump[`${CANONICAL}/foo`]).toBeUndefined();
+    });
+
+    it("reports a mutated eperm failure and keeps the canonical copy when symlink creation is not permitted", async () => {
+      const fs = mkFs({
+        [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
+      });
+      fs.blockSymlink(true);
+
+      const result = await migrate(fs);
+
+      expect(result).toMatchObject({ ok: false, reason: "eperm", mutated: true });
+      expect(fs.dump()[`${CANONICAL}/foo/SKILL.md`]?.kind).toBe("file");
+    });
   });
 
-  it("migrates a mirrored project skill, deleting the duplicate", async () => {
-    const fs = mkFs({
-      [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
-      [`${CODEX_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
+  describe("duplicateSourceDirsFor()", () => {
+    const projectSkill = (agentDirs: Skill["enabledAgents"]): Skill => ({
+      name: "foo",
+      description: "A skill.",
+      filePath: `${CLAUDE_DIR}/foo/SKILL.md`,
+      dirPath: `${CLAUDE_DIR}/foo`,
+      body: "",
+      enabledAgents: [],
+      location: { kind: "project", agentDirs },
     });
 
-    const result = await migrateProjectSkill({
-      sourceName: "foo",
-      // Representative is the alphabetically-first agent's copy.
-      sourceDirAbs: `${CLAUDE_DIR}/foo`,
-      duplicateSourceDirsAbs: [`${CODEX_DIR}/foo`],
-      canonicalAbsRoot: CANONICAL,
-      enabledAgentsAfter: ["claude", "codex", "opencode"],
-      targetAgentDirsAbs: {
-        claude: CLAUDE_DIR,
-        codex: CODEX_DIR,
-        opencode: OPENCODE_DIR,
-      },
-      preTakenNames: [],
-      fs,
+    it("lists the mirrored directories of every agent except the representative copy", () => {
+      expect(duplicateSourceDirsFor(projectSkill(["claude", "codex"]), AGENT_DIRS)).toEqual([
+        `${CODEX_DIR}/foo`,
+      ]);
     });
 
-    expect(result.ok).toBe(true);
-    const dump = fs.dump();
-    // Duplicate is gone.
-    expect(dump[`${CODEX_DIR}/foo/SKILL.md`]).toBeUndefined();
-    // Symlinks created for all three agents.
-    expect(dump[`${CLAUDE_DIR}/foo`]?.kind).toBe("symlink");
-    expect(dump[`${CODEX_DIR}/foo`]?.kind).toBe("symlink");
-    expect(dump[`${OPENCODE_DIR}/foo`]?.kind).toBe("symlink");
-  });
-
-  it("refuses to clobber a different real skill of the same name in a target agent slot", async () => {
-    // Split-row case: `foo` in .claude (content A) and a DIFFERENT `foo`
-    // already in .agents (content B). Expanding the claude row to codex must
-    // NOT delete codex's real .agents/skills/foo — replaceAgentLink's
-    // real-dir branch would otherwise move it aside and rmRecursive it.
-    const fs = mkFs({
-      [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
-      [`${CODEX_DIR}/foo/SKILL.md`]: { kind: "file", content: "DIFFERENT CONTENT B" },
+    it("returns no directories for a canonical skill", () => {
+      const skill: Skill = { ...projectSkill([]), location: { kind: "canonical" } };
+      expect(duplicateSourceDirsFor(skill, AGENT_DIRS)).toEqual([]);
     });
-
-    const result = await migrateProjectSkill({
-      sourceName: "foo",
-      sourceDirAbs: `${CLAUDE_DIR}/foo`,
-      // Not a known duplicate — it's a different skill that merely shares the name.
-      duplicateSourceDirsAbs: [],
-      canonicalAbsRoot: CANONICAL,
-      enabledAgentsAfter: ["claude", "codex"],
-      targetAgentDirsAbs: { claude: CLAUDE_DIR, codex: CODEX_DIR, opencode: OPENCODE_DIR },
-      preTakenNames: [],
-      fs,
-    });
-
-    expect(result.ok).toBe(true);
-    const dump = fs.dump();
-    // Claude's copy migrated + linked.
-    expect(dump[`${CANONICAL}/foo/SKILL.md`]?.kind).toBe("file");
-    expect(dump[`${CLAUDE_DIR}/foo`]?.kind).toBe("symlink");
-    // Codex's DIFFERENT skill is preserved as a real dir — NOT replaced by a link.
-    expect(dump[`${CODEX_DIR}/foo`]?.kind).toBe("dir");
-    const codexFile = dump[`${CODEX_DIR}/foo/SKILL.md`];
-    expect(codexFile?.kind).toBe("file");
-    if (codexFile?.kind === "file") {
-      expect(codexFile.content).toBe("DIFFERENT CONTENT B");
-    }
-  });
-
-  it("suffixes the target name when the canonical name collides", async () => {
-    const fs = mkFs({
-      [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
-      [`${CANONICAL}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
-    });
-
-    const result = await migrateProjectSkill({
-      sourceName: "foo",
-      sourceDirAbs: `${CLAUDE_DIR}/foo`,
-      duplicateSourceDirsAbs: [],
-      canonicalAbsRoot: CANONICAL,
-      enabledAgentsAfter: ["claude"],
-      targetAgentDirsAbs: { claude: CLAUDE_DIR },
-      preTakenNames: ["foo"],
-      fs,
-    });
-
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.resolvedName).toBe("foo-2");
-    expect(result.newDirPath).toBe(`${CANONICAL}/foo-2`);
-    const dump = fs.dump();
-    expect(dump[`${CANONICAL}/foo-2/SKILL.md`]?.kind).toBe("file");
-    const claudeLink = dump[`${CLAUDE_DIR}/foo-2`];
-    expect(claudeLink?.kind).toBe("symlink");
-  });
-
-  it("migrates with an empty enabled-agents list (disable-last-agent flow)", async () => {
-    const fs = mkFs({
-      [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo", "claude") },
-    });
-
-    const result = await migrateProjectSkill({
-      sourceName: "foo",
-      sourceDirAbs: `${CLAUDE_DIR}/foo`,
-      duplicateSourceDirsAbs: [],
-      canonicalAbsRoot: CANONICAL,
-      enabledAgentsAfter: [],
-      targetAgentDirsAbs: { claude: CLAUDE_DIR },
-      preTakenNames: [],
-      fs,
-    });
-
-    expect(result.ok).toBe(true);
-    const dump = fs.dump();
-    // Canonical exists.
-    expect(dump[`${CANONICAL}/foo/SKILL.md`]?.kind).toBe("file");
-    // No symlink created at the agent dir.
-    expect(dump[`${CLAUDE_DIR}/foo`]).toBeUndefined();
-    // metadata.copilot-enabled-agents was stamped empty.
-    const canonical = dump[`${CANONICAL}/foo/SKILL.md`];
-    if (canonical?.kind === "file") {
-      expect(canonical.content).toContain('copilot-enabled-agents: ""');
-    }
-  });
-
-  it("rolls back the move when the moved SKILL.md fails to parse", async () => {
-    const fs = mkFs({
-      [`${CLAUDE_DIR}/foo/SKILL.md`]: {
-        kind: "file",
-        content: "not valid frontmatter",
-      },
-    });
-
-    const result = await migrateProjectSkill({
-      sourceName: "foo",
-      sourceDirAbs: `${CLAUDE_DIR}/foo`,
-      duplicateSourceDirsAbs: [],
-      canonicalAbsRoot: CANONICAL,
-      enabledAgentsAfter: ["claude"],
-      targetAgentDirsAbs: { claude: CLAUDE_DIR },
-      preTakenNames: [],
-      fs,
-    });
-
-    expect(result.ok).toBe(false);
-    // Source dir restored.
-    const dump = fs.dump();
-    expect(dump[`${CLAUDE_DIR}/foo/SKILL.md`]?.kind).toBe("file");
-    expect(dump[`${CANONICAL}/foo`]).toBeUndefined();
-  });
-
-  it("reports EPERM when symlink creation fails but leaves canonical in place", async () => {
-    const fs = mkFs({
-      [`${CLAUDE_DIR}/foo/SKILL.md`]: { kind: "file", content: skillMd("foo") },
-    });
-    fs.blockSymlink(true);
-
-    const result = await migrateProjectSkill({
-      sourceName: "foo",
-      sourceDirAbs: `${CLAUDE_DIR}/foo`,
-      duplicateSourceDirsAbs: [],
-      canonicalAbsRoot: CANONICAL,
-      enabledAgentsAfter: ["claude"],
-      targetAgentDirsAbs: { claude: CLAUDE_DIR },
-      preTakenNames: [],
-      fs,
-    });
-
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.reason).toBe("eperm");
-    expect(result.mutated).toBe(true);
-    // Canonical still exists — frontmatter is the source of truth.
-    const dump = fs.dump();
-    expect(dump[`${CANONICAL}/foo/SKILL.md`]?.kind).toBe("file");
   });
 });

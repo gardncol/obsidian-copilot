@@ -19,7 +19,6 @@ import { BREVILABS_MODELS_BASE_URL } from "@/constants";
 
 import * as obsidianModule from "obsidian";
 
-/** The obsidian mock's seam for stubbing `requestUrl` per test. */
 const { __setRequestUrlImpl: setRequestUrlImpl } = obsidianModule as unknown as {
   __setRequestUrlImpl: (impl: unknown) => void;
 };
@@ -27,20 +26,23 @@ const { __setRequestUrlImpl: setRequestUrlImpl } = obsidianModule as unknown as 
 interface RequestOutcome {
   data: unknown;
   error: Error | null;
+  status?: number;
+  detail?: { reason?: string; error?: string };
 }
 
-/**
- * Stub the private HTTP layer so the test drives `validateLicenseKey`'s
- * response handling without touching the network. `onRequest` runs at the
- * moment the request is in flight, which is where a concurrent key change has
- * to be injected to reproduce the overlap.
- */
 function stubRequest(outcome: RequestOutcome, onRequest?: () => void): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- reaching the private transport is the point
   (BrevilabsClient.getInstance() as any).makeRequest = async () => {
     onRequest?.();
-    return outcome;
+    return { status: outcome.error ? 500 : 200, ...outcome };
   };
+}
+
+function licenseRejection(keyPrefix: string): RequestOutcome {
+  const reason = `Invalid license key (prefix: ${keyPrefix}...)`;
+  const error = new Error(reason);
+  error.name = "FORBIDDEN";
+  return { data: null, error, status: 403, detail: { reason, error: "FORBIDDEN" } };
 }
 
 const VALID_LICENSE_RESPONSE = { entitlement: "signed-token", plan: "supporter" };
@@ -62,8 +64,50 @@ describe("brevilabsClient", () => {
     describe("validateLicenseKey()", () => {
       beforeEach(() => {
         jest.clearAllMocks();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- mirrors how stubRequest reaches it
+        delete (BrevilabsClient.getInstance() as any).makeRequest;
         mockApplyEntitlement.mockResolvedValue(true);
-        mockGetSettings.mockReturnValue({ plusLicenseKey: "key-A" });
+        mockGetSettings.mockReturnValue({ plusLicenseKey: "key-A", userId: "user-1" });
+      });
+
+      it("revokes entitlement for the 403 body the license endpoint actually returns", async () => {
+        setRequestUrlImpl(
+          jest.fn().mockResolvedValue({
+            status: 403,
+            json: {
+              detail: {
+                status: 403,
+                error: "FORBIDDEN",
+                message: "NO_PERMISSION",
+                reason: "Invalid license key (prefix: garbage-ke...)",
+              },
+            },
+          })
+        );
+
+        const result = await BrevilabsClient.getInstance().validateLicenseKey(
+          undefined,
+          MANUAL_LICENSE_CHECK
+        );
+
+        expect(result).toEqual({ isValid: false });
+        expect(mockTurnOffPaid).toHaveBeenCalled();
+      });
+
+      it("answers invalid without a request when no license key is stored (https://github.com/Brevilabs/obsidian-copilot-private/issues/307)", async () => {
+        mockGetSettings.mockReturnValue({ plusLicenseKey: "" });
+        const makeRequest = jest.fn();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- verifies the private HTTP boundary
+        (BrevilabsClient.getInstance() as any).makeRequest = makeRequest;
+
+        const result = await BrevilabsClient.getInstance().validateLicenseKey(
+          undefined,
+          MANUAL_LICENSE_CHECK
+        );
+
+        expect(result).toEqual({ isValid: false });
+        expect(makeRequest).not.toHaveBeenCalled();
+        expect(mockTurnOffPaid).not.toHaveBeenCalled();
       });
 
       it("applies the signed entitlement when the license key is unchanged", async () => {
@@ -133,8 +177,8 @@ describe("brevilabsClient", () => {
         }
       );
 
-      it("revokes entitlement when the server rejects the key", async () => {
-        stubRequest({ data: null, error: new Error("Invalid license key") });
+      it("revokes entitlement when the server answers 403, whatever the reason text says", async () => {
+        stubRequest(licenseRejection("key-A-gar"));
 
         const result = await BrevilabsClient.getInstance().validateLicenseKey(
           undefined,
@@ -145,10 +189,22 @@ describe("brevilabsClient", () => {
         expect(mockTurnOffPaid).toHaveBeenCalled();
       });
 
+      it.each([
+        ["a 502 from the gateway", 502],
+        ["an unexplained 403 from infrastructure", 403],
+      ])("leaves the entitlement alone for %s", async (_label, status) => {
+        stubRequest({ data: null, error: new Error(`HTTP error: ${status}`), status });
+
+        const result = await BrevilabsClient.getInstance().validateLicenseKey(
+          undefined,
+          MANUAL_LICENSE_CHECK
+        );
+
+        expect(result).toEqual({ isValid: undefined });
+        expect(mockTurnOffPaid).not.toHaveBeenCalled();
+      });
+
       it("discards a success that arrives after the license key changed", async () => {
-        // An eligible key's slow response landing after the user switched to a
-        // different key would otherwise re-grant that key's features — and
-        // re-persist its token — for the rest of the token's lifetime.
         stubRequest({ data: VALID_LICENSE_RESPONSE, error: null }, () => {
           mockGetSettings.mockReturnValue({ plusLicenseKey: "key-B" });
         });
@@ -164,9 +220,7 @@ describe("brevilabsClient", () => {
       });
 
       it("discards a rejection that arrives after the license key changed", async () => {
-        // The mirror case: a stale "Invalid license key" must not revoke the
-        // entitlement the user's newly entered key just earned.
-        stubRequest({ data: null, error: new Error("Invalid license key") }, () => {
+        stubRequest(licenseRejection("key-A-gar"), () => {
           mockGetSettings.mockReturnValue({ plusLicenseKey: "key-B" });
         });
 
@@ -189,8 +243,6 @@ describe("brevilabsClient", () => {
       });
 
       it("reads the usage endpoint on the MODELS host with the license key as bearer auth", async () => {
-        // The caps are enforced by the model proxy, so their read side lives beside
-        // them; api.brevilabs.com has no such route and answers 404.
         requestUrlMock.mockResolvedValue({
           status: 200,
           json: { used: { weekly: { usedPercent: 21 } } },
@@ -220,8 +272,6 @@ describe("brevilabsClient", () => {
         ["a non-200 response", () => requestUrlMock.mockResolvedValue({ status: 503 })],
         ["a thrown request", () => requestUrlMock.mockRejectedValue(new Error("offline"))],
       ])("answers null for %s rather than throwing", async (_label, arrange) => {
-        // This feeds a meter; a meter that cannot be drawn is not an error worth
-        // interrupting anyone over.
         arrange();
 
         await expect(BrevilabsClient.getInstance().getUsage()).resolves.toBeNull();

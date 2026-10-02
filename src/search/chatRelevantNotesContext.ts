@@ -1,0 +1,40 @@
+import type { RelatedContextRequest } from "@/miyo/MiyoClient";
+
+export interface ChatRelevantNotesContext {
+  id: string;
+  request: RelatedContextRequest;
+  skippedAttachments: number;
+}
+
+export class ChatRelevantNotesStore {
+  private current: ChatRelevantNotesContext | null = null;
+  private listeners = new Set<() => void>();
+  getSnapshot = (): ChatRelevantNotesContext | null => this.current;
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  };
+  select(context: ChatRelevantNotesContext | null): void {
+    if (this.current === context) return;
+    this.current = context;
+    this.listeners.forEach((listener) => listener());
+  }
+  update(context: ChatRelevantNotesContext): void {
+    if (this.current?.id === context.id) this.select(context);
+  }
+  clear(id: string): void {
+    if (this.current?.id === id) this.select(null);
+  }
+}
+
+const stores = new WeakMap<object, ChatRelevantNotesStore>();
+export function getChatRelevantNotesStore(app: object): ChatRelevantNotesStore {
+  let store = stores.get(app);
+  if (!store) {
+    store = new ChatRelevantNotesStore();
+    stores.set(app, store);
+  }
+  return store;
+}

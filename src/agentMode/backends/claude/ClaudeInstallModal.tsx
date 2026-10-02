@@ -1,7 +1,7 @@
+import { claudeSignInCommand } from "@/agentMode/backends/claude/cliSetup";
 import { ClaudeConfigView } from "@/agentMode/backends/claude/ui/ClaudeConfigView";
-import { CONFIG_MODAL_CLASS } from "@/agentMode/backends/shared/ui/ConfigDialogShell";
 import { useBackendAuthState } from "@/agentMode/session/useBackendAuthState";
-import { ReactModal } from "@/components/modals/ReactModal";
+import { FullBleedReactModal } from "@/components/modals/ReactModal";
 import { getSettings, setSettings, useSettingsValue } from "@/settings/model";
 import { validateExecutableFile } from "@/utils/detectBinary";
 import { App, Notice } from "obsidian";
@@ -15,12 +15,6 @@ import {
   type ClaudeDescriptor,
 } from "./descriptor";
 
-/**
- * Stateful half of the Claude Configure dialog: the only place that reads
- * settings, validates a pasted path, drives the CLI's sign-in, and raises
- * notices. Everything it computes is handed to {@link ClaudeConfigView} as
- * plain data.
- */
 const ClaudeConfigContainer: React.FC<{
   descriptor: ClaudeDescriptor;
   onClose: () => void;
@@ -67,20 +61,27 @@ const ClaudeConfigContainer: React.FC<{
         onSignIn: auth.signIn,
         signingIn: auth.signingIn,
         url: auth.url,
+        onCancel: auth.cancelSignIn,
+        failed: auth.failed,
+        signingOut: auth.signingOut,
+        onSignOut: auth.signOut,
+        terminalCommand: claudeSignInCommand(
+          binaryPath ? (binaryPathOverride ?? "claude") : undefined,
+          settings.agentMode?.backends?.claude?.envOverrides,
+          process.platform
+        ),
       }}
       onClose={onClose}
     />
   );
 };
 
-/** Configure dialog for the Claude backend. Opened via `descriptor.openInstallUI`. */
-export class ClaudeInstallModal extends ReactModal {
+export class ClaudeInstallModal extends FullBleedReactModal {
   constructor(
     app: App,
     private readonly descriptor: ClaudeDescriptor
   ) {
-    // No native title: ConfigDialogShell draws its own heading beside the badge.
-    super(app, undefined, CONFIG_MODAL_CLASS);
+    super(app);
   }
 
   protected renderContent(close: () => void): React.ReactElement {

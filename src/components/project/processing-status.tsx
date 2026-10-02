@@ -1,14 +1,4 @@
-/**
- * Content conversion status panel for project context.
- *
- * Shows non-markdown files and URLs that need conversion,
- * grouped by source (Files vs URLs). Supports retry for failed items.
- * Adapted from the prototype's ProcessingStatus component.
- */
-
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Progress } from "@/components/ui/progress";
 import { TruncatedText } from "@/components/TruncatedText";
 import type { ProcessingItem } from "@/components/project/processingAdapter";
@@ -18,44 +8,22 @@ import {
   ProcessingStatusIcon,
 } from "@/components/project/processingItemStatusView";
 import {
-  AlertCircle,
   ArrowUpRight,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  Clock,
   FileImage,
   FileText,
   FileVideo,
   FolderOpen,
   Globe,
-  HelpCircle,
-  Loader2,
   RefreshCw,
-  X,
 } from "lucide-react";
 import React, { useCallback, useRef, useState } from "react";
 
 interface ProcessingStatusProps {
   items: ProcessingItem[];
-  /** Optional: only provided for the currently active project. */
-  onRetry?: (id: string) => void;
-  /** Optional: callback to open a cached item's parsed content (file or URL). */
   onOpenCachedItem?: (item: ProcessingItem) => void;
-  /** Optional: callback to remove a failed URL from the project config. */
-  onRemoveUrl?: (item: ProcessingItem) => void;
-  defaultExpanded?: boolean;
   maxHeight?: string;
-  /** When false, hides the title and description. Use for embedding inside another panel. */
-  showHeader?: boolean;
-  /** Optional: retry by full item — agent per-source retry needs `cacheKind`,
-   * which `onRetry(id)` can't carry. Takes precedence over `onRetry`. */
   onRetryItem?: (item: ProcessingItem) => void;
-  /** Optional: "N markdown files — no conversion needed" note under From Files. */
   skippedMarkdownCount?: number;
-  /** When true, render the grouped list directly without the collapsible summary
-   * bar — for a modal that supplies its own header / filter / footer chrome. */
-  hideSummaryBar?: boolean;
 }
 
 function FileTypeIcon({ fileType }: { fileType: ProcessingItem["fileType"] }) {
@@ -74,19 +42,6 @@ function FileTypeIcon({ fileType }: { fileType: ProcessingItem["fileType"] }) {
   }
 }
 
-/** Returns counts for each status category, including unsupported. */
-function getStatusCounts(items: ProcessingItem[]) {
-  return {
-    ready: items.filter((i) => i.status === "ready").length,
-    processing: items.filter((i) => i.status === "processing").length,
-    failed: items.filter((i) => i.status === "failed").length,
-    pending: items.filter((i) => i.status === "pending").length,
-    unsupported: items.filter((i) => i.status === "unsupported").length,
-    total: items.length,
-  };
-}
-
-/** Status priority for sorting: active/problematic items first, completed last. */
 const STATUS_SORT_PRIORITY: Record<ProcessingItem["status"], number> = {
   processing: 0,
   failed: 1,
@@ -95,7 +50,6 @@ const STATUS_SORT_PRIORITY: Record<ProcessingItem["status"], number> = {
   ready: 4,
 };
 
-/** Sort items by status priority. Same-status items retain their original relative order. */
 function sortByStatusPriority(items: ProcessingItem[]): ProcessingItem[] {
   return [...items].sort(
     (a, b) => (STATUS_SORT_PRIORITY[a.status] ?? 99) - (STATUS_SORT_PRIORITY[b.status] ?? 99)
@@ -104,24 +58,14 @@ function sortByStatusPriority(items: ProcessingItem[]): ProcessingItem[] {
 
 export function ProcessingStatus({
   items,
-  onRetry,
   onOpenCachedItem,
-  onRemoveUrl,
-  defaultExpanded = false,
   maxHeight,
-  showHeader = true,
   onRetryItem,
   skippedMarkdownCount = 0,
-  hideSummaryBar = false,
 }: ProcessingStatusProps) {
-  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
-  const counts = getStatusCounts(items);
-
   const sortedFileItems = sortByStatusPriority(items.filter((i) => i.source === "file"));
   const sortedUrlItems = sortByStatusPriority(items.filter((i) => i.source === "url"));
 
-  // The grouped From Files / From URLs body, shared by the collapsible (CAG /
-  // embedded) and the bare (modal) layouts.
   const groupsBody = (
     <div className="tw-space-y-3 tw-p-3">
       {sortedFileItems.length > 0 && (
@@ -137,7 +81,6 @@ export function ProcessingStatus({
               <ProcessingItemRow
                 key={processingItemKey(item)}
                 item={item}
-                onRetry={onRetry}
                 onRetryItem={onRetryItem}
                 onOpenCached={onOpenCachedItem ? () => onOpenCachedItem(item) : undefined}
               />
@@ -165,10 +108,8 @@ export function ProcessingStatus({
               <ProcessingItemRow
                 key={processingItemKey(item)}
                 item={item}
-                onRetry={onRetry}
                 onRetryItem={onRetryItem}
                 onOpenCached={onOpenCachedItem ? () => onOpenCachedItem(item) : undefined}
-                onRemove={onRemoveUrl ? () => onRemoveUrl(item) : undefined}
               />
             ))}
           </ScrollableList>
@@ -179,19 +120,6 @@ export function ProcessingStatus({
 
   return (
     <div className="tw-space-y-2">
-      {/* Title Row — hidden when embedded inside another panel */}
-      {showHeader && (
-        <div className="tw-space-y-1">
-          <div className="tw-flex tw-items-center tw-gap-2">
-            <h4 className="tw-text-sm tw-font-medium tw-text-normal">Content Conversion</h4>
-          </div>
-          <p className="tw-text-ui-smaller tw-text-muted">
-            Non-markdown files (PDF, images, web pages, ...) are converted to text for AI.
-          </p>
-        </div>
-      )}
-
-      {/* Empty state when no non-markdown files or URLs exist */}
       {items.length === 0 && (
         <div className="tw-rounded-lg tw-border tw-border-border tw-p-3 tw-bg-muted/10">
           <div className="tw-text-ui-smaller tw-text-muted">
@@ -200,93 +128,13 @@ export function ProcessingStatus({
         </div>
       )}
 
-      {/* Status Panel — only when there are items to show */}
-      {items.length > 0 &&
-        (hideSummaryBar ? (
-          <div className="tw-rounded-lg tw-border tw-border-border">{groupsBody}</div>
-        ) : (
-          <div className="tw-rounded-lg tw-border tw-border-border">
-            <Collapsible open={isExpanded} onOpenChange={setIsExpanded}>
-              {/* Summary Bar */}
-              <CollapsibleTrigger asChild>
-                <Button
-                  variant="secondary"
-                  className=" tw-flex tw-h-auto tw-w-full tw-items-center tw-justify-between tw-rounded-lg tw-p-3 tw-text-left tw-transition-colors hover:tw-bg-modifier-hover"
-                >
-                  <div className="tw-flex tw-items-center tw-gap-2">
-                    <div className="tw-flex tw-items-center tw-gap-1.5">
-                      {counts.ready > 0 && (
-                        <Badge
-                          variant="secondary"
-                          className="tw-h-5 tw-gap-1 tw-bg-success tw-px-1.5 tw-text-ui-smaller tw-text-success"
-                        >
-                          <CheckCircle2 className="tw-size-3" />
-                          {counts.ready}
-                        </Badge>
-                      )}
-                      {counts.processing > 0 && (
-                        <Badge
-                          variant="secondary"
-                          className="tw-h-5 tw-gap-1 tw-px-1.5 tw-text-ui-smaller"
-                        >
-                          <Loader2 className="tw-size-3 tw-animate-spin" />
-                          {counts.processing}
-                        </Badge>
-                      )}
-                      {counts.pending > 0 && (
-                        <Badge
-                          variant="secondary"
-                          className="tw-h-5 tw-gap-1 tw-px-1.5 tw-text-ui-smaller"
-                        >
-                          <Clock className="tw-size-3" />
-                          {counts.pending}
-                        </Badge>
-                      )}
-                      {counts.failed > 0 && (
-                        <Badge
-                          variant="secondary"
-                          className="tw-h-5 tw-gap-1 tw-bg-error tw-px-1.5 tw-text-ui-smaller tw-text-error"
-                        >
-                          <AlertCircle className="tw-size-3" />
-                          {counts.failed}
-                        </Badge>
-                      )}
-                      {/* Reason: unsupported items get a neutral gray badge to distinguish
-                        them from errors — they're not failures, just unprocessable file types. */}
-                      {counts.unsupported > 0 && (
-                        <Badge
-                          variant="secondary"
-                          className="tw-h-5 tw-gap-1 tw-px-1.5 tw-text-ui-smaller tw-text-muted"
-                        >
-                          <HelpCircle className="tw-size-3" />
-                          {counts.unsupported}
-                        </Badge>
-                      )}
-                    </div>
-                    <span className="tw-text-ui-smaller tw-text-muted">{counts.total} items</span>
-                  </div>
-                  {isExpanded ? (
-                    <ChevronDown className="tw-size-4 tw-text-muted" />
-                  ) : (
-                    <ChevronRight className="tw-size-4 tw-text-muted" />
-                  )}
-                </Button>
-              </CollapsibleTrigger>
-
-              <CollapsibleContent>
-                <div className="tw-border-t tw-border-border">{groupsBody}</div>
-              </CollapsibleContent>
-            </Collapsible>
-          </div>
-        ))}
+      {items.length > 0 && (
+        <div className="tw-rounded-lg tw-border tw-border-border">{groupsBody}</div>
+      )}
     </div>
   );
 }
 
-/**
- * Scroll container with a bottom fade mask when content overflows.
- * Reuses the existing `.copilot-fade-mask-bottom` CSS class from PatternListEditor.
- */
 function ScrollableList({ maxHeight, children }: { maxHeight: string; children: React.ReactNode }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [isOverflowing, setIsOverflowing] = useState(false);
@@ -301,7 +149,6 @@ function ScrollableList({ maxHeight, children }: { maxHeight: string; children: 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // Reason: hide fade mask when scrolled to bottom
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 4;
     setIsOverflowing(!atBottom);
   }, []);
@@ -325,23 +172,15 @@ function ScrollableList({ maxHeight, children }: { maxHeight: string; children: 
 
 function ProcessingItemRow({
   item,
-  onRetry,
   onRetryItem,
   onOpenCached,
-  onRemove,
 }: {
   item: ProcessingItem;
-  onRetry?: (id: string) => void;
-  /** Full-item retry (agent per-source); takes precedence over `onRetry`. */
   onRetryItem?: (item: ProcessingItem) => void;
-  /** Callback to open the cached parsed content for this file item. */
   onOpenCached?: () => void;
-  /** Callback to remove this URL from the project config. Only for URL items. */
-  onRemove?: () => void;
 }) {
   const isProcessing = item.status === "processing";
   const isFailed = item.status === "failed";
-  // Reason: show open button for any item that is ready with actual content (file or URL)
   const canOpenCached = onOpenCached && item.status === "ready" && !item.contentEmpty;
 
   return (
@@ -369,9 +208,6 @@ function ProcessingItemRow({
                   <ArrowUpRight className="tw-size-4" />
                 </Button>
               )}
-              {/* Reason: ready items only show the checkmark icon, no text label —
-                  the icon is sufficient and saves horizontal space for the name.
-                  Exception: contentEmpty items need a visible "No content" label. */}
               {(item.status !== "ready" || item.contentEmpty) && (
                 <span className="tw-text-ui-smaller tw-text-muted">
                   {getProcessingStatusLabel(item.status, item.contentEmpty)}
@@ -383,7 +219,6 @@ function ProcessingItemRow({
         </div>
       </div>
 
-      {/* Progress bar for processing items */}
       {isProcessing && item.progress !== undefined && (
         <div className="tw-mt-2 tw-flex tw-items-center tw-gap-2">
           <Progress value={item.progress} className="tw-h-1.5 tw-flex-1" />
@@ -391,45 +226,25 @@ function ProcessingItemRow({
         </div>
       )}
 
-      {/* Error row for failed items:
-          - Retry icon only when onRetry is provided (i.e. active project).
-          - Remove icon only when onRemove is provided (URL items only).
-          - Non-active projects display the error text without actions. */}
       {isFailed && (
         <div className="tw-mt-2 tw-flex tw-items-center tw-justify-between">
           <TruncatedText className="tw-flex-1 tw-text-ui-smaller tw-text-error">
             {item.error || "Conversion failed"}
           </TruncatedText>
           <div className="tw-flex tw-shrink-0 tw-items-center tw-gap-1">
-            {(onRetry || onRetryItem) && (
+            {onRetryItem && (
               <Button
                 variant="ghost2"
                 size="icon"
                 aria-label="Retry"
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (onRetryItem) onRetryItem(item);
-                  else onRetry?.(item.id);
+                  onRetryItem(item);
                 }}
                 title="Retry"
                 className="tw-size-5 tw-text-muted hover:tw-text-accent"
               >
                 <RefreshCw className="tw-size-3.5" />
-              </Button>
-            )}
-            {onRemove && (
-              <Button
-                variant="ghost2"
-                size="icon"
-                aria-label="Remove URL from project"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onRemove();
-                }}
-                title="Remove URL from project"
-                className="tw-size-5 tw-text-muted hover:tw-text-error"
-              >
-                <X className="tw-size-3.5" />
               </Button>
             )}
           </div>

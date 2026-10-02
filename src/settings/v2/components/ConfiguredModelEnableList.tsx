@@ -8,6 +8,7 @@ import { logError } from "@/logger";
 import {
   backendsAtom,
   configuredModelsAtom,
+  copilotPlusCatalogAtom,
   providersAtom,
   useModelManagement,
   type AgentType,
@@ -22,29 +23,16 @@ interface ConfiguredModelEnableListProps {
   descriptor: BackendDescriptor;
 }
 
-/** Frozen empty fallback so an untouched backend's enabled set is a stable reference. */
 const EMPTY_ENABLED: readonly string[] = Object.freeze([]);
 
-/**
- * Hoisted to module scope to stay referentially stable across renders (an
- * inline arrow would invalidate the partition memo every render).
- */
 const isOpencodeRoutableProvider = (
   provider: Parameters<typeof mapProviderToOpencodeId>[0]
 ): boolean => mapProviderToOpencodeId(provider) !== null;
 
-/**
- * Renders the shared `ModelEnableList` for one agent backend, sourcing
- * candidates from the `configuredModels` registry and toggling through
- * `BackendConfigRegistry`. opencode shows BYOK/Plus models plus its own
- * agent-origin models; claude/codex show only their agent-origin models.
- * Disabled rows stay visible.
- */
 export const ConfiguredModelEnableList: React.FC<ConfiguredModelEnableListProps> = ({
   descriptor,
 }) => {
   const api = useModelManagement();
-  // A backend's id doubles as its model-management AgentType.
   const agentType = descriptor.id as AgentType;
 
   const configuredModels = useAtomValue(configuredModelsAtom, { store: settingsStore });
@@ -73,16 +61,19 @@ export const ConfiguredModelEnableList: React.FC<ConfiguredModelEnableListProps>
     [configuredModels, providers, enabledIds, agentType, isOpencode]
   );
 
-  // Ask the provider rows, as both pickers do, rather than letting the grouping
-  // infer a missing license from the rows it just built: registering the provider
-  // and reconciling its models are separate writes, so a licensed user can hold
-  // the provider with nothing under it, and that user must not be shown a locked
-  // group telling them a license is required.
   const copilotProviderMissing = shouldPreviewCopilotModels(providers);
+  const copilotPlusCatalog = useAtomValue(copilotPlusCatalogAtom, { store: settingsStore });
 
   const groups = React.useMemo<ModelEnableGroup[]>(
-    () => buildModelEnableGroups(partition, isOpencode, query, copilotProviderMissing),
-    [partition, isOpencode, query, copilotProviderMissing]
+    () =>
+      buildModelEnableGroups(
+        partition,
+        isOpencode,
+        query,
+        copilotProviderMissing,
+        copilotPlusCatalog
+      ),
+    [partition, isOpencode, query, copilotProviderMissing, copilotPlusCatalog]
   );
 
   const handleToggle = React.useCallback(
@@ -117,9 +108,6 @@ export const ConfiguredModelEnableList: React.FC<ConfiguredModelEnableListProps>
       onQueryChange={setQuery}
       searchPlaceholder={`Search ${descriptor.displayName} models…`}
       emptyState={emptyState}
-      // Only the first provider group starts expanded; the rest collapse so a
-      // long multi-provider list (opencode) opens compact. A stable scalar, so
-      // it doesn't churn the list's collapse state across renders.
       defaultOpenGroupKey={groups[0]?.key}
     />
   );

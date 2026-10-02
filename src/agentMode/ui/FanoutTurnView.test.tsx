@@ -6,8 +6,6 @@ import type {
   FanoutTurn,
 } from "@/agentMode/session/fanout/fanoutTypes";
 
-// Render markdown as plain text so the test doesn't pull in Obsidian's
-// renderer (mirrors AgentTrailView.test.tsx).
 jest.mock("@/agentMode/ui/AgentMarkdownText", () => ({
   AgentMarkdownText: ({ text }: { text: string }) => <div data-testid="agent-md">{text}</div>,
 }));
@@ -46,8 +44,6 @@ function turn(
 
 const app = { workspace: { getActiveFile: () => null } } as never;
 
-// FanoutTurnView is controlled (the card owns the selected tab); a tiny stateful
-// harness supplies value/onSelect so a tab click still switches the body.
 const Harness: React.FC<{ t: FanoutTurn }> = ({ t }) => {
   const [value, setValue] = useState<FanoutOptionValue>(() => defaultFanoutOption(t));
   return <FanoutTurnView turn={t} app={app} value={value} onSelect={setValue} />;
@@ -56,14 +52,36 @@ const Harness: React.FC<{ t: FanoutTurn }> = ({ t }) => {
 const renderView = (t: FanoutTurn) => render(<Harness t={t} />);
 
 describe("FanoutTurnView", () => {
-  it("defaults to the summary view (summary-first)", () => {
-    const t = turn([answer("opencode", "done", "main")], "the narrative summary");
-    renderView(t);
-    expect(screen.getByTestId("agent-md").textContent).toBe("the narrative summary");
+  it("https://github.com/Brevilabs/obsidian-copilot-private/issues/481 shows only the sole mentioned agent and its answer", () => {
+    renderView(turn([answer("claude", "done", "Claude answered directly")]));
+
+    expect(screen.queryByRole("tab", { name: "Summary" })).toBeNull();
+    expect(screen.getByRole("tab", { name: /Claude/ }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByTestId("agent-md").textContent).toBe("Claude answered directly");
   });
 
+  it.each(["", "Partial summary"])(
+    "https://github.com/Brevilabs/obsidian-copilot-private/issues/219 shows the summary failure alongside any partial text: %s",
+    (partialText) => {
+      const t = turn(
+        [
+          answer("opencode", "done", "Successful answer"),
+          answer("claude", "done", "Second answer"),
+        ],
+        partialText
+      );
+      t.summary.error = "Choose an explicit effort or update the Codex adapter.";
+      renderView(t);
+      expect(screen.getByText(t.summary.error)).toBeTruthy();
+      expect(screen.queryByText("Summary unavailable")).toBeNull();
+      if (partialText) expect(screen.getByTestId("agent-md").textContent).toBe(partialText);
+      fireEvent.click(screen.getByRole("tab", { name: /opencode/ }));
+      expect(screen.getByTestId("agent-md").textContent).toBe("Successful answer");
+    }
+  );
+
   it("shows a pending placeholder when the summary has no text yet", () => {
-    const t = turn([answer("opencode", "running")], "", "pending");
+    const t = turn([answer("opencode", "running"), answer("claude", "running")], "", "pending");
     renderView(t);
     expect(screen.queryByTestId("agent-md")).toBeNull();
     expect(screen.getByText(/Waiting for answers/)).toBeTruthy();
@@ -75,15 +93,12 @@ describe("FanoutTurnView", () => {
       "the narrative summary"
     );
     renderView(t);
-    // Summary first.
     expect(screen.getByTestId("agent-md").textContent).toBe("the narrative summary");
     fireEvent.click(screen.getByRole("tab", { name: /opencode/ }));
     expect(screen.getByTestId("agent-md").textContent).toBe("OPENCODE_BODY");
   });
 
   it("shows 'did not answer' (not 'Thinking…') for a finished slot with no text", () => {
-    // Regression: a done-but-empty slot was showing a green check + "Thinking…",
-    // reading as both finished and still working at once.
     const t = turn([answer("opencode", "done", "")], "the narrative summary");
     renderView(t);
     fireEvent.click(screen.getByRole("tab", { name: /opencode/ }));

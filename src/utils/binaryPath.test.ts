@@ -12,9 +12,10 @@ import {
   WELL_KNOWN_BIN_DIRS,
 } from "./binaryPath";
 
-// Isolate binaryPath's merging/ordering from the live version-manager probe;
-// the resolver's own behavior is covered in nodeToolBinDirs.test.ts.
 jest.mock("@/utils/nodeToolBinDirs", () => ({ resolveNodeToolBinDirs: jest.fn(() => []) }));
+
+const nativeWellKnownDirs = process.platform === "win32" ? [] : WELL_KNOWN_BIN_DIRS;
+const inheritedPath = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(path.delimiter);
 
 const resolveMock = resolveNodeToolBinDirs as jest.MockedFunction<typeof resolveNodeToolBinDirs>;
 
@@ -23,16 +24,21 @@ describe("binaryPath", () => {
 
   describe("mergePath()", () => {
     test("prepends candidates and dedupes against inherited PATH", () => {
-      const result = mergePath(["/opt/homebrew/bin", "/usr/local/bin"], "/usr/bin:/bin");
-      expect(result).toBe("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+      const result = mergePath(
+        ["/opt/homebrew/bin", "/usr/local/bin"],
+        ["/usr/bin", "/bin"].join(path.delimiter)
+      );
+      expect(result).toBe(
+        ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].join(path.delimiter)
+      );
     });
 
     test("drops duplicates while preserving first-seen order", () => {
       const result = mergePath(
         ["/opt/homebrew/bin", "/usr/bin"],
-        "/usr/bin:/bin:/opt/homebrew/bin"
+        ["/usr/bin", "/bin", "/opt/homebrew/bin"].join(path.delimiter)
       );
-      expect(result).toBe("/opt/homebrew/bin:/usr/bin:/bin");
+      expect(result).toBe(["/opt/homebrew/bin", "/usr/bin", "/bin"].join(path.delimiter));
     });
 
     test("handles undefined / empty inherited PATH", () => {
@@ -47,34 +53,24 @@ describe("binaryPath", () => {
       resolveMock.mockReturnValue([nvmBin]);
       const dirs = detectionSearchDirs();
       expect(dirs[0]).toBe(nvmBin);
-      expect(dirs.indexOf(nvmBin)).toBeLessThan(dirs.indexOf("/opt/homebrew/bin"));
-      expect(dirs).toEqual([nvmBin, ...WELL_KNOWN_BIN_DIRS]);
+      expect(dirs).toEqual([nvmBin, ...nativeWellKnownDirs]);
     });
   });
 
   describe("augmentPathForDetection()", () => {
-    test("prepends all well-known dirs ahead of the inherited PATH", () => {
-      const result = augmentPathForDetection("/usr/bin:/bin");
-      const parts = result.split(":");
-      for (const dir of WELL_KNOWN_BIN_DIRS) {
-        expect(parts).toContain(dir);
-      }
-      // Homebrew must come before whatever launchd already had.
-      expect(parts.indexOf("/opt/homebrew/bin")).toBeLessThan(parts.indexOf("/usr/bin"));
-    });
-
     test("prepends a discovered version-manager dir ahead of the inherited PATH", () => {
       const nvmBin = "/home/me/.nvm/versions/node/v20.18.0/bin";
       resolveMock.mockReturnValue([nvmBin]);
-      const parts = augmentPathForDetection("/usr/bin:/bin:/usr/sbin:/sbin").split(":");
+      const parts = augmentPathForDetection(inheritedPath).split(path.delimiter);
       expect(parts[0]).toBe(nvmBin);
       expect(parts.indexOf(nvmBin)).toBeLessThan(parts.indexOf("/usr/bin"));
     });
 
-    test("covers the sparse launchd PATH that triggers the bug", () => {
-      // This is the exact PATH Obsidian sees when launched from Finder/Dock.
-      const result = augmentPathForDetection("/usr/bin:/bin:/usr/sbin:/sbin");
-      expect(result.split(":")).toContain("/opt/homebrew/bin");
+    test("https://github.com/logancyang/obsidian-copilot/issues/2967 augments sparse PATH without POSIX prefixes on Windows", () => {
+      const result = augmentPathForDetection(inheritedPath);
+      expect(result.split(path.delimiter)).toEqual([
+        ...new Set([...nativeWellKnownDirs, ...inheritedPath.split(path.delimiter)]),
+      ]);
     });
 
     test("throws the desktop-only error on non-desktop runtimes instead of a TypeError", () => {
@@ -109,9 +105,6 @@ describe("binaryPath", () => {
 
   describe("module evaluation", () => {
     test("does not require Node built-ins at module evaluation time", () => {
-      // The module is on the eager settings-UI import graph, which mobile also
-      // evaluates; an eval-time require of a Node built-in would crash the
-      // plugin at load there.
       const throwingIds = ["os", "fs", "path", "node:os", "node:fs", "node:path"];
       try {
         jest.isolateModules(() => {

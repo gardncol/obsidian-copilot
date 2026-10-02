@@ -5,10 +5,6 @@ import { ToolManager } from "@/tools/toolManager";
 import { ToolRegistry } from "@/tools/ToolRegistry";
 import { err2String } from "@/utils";
 
-/**
- * Represents a tool call with name and arguments.
- * Used by native tool calling flow.
- */
 export interface ToolCall {
   name: string;
   args: Record<string, unknown>;
@@ -18,25 +14,17 @@ interface ToolExecutionResult {
   toolName: string;
   result: string;
   success: boolean;
-  /**
-   * Optional display-friendly version of the tool result for UI rendering.
-   * When absent, fallback to `result` for display purposes.
-   */
   displayResult?: string;
 }
 
-/**
- * Executes a single tool call with timeout and error handling
- */
 export async function executeSequentialToolCall(
   toolCall: ToolCall,
   availableTools: Pick<StructuredTool, "name" | "invoke">[],
   originalUserMessage?: string
 ): Promise<ToolExecutionResult> {
-  const DEFAULT_TOOL_TIMEOUT = 120000; // 120 seconds timeout per tool
+  const DEFAULT_TOOL_TIMEOUT = 120000;
 
   try {
-    // Validate tool call
     if (!toolCall || !toolCall.name) {
       return {
         toolName: toolCall?.name || "unknown",
@@ -45,7 +33,6 @@ export async function executeSequentialToolCall(
       };
     }
 
-    // Find the tool in the existing tool registry
     const tool = availableTools.find((t) => t.name === toolCall.name);
 
     if (!tool) {
@@ -57,25 +44,21 @@ export async function executeSequentialToolCall(
       };
     }
 
-    // Get tool metadata from registry
     const registry = ToolRegistry.getInstance();
     const metadata = registry.getToolMetadata(toolCall.name);
 
-    // Check if tool requires Plus subscription
     if (metadata?.isPlusOnly) {
-      // BYOK users can use all tools without Plus license
-      // Only require a configured API key (any provider)
       const hasApiKey = Boolean(
         getSettings().openAIApiKey ||
-          getSettings().openRouterAiApiKey ||
-          getSettings().anthropicApiKey ||
-          getSettings().googleApiKey ||
-          getSettings().mistralApiKey ||
-          getSettings().deepseekApiKey ||
-          getSettings().xaiApiKey ||
-          getSettings().huggingfaceApiKey ||
-          getSettings().cohereApiKey ||
-          getSettings().siliconflowApiKey
+        getSettings().openRouterAiApiKey ||
+        getSettings().anthropicApiKey ||
+        getSettings().googleApiKey ||
+        getSettings().mistralApiKey ||
+        getSettings().deepseekApiKey ||
+        getSettings().xaiApiKey ||
+        getSettings().huggingfaceApiKey ||
+        getSettings().cohereApiKey ||
+        getSettings().siliconflowApiKey
       );
       if (!hasApiKey) {
         return {
@@ -86,15 +69,12 @@ export async function executeSequentialToolCall(
       }
     }
 
-    // Prepare tool arguments
     const toolArgs = { ...toolCall.args };
 
-    // If tool requires user message content and it's provided, inject it
     if (metadata?.requiresUserMessageContent && originalUserMessage) {
       toolArgs._userMessageContent = originalUserMessage;
     }
 
-    // Determine timeout for this tool
     let timeout = DEFAULT_TOOL_TIMEOUT;
     if (typeof metadata?.timeoutMs === "number") {
       timeout = metadata.timeoutMs;
@@ -102,10 +82,8 @@ export async function executeSequentialToolCall(
 
     let result;
     if (!timeout || timeout === Infinity) {
-      // No timeout for this tool
       result = await ToolManager.callTool(tool, toolArgs);
     } else {
-      // Use timeout
       result = await Promise.race([
         ToolManager.callTool(tool, toolArgs),
         new Promise((_, reject) =>
@@ -117,10 +95,8 @@ export async function executeSequentialToolCall(
       ]);
     }
 
-    // Validate result
     if (result === null || result === undefined) {
       logWarn(`Tool ${toolCall.name} returned null/undefined result`);
-      // Return empty JSON object instead of plain string for better compatibility
       return {
         toolName: toolCall.name,
         result: JSON.stringify({
@@ -137,7 +113,6 @@ export async function executeSequentialToolCall(
       success: true,
     };
   } catch (error) {
-    // Log actionable error with args for debugging schema mismatches
     const errorMsg = err2String(error);
     const isSchemaError = errorMsg.includes("schema");
     if (isSchemaError) {
@@ -155,16 +130,10 @@ export async function executeSequentialToolCall(
   }
 }
 
-/**
- * Get display name for tool (user-friendly version)
- */
 function getToolDisplayName(toolName: string): string {
-  // Special handling for localSearch to show the actual search type being used
   if (toolName === "localSearch") {
     const settings = getSettings();
-    return settings.enableSemanticSearchV3
-      ? "vault search (semantic)"
-      : "vault search (index-free)";
+    return settings.enableMiyo ? "vault search (Miyo)" : "vault search (index-free)";
   }
 
   const displayNameMap: Record<string, string> = {
@@ -177,8 +146,6 @@ function getToolDisplayName(toolName: string): string {
     startPomodoro: "pomodoro timer",
     pomodoroTool: "pomodoro timer",
     youtubeTranscription: "YouTube transcription",
-    indexVault: "vault indexing",
-    indexTool: "index",
     writeFile: "file editor",
     editFile: "file editor",
     obsidianDailyNote: "daily note (CLI)",
@@ -193,9 +160,6 @@ function getToolDisplayName(toolName: string): string {
   return displayNameMap[toolName] || toolName;
 }
 
-/**
- * Get emoji for tool display
- */
 function getToolEmoji(toolName: string): string {
   const emojiMap: Record<string, string> = {
     localSearch: "🔍",
@@ -206,8 +170,6 @@ function getToolEmoji(toolName: string): string {
     getTimeInfoByEpoch: "🕰️",
     convertTimeBetweenTimezones: "🌍",
     youtubeTranscription: "📺",
-    indexVault: "📚",
-    indexTool: "📚",
     writeFile: "✏️",
     editFile: "🔄",
     readNote: "🔍",
@@ -223,14 +185,10 @@ function getToolEmoji(toolName: string): string {
   return emojiMap[toolName] || "🔧";
 }
 
-/**
- * Log tool call details for debugging
- */
 export function logToolCall(toolCall: ToolCall, iteration: number): void {
   const displayName = getToolDisplayName(toolCall.name);
   const emoji = getToolEmoji(toolCall.name);
 
-  // Create clean parameter display
   const paramDisplay =
     Object.keys(toolCall.args).length > 0
       ? JSON.stringify(toolCall.args, null, 2)
@@ -241,11 +199,7 @@ export function logToolCall(toolCall: ToolCall, iteration: number): void {
   logInfo("---");
 }
 
-/**
- * Log tool execution result
- */
 export function logToolResult(toolName: string, result: ToolExecutionResult): void {
-  // For localSearch we already emit a structured table elsewhere; avoid redundant logs entirely
   if (toolName === "localSearch") {
     return;
   }
@@ -256,7 +210,6 @@ export function logToolResult(toolName: string, result: ToolExecutionResult): vo
 
   logInfo(`${emoji} ${displayName.toUpperCase()} RESULT: ${status}`);
 
-  // Default: log abbreviated result for readability (cap at 300 chars)
   const maxLogLength = 300;
   const text = String(result.result ?? "");
   if (text.length > maxLogLength) {
@@ -268,10 +221,6 @@ export function logToolResult(toolName: string, result: ToolExecutionResult): vo
   }
 }
 
-/**
- * Deduplicate sources by path, keeping highest score
- * If path is not available, falls back to title
- */
 export function deduplicateSources(
   sources: { title: string; path: string; score: number; explanation?: unknown }[]
 ): { title: string; path: string; score: number; explanation?: unknown }[] {
@@ -281,7 +230,6 @@ export function deduplicateSources(
   >();
 
   for (const source of sources) {
-    // Use path as the unique key, falling back to title if path is not available
     const key = source.path || source.title;
     const existing = uniqueSources.get(key);
     if (!existing || source.score > existing.score) {

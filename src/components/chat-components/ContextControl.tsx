@@ -4,9 +4,6 @@ import { SelectedTextContext, WebTabContext } from "@/types/message";
 import { TFile, TFolder } from "obsidian";
 import { ChatContextMenu } from "./ChatContextMenu";
 
-// Pass-through shell over ChatContextMenu (predates this file's props; kept
-// as-is — inlining it into ChatInput is a standalone refactor, not something
-// to piggyback on feature work).
 interface ChatControlsProps {
   contextNotes: TFile[];
   includeActiveNote: boolean;
@@ -17,10 +14,8 @@ interface ChatControlsProps {
   contextFolders: string[];
   contextWebTabs: WebTabContext[];
   selectedTextContexts?: SelectedTextContext[];
-  showIndexingCard?: () => void;
   lexicalEditorRef?: React.RefObject<{ focus: () => void }>;
 
-  // Unified handlers
   onAddToContext: (category: string, data: TFile | string | TFolder | WebTabContext | null) => void;
   onRemoveFromContext: (category: string, data: string) => void;
 
@@ -38,7 +33,6 @@ export const ContextControl: React.FC<ChatControlsProps> = ({
   contextFolders,
   contextWebTabs,
   selectedTextContexts,
-  showIndexingCard,
   lexicalEditorRef,
   onAddToContext,
   onRemoveFromContext,
@@ -46,7 +40,6 @@ export const ContextControl: React.FC<ChatControlsProps> = ({
   isAgentMode,
 }) => {
   const handleRemoveContext = (category: string, data: string) => {
-    // Delegate to unified handler
     onRemoveFromContext(category, data);
   };
 
@@ -54,11 +47,8 @@ export const ContextControl: React.FC<ChatControlsProps> = ({
     category: string,
     data: TFile | string | TFolder | WebTabContext | null
   ) => {
-    // Delegate to unified handler
     onAddToContext(category, data);
   };
-
-  // Context menu is now available for all chain types
 
   return (
     <ChatContextMenu
@@ -72,7 +62,6 @@ export const ContextControl: React.FC<ChatControlsProps> = ({
       contextFolders={contextFolders}
       contextWebTabs={contextWebTabs}
       selectedTextContexts={selectedTextContexts}
-      showIndexingCard={showIndexingCard}
       onTypeaheadSelect={handleTypeaheadSelect}
       lexicalEditorRef={lexicalEditorRef}
       hideAddContextButton={hideAddContextButton}

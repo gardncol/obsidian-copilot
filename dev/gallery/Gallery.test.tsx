@@ -25,6 +25,7 @@ jest.mock("@/components/modals/ReactModal", () => {
     ReactModal: class ReactModal {
       app: App;
       contentEl = activeDocument.createElement("div");
+      modalEl = activeDocument.createElement("div");
       title: string | undefined;
 
       constructor(app: App, title?: string) {
@@ -128,7 +129,6 @@ function GalleryHarness({
   );
 }
 
-/** Walks the tree the way a user does: unfold each nested ancestor, then pick the story. */
 function selectStoryInTree(gallery: RenderResult, storyId: string): void {
   const segments = storyId.split("/");
   segments.pop();
@@ -201,13 +201,6 @@ describe("Gallery", () => {
       expect(catalog.stories.find((story) => story.id === "UI/Badge/Status")?.layout).toBe(
         "centered"
       );
-
-      const buttonSizes = catalog.stories.find((story) => story.id === "UI/Button/Sizes");
-      const renderedSizes = render(<>{buttonSizes?.render()}</>);
-      expect(renderedSizes.container.firstElementChild?.classList.contains("tw-flex-wrap")).toBe(
-        true
-      );
-      renderedSizes.unmount();
 
       for (const story of catalog.stories) {
         const renderedStory = render(
@@ -298,9 +291,6 @@ describe("Gallery", () => {
     });
 
     it("rejects story-declared canvas widths at compile time", () => {
-      // Canvas width is view state owned by the width toolbar, not story metadata:
-      // a declared width would apply to the first render and be silently ignored
-      // afterwards, making two stories that differ only by width indistinguishable.
       const parameters: GalleryParameters = {
         gallery: {
           // @ts-expect-error Stories cannot pin the canvas width; use the width toolbar.
@@ -392,23 +382,7 @@ describe("Gallery", () => {
   });
 
   describe("Gallery()", () => {
-    it("uses explicit single-side dividers for gallery chrome", () => {
-      const gallery = render(<GalleryHarness catalog={makeCatalog()} />);
-      const dividers = gallery.container.querySelectorAll(
-        ".copilot-divider-b, .copilot-gallery-divider-l, .copilot-gallery-divider-r"
-      );
-
-      expect(gallery.container.querySelectorAll(".copilot-divider-b")).toHaveLength(3);
-      expect(gallery.container.querySelectorAll(".copilot-gallery-divider-r")).toHaveLength(1);
-      expect(
-        gallery.container.querySelectorAll(".copilot-gallery-divider-l").length
-      ).toBeGreaterThan(0);
-      for (const divider of dividers) {
-        expect(divider.classList.contains("tw-border-solid")).toBe(false);
-      }
-    });
-
-    it("visibly exposes nested components, story switches, selected styling, and the current id", () => {
+    it("lists top-level components with contact-sheet buttons and marks only the selected story as current", () => {
       const gallery = render(<GalleryHarness catalog={makeCatalog()} />);
       const navigation = gallery.getByRole("complementary", {
         name: "Component and story navigation",
@@ -420,12 +394,9 @@ describe("Gallery", () => {
       expect(
         within(navigation).getByRole("button", { name: "Show UI contact sheet" })
       ).toBeTruthy();
-      const selectedStoryButton = within(navigation).getByRole("button", {
-        name: "Default",
-      });
-      expect(selectedStoryButton.getAttribute("aria-current")).toBe("true");
-      expect(selectedStoryButton.classList.contains("mod-cta")).toBe(true);
-      expect(within(navigation).queryByText("Selected")).toBeNull();
+      expect(
+        within(navigation).getByRole("button", { name: "Default" }).getAttribute("aria-current")
+      ).toBe("true");
       expect(gallery.getByText("Agent Mode/Agent Welcome Card/Default")).toBeTruthy();
       expect(gallery.container.querySelectorAll("[data-gallery-story-id]")).toHaveLength(1);
       expect(
@@ -433,26 +404,15 @@ describe("Gallery", () => {
           '[data-story="Agent Mode/Agent Welcome Card/Default"][data-story-width="400"]'
         )
       ).toBeTruthy();
-      expect(gallery.queryByText("Current width:")).toBeNull();
-      expect(
-        gallery.queryByText("Switch themes in Obsidian settings; the gallery follows.")
-      ).toBeNull();
-      expect(
-        within(navigation).queryByRole("button", {
-          name: /Show (selected story|subtree contact sheet)/,
-        })
-      ).toBeNull();
-      expect(
-        within(navigation).queryByText((_content, element) =>
-          Boolean(element?.tagName === "P" && element.textContent?.startsWith("Subtree:"))
-        )
-      ).toBeNull();
 
       selectStoryInTree(gallery, "UI/Button/Primary");
-      const unselectedStoryButton = within(navigation).getByRole("button", { name: "Modal" });
-      expect(unselectedStoryButton.classList.contains("clickable-icon")).toBe(true);
-      expect(unselectedStoryButton.classList.contains("tw-bg-transparent")).toBe(true);
-      expect(unselectedStoryButton.classList.contains("mod-cta")).toBe(false);
+
+      expect(
+        within(navigation).getByRole("button", { name: "Modal" }).getAttribute("aria-current")
+      ).toBeNull();
+      expect(
+        within(navigation).getByRole("button", { name: "Primary" }).getAttribute("aria-current")
+      ).toBe("true");
     });
 
     it("keeps top-level subtrees open and toggles nested subtrees from icons or titles", () => {
@@ -472,8 +432,6 @@ describe("Gallery", () => {
       expect(within(navigation).getByRole("button", { name: "Default" })).toBeTruthy();
       const badgeSubtreeButton = selectSubtreeButton("UI/Badge");
       expect(badgeSubtreeButton).toBeTruthy();
-      expect(badgeSubtreeButton.parentElement?.classList.contains("tw-gap-1")).toBe(false);
-      expect(badgeSubtreeButton.classList.contains("tw-pl-2")).toBe(true);
       expect(selectSubtreeButton("UI/Button")).toBeTruthy();
       expect(navigation.querySelector('[data-gallery-story-button="UI/Badge/Status"]')).toBeNull();
 
@@ -554,8 +512,8 @@ describe("Gallery", () => {
       fireEvent.click(gallery.getByRole("button", { name: "Show UI contact sheet" }));
 
       expect(
-        gallery.getByRole("button", { name: "Show UI contact sheet" }).classList.contains("mod-cta")
-      ).toBe(true);
+        gallery.getByRole("button", { name: "Show UI contact sheet" }).getAttribute("aria-pressed")
+      ).toBe("true");
       expect(gallery.getByText("Current subtree")).toBeTruthy();
       expect(gallery.getByText("2 leaf stories · 3 non-leaf launchers")).toBeTruthy();
       expect(
@@ -586,38 +544,6 @@ describe("Gallery", () => {
       selectStoryInTree(gallery, "UI/Button/Modal");
       expect(gallery.getByText("UI/Button/Modal")).toBeTruthy();
       expect(gallery.container.querySelectorAll("[data-gallery-story-id]")).toHaveLength(1);
-    });
-
-    it("allows contact sheet headings and long exact story ids to wrap", () => {
-      const storyId = "Agent Mode/Agent Status Card/IncompatibleWarning";
-      const catalog = {
-        componentCount: 1,
-        coveredCount: 1,
-        stories: [makeStory(storyId)],
-      };
-      const gallery = render(
-        <GalleryHarness
-          catalog={catalog}
-          initialState={{
-            contactSheet: true,
-            selectedStoryId: storyId,
-            selectedSubtree: "Agent Mode/Agent Status Card",
-            width: 300,
-          }}
-        />
-      );
-      const story = gallery.container.querySelector(`[data-gallery-story-id="${storyId}"]`);
-      const header = story?.querySelector("header");
-      const heading = header?.querySelector("h3");
-      const exactId = header?.querySelector("code");
-
-      expect(heading?.textContent).toBe("IncompatibleWarning");
-      expect(heading?.classList.contains("tw-min-w-0")).toBe(true);
-      expect(heading?.classList.contains("tw-break-words")).toBe(true);
-      expect(exactId?.textContent).toBe(storyId);
-      expect(exactId?.classList.contains("tw-min-w-0")).toBe(true);
-      expect(exactId?.classList.contains("tw-break-all")).toBe(true);
-      expect(exactId?.classList.contains("tw-text-right")).toBe(true);
     });
 
     it("opens a selected modal once until the user selects away and back", () => {
@@ -708,6 +634,74 @@ describe("Gallery", () => {
       ).toBeTruthy();
     });
 
+    it("applies the selected width to a fullscreen modal frame for https://github.com/Brevilabs/obsidian-copilot-private/issues/317", () => {
+      const catalog = createGalleryCatalog(
+        [
+          {
+            componentId: null,
+            storyModule: {
+              default: {
+                title: "Release/Dialog",
+                parameters: {
+                  gallery: {
+                    host: "modal",
+                    layout: "fullscreen",
+                    modalClass: "full-bleed-modal",
+                  },
+                },
+              },
+              Ready: { render: () => <div>Release content</div> },
+            },
+          },
+        ],
+        0
+      );
+      const gallery = render(<GalleryHarness catalog={catalog} initialState={{ width: 300 }} />);
+      const modal = getGalleryModalMock().open.mock.calls[0][0] as {
+        modalEl: HTMLElement;
+        renderContent(): React.ReactElement;
+      };
+
+      const modalContent = render(modal.renderContent());
+      const storyElement = modalContent.container.querySelector<HTMLElement>("[data-story]");
+
+      expect(modal.modalEl.style.width).toBe("300px");
+      expect(storyElement?.style.width).toBe("100%");
+      modalContent.unmount();
+      gallery.unmount();
+    });
+
+    it("keeps the selected width for a padded modal with frame styling", () => {
+      const catalog = createGalleryCatalog(
+        [
+          {
+            componentId: null,
+            storyModule: {
+              default: {
+                title: "Config/Dialog",
+                parameters: {
+                  gallery: { host: "modal", layout: "padded", modalClass: "config-modal" },
+                },
+              },
+              Ready: { render: () => <div>Config content</div> },
+            },
+          },
+        ],
+        0
+      );
+      const gallery = render(<GalleryHarness catalog={catalog} />);
+      const modal = getGalleryModalMock().open.mock.calls[0][0] as {
+        renderContent(): React.ReactElement;
+      };
+
+      const modalContent = render(modal.renderContent());
+      const storyElement = modalContent.container.querySelector<HTMLElement>("[data-story]");
+
+      expect(storyElement?.style.width).toBe("400px");
+      modalContent.unmount();
+      gallery.unmount();
+    });
+
     it("contains a throwing story and recovers when another keyed story is selected", () => {
       const renderError = jest.spyOn(console, "error").mockImplementation(() => undefined);
       const catalog: GalleryCatalog = {
@@ -788,43 +782,21 @@ describe("Gallery", () => {
       expect(gallery.queryByText("Settings example")).toBeNull();
     });
 
-    it("selects exact width attributes and applies padded, centered, and fullscreen layouts", () => {
+    it("applies a preset width to the canvas and the rendered story", () => {
       const gallery = render(<GalleryHarness catalog={makeCatalog()} />);
       const canvas = gallery.container.querySelector<HTMLElement>(".copilot-gallery-canvas");
 
       expect(canvas?.dataset.galleryWidth).toBe("400");
+
       fireEvent.click(gallery.getByRole("button", { name: "300" }));
+
       expect(canvas?.dataset.galleryWidth).toBe("300");
       expect(canvas?.style.width).toBe("300px");
-      expect(gallery.queryByText("Current width:")).toBeNull();
-
-      const fullscreenContent = gallery.container.querySelector<HTMLElement>(
-        '[data-gallery-story-id="Agent Mode/Agent Welcome Card/Default"] > div'
-      );
-      const fullscreenStory = fullscreenContent?.parentElement;
-      expect(fullscreenContent?.classList.contains("tw-size-full")).toBe(true);
-      expect(fullscreenContent?.classList.contains("tw-p-4")).toBe(false);
-      expect(fullscreenStory?.classList.contains("tw-h-full")).toBe(true);
-      expect(canvas?.classList.contains("tw-h-full")).toBe(true);
-      expect(canvas?.parentElement?.parentElement?.classList.contains("tw-p-4")).toBe(false);
-
-      selectStoryInTree(gallery, "UI/Badge/Status");
-      expect(canvas?.dataset.galleryWidth).toBe("300");
-      const centeredContent = gallery.container.querySelector<HTMLElement>(
-        '[data-gallery-story-id="UI/Badge/Status"] > div'
-      );
-      expect(centeredContent?.parentElement?.dataset.storyWidth).toBe("300");
-      expect(centeredContent?.classList.contains("tw-items-center")).toBe(true);
-      expect(centeredContent?.classList.contains("tw-justify-center")).toBe(true);
-      expect(centeredContent?.classList.contains("tw-p-4")).toBe(true);
-
-      selectStoryInTree(gallery, "UI/Button/Primary");
-      const paddedContent = gallery.container.querySelector<HTMLElement>(
-        '[data-gallery-story-id="UI/Button/Primary"] > div'
-      );
-      expect(paddedContent?.classList.contains("tw-rounded-md")).toBe(true);
-      expect(paddedContent?.classList.contains("tw-border")).toBe(true);
-      expect(paddedContent?.classList.contains("tw-p-4")).toBe(true);
+      expect(
+        gallery.container.querySelector(
+          '[data-story="Agent Mode/Agent Welcome Card/Default"][data-story-width="300"]'
+        )
+      ).toBeTruthy();
     });
 
     it("applies a valid custom width across stories and rejects invalid drafts", () => {

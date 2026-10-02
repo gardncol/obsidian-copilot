@@ -8,20 +8,16 @@ interface AgentReasoningBlockProps {
   status: ReasoningStatus;
   elapsedSeconds: number;
   steps: string[];
-  isStreaming: boolean;
 }
 
 export const AgentReasoningBlock: React.FC<AgentReasoningBlockProps> = ({
   status,
   elapsedSeconds,
   steps,
-  isStreaming,
 }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [prevStatus, setPrevStatus] = useState(status);
 
-  // Auto-collapse when reasoning ends. (We default to collapsed and never
-  // auto-expand — the user must click to peek at live or finished steps.)
   if (status !== prevStatus) {
     setPrevStatus(status);
     if (status === "collapsed" || status === "complete") {
@@ -29,7 +25,6 @@ export const AgentReasoningBlock: React.FC<AgentReasoningBlockProps> = ({
     }
   }
 
-  // Don't render anything if idle
   if (status === "idle") {
     return null;
   }

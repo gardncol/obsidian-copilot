@@ -2,8 +2,11 @@ import { mergeCodexConfigEnv } from "@/agentMode/backends/codex/codexConfigEnv";
 
 describe("codexConfigEnv", () => {
   describe("mergeCodexConfigEnv()", () => {
-    it("builds the managed Codex configuration without inherited values", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/322 applies the product context defaults without inherited values", () => {
       expect(JSON.parse(mergeCodexConfigEnv(undefined, "Use the vault."))).toEqual({
+        model_context_window: 1_000_000,
+        model_auto_compact_token_limit: 500_000,
+        features: { default_mode_request_user_input: true },
         developer_instructions: "Use the vault.",
         approval_policy: "on-request",
         approvals_reviewer: "user",
@@ -11,9 +14,11 @@ describe("codexConfigEnv", () => {
       });
     });
 
-    it("preserves unrelated values while overriding inherited managed fields", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/322 preserves user context values while overriding Copilot-owned fields", () => {
       const existing = JSON.stringify({
         model: "custom-model",
+        model_context_window: 400_000,
+        model_auto_compact_token_limit: 300_000,
         developer_instructions: "Ignore the vault.",
         approval_policy: "never",
         approvals_reviewer: "auto_review",
@@ -22,11 +27,40 @@ describe("codexConfigEnv", () => {
 
       expect(JSON.parse(mergeCodexConfigEnv(existing, "Use the vault."))).toEqual({
         model: "custom-model",
+        model_context_window: 400_000,
+        model_auto_compact_token_limit: 300_000,
+        features: { default_mode_request_user_input: true },
         developer_instructions: "Use the vault.",
         approval_policy: "on-request",
         approvals_reviewer: "user",
         sandbox_mode: "workspace-write",
       });
     });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/551 enables questions in Codex Default alongside other user features", () => {
+      const existing = JSON.stringify({ features: { unified_exec: true } });
+
+      expect(JSON.parse(mergeCodexConfigEnv(existing, "Use the vault.")).features).toEqual({
+        unified_exec: true,
+        default_mode_request_user_input: true,
+      });
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/551 honors an explicit opt-out of Codex Default questions", () => {
+      const existing = JSON.stringify({ features: { default_mode_request_user_input: false } });
+
+      expect(JSON.parse(mergeCodexConfigEnv(existing, "Use the vault.")).features).toEqual({
+        default_mode_request_user_input: false,
+      });
+    });
+
+    it.each(["not-json", "[]", "null"])(
+      "rejects the invalid CODEX_CONFIG override %s without echoing it",
+      (existing) => {
+        expect(() => mergeCodexConfigEnv(existing, "Use the vault.")).toThrow(
+          "Codex CODEX_CONFIG must be a valid JSON object."
+        );
+      }
+    );
   });
 });

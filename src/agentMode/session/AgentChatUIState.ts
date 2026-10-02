@@ -17,21 +17,11 @@ import type {
 } from "@/agentMode/session/types";
 import type { MessageContext } from "@/types/message";
 
-/**
- * `AgentChatBackend` implementation backed by an `AgentSession`. The Agent
- * Mode UI tree consumes this exclusively — it knows nothing about the legacy
- * `ChatUIState` / `ChatManager` stack.
- *
- * Edit, regenerate, and persistence operations are intentionally absent —
- * they don't have ACP semantics and Agent Mode chat persistence is deferred.
- */
 export class AgentChatUIState implements AgentChatBackend {
   private listeners = new Set<() => void>();
+  private currentTurn: Promise<unknown> | null = null;
 
   constructor(private readonly session: AgentSession) {
-    // Forward message, status, and model changes. The chat UI gates the
-    // send button on `isStarting()`, so it needs to re-render when status
-    // transitions out of `"starting"`.
     this.session.subscribe({
       onMessagesChanged: () => this.notifyListeners(),
       onStatusChanged: () => this.notifyListeners(),
@@ -56,11 +46,6 @@ export class AgentChatUIState implements AgentChatBackend {
     }
   }
 
-  /**
-   * Append a user message and kick off the ACP turn. Returns the new user
-   * message id synchronously plus a `turn` promise the caller can await for
-   * loading-state lifecycle (Stop button, input lock).
-   */
   sendMessage(
     text: string,
     context?: MessageContext,
@@ -80,6 +65,7 @@ export class AgentChatUIState implements AgentChatBackend {
         logError("[AgentMode] turn failed", err);
       }
     );
+    this.currentTurn = turn;
     return { id: userMessageId, turn: wrapped };
   }
 
@@ -88,9 +74,6 @@ export class AgentChatUIState implements AgentChatBackend {
   }
 
   async deleteMessage(id: string): Promise<boolean> {
-    // Refuse delete during an in-flight turn: the placeholder assistant
-    // message is what streaming notifications target, and removing it would
-    // leave the session writing into a vanished id.
     const status = this.session.getStatus();
     if (status === "running" || status === "awaiting_permission") {
       logWarn("[AgentChatUIState] delete refused while turn is in flight");
@@ -112,6 +95,14 @@ export class AgentChatUIState implements AgentChatBackend {
 
   isStarting(): boolean {
     return this.session.getStatus() === "starting";
+  }
+
+  isTurnInFlight(): boolean {
+    const status = this.session.getStatus();
+    // A plan decision can resume a turn after the composer has cleared its own
+    // loading flag, so the session remains the authority for active work.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/41
+    return status === "running" || status === "awaiting_permission";
   }
 
   getBackendState(): BackendState | null {
@@ -179,18 +170,26 @@ export class AgentChatUIState implements AgentChatBackend {
       logWarn("[AgentChatUIState] non-gated plan card has no resolution path");
       return;
     }
+    // Codex publishes the card from its tool call before the permission request;
+    // finalizing earlier would hide the card and leave that request unanswered.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/551
+    if (!this.session.hasPendingPlanPermission()) return;
     const trimmedFeedback = decision === "feedback" ? feedbackText?.trim() : undefined;
-    // Resolve the underlying ACP permission. Approve unblocks the agent
-    // and continues the same turn; reject denies with `"User declined"`;
-    // feedback rides the typed text through the same deny `message` so
-    // the agent revises in-turn instead of receiving a separate
-    // follow-up prompt.
+    const sendNextTurn = !!trimmedFeedback && this.session.planFeedbackDelivery === "next_turn";
+    const pendingTurn = this.currentTurn;
+    // Some adapters end the turn on plan rejection without consuming a deny
+    // message. Their feedback must become a new user turn once this one settles.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/41
     this.session.resolvePlanProposalPermission(
       plan.pendingToolCallId,
       decision === "approve",
-      trimmedFeedback
+      sendNextTurn ? undefined : trimmedFeedback
     );
-    this.session.finalizePlanDecision(plan.id);
+    this.session.finalizePlanDecision(plan.id, decision, trimmedFeedback);
     this.notifyListeners();
+    if (sendNextTurn) {
+      await pendingTurn;
+      await this.sendMessage(trimmedFeedback).turn;
+    }
   }
 }

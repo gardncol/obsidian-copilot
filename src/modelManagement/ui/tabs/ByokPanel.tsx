@@ -1,12 +1,3 @@
-/**
- * BYOK settings panel — the central registry UI.
- *
- * Lists every BYOK provider (origin `"byok"`) with its configured models,
- * and drives the add / configure / remove flows. Reactive reads come from
- * Jotai atoms; mutations go through `useModelManagement()`. The catalog is
- * loaded once on mount (disk cache, no network unless stale) and kept in
- * local state so it can be passed down to the Add Provider dialog.
- */
 import { ConfirmModal } from "@/components/modals/ConfirmModal";
 import { Button } from "@/components/ui/button";
 import { SearchBar } from "@/components/ui/SearchBar";
@@ -19,6 +10,8 @@ import {
 import { configuredModelsAtom, visibleByokProvidersAtom } from "@/modelManagement/state/atoms";
 import { providerNeedsSelfHostWarning } from "@/modelManagement/providers/selfHostPolicy";
 import type { CatalogProvider } from "@/modelManagement/types/catalog";
+import type { VerificationResult } from "@/modelManagement/types/runtime";
+import { ProviderVerificationProgress } from "@/modelManagement/ui/components/ProviderVerificationStatus";
 import type { ConfiguredModel } from "@/modelManagement/types/persisted";
 import { useModelManagement } from "@/modelManagement/ui/ModelManagementContext";
 import {
@@ -33,31 +26,58 @@ import { Plus, ShieldCheck } from "lucide-react";
 import { Notice } from "obsidian";
 import React, { useEffect, useMemo, useState } from "react";
 
+const EMPTY_VERIFICATION: Readonly<Record<string, VerificationResult>> = Object.freeze({});
 const EMPTY_CATALOG: readonly CatalogProvider[] = Object.freeze([]);
 const EMPTY_MODELS: readonly ConfiguredModel[] = Object.freeze([]);
 
-/**
- * `ByokPanel` — root component for the Models settings tab.
- */
 export const ByokPanel: React.FC = () => {
   const api = useModelManagement();
   const app = useApp();
 
-  // Self-Host Mode keeps cloud BYOK providers listed but sorts them below
-  // self-hosted / local endpoints (each is flagged in-row). Projection only —
-  // nothing is removed from disk or reordered in settings.
   const providers = useAtomValue(visibleByokProvidersAtom, { store: settingsStore });
   const configuredModels = useAtomValue(configuredModelsAtom, { store: settingsStore });
   const selfHostOn = useSettingsValue().enableSelfHostMode;
 
   const [catalogProviders, setCatalogProviders] =
     useState<readonly CatalogProvider[]>(EMPTY_CATALOG);
-  const [loadState, setLoadState] = useState<"loading" | "ready">("loading");
   const [query, setQuery] = useState("");
+  const [verification, setVerification] =
+    useState<Readonly<Record<string, VerificationResult>>>(EMPTY_VERIFICATION);
+  const [verificationProviders, setVerificationProviders] = useState(() =>
+    api.providerRegistry.listByOrigin("byok")
+  );
+  const pendingChecks = verificationProviders.length - Object.keys(verification).length;
+  const refreshVerification = (): void => {
+    setVerification(EMPTY_VERIFICATION);
+    setVerificationProviders([...api.providerRegistry.listByOrigin("byok")]);
+  };
 
-  // Load the catalog once and keep our snapshot in sync. The disk-load path
-  // of `ensureLoaded` does NOT fire `onChange`, so we sync explicitly after
-  // it resolves; `onChange` covers manual refreshes.
+  useEffect(() => {
+    let cancelled = false;
+    // https://github.com/logancyang/obsidian-copilot/issues/3147:
+    // Check completed saves, including CORS-only edits. Registry events can fire
+    // between key and endpoint writes and would send the new key to the old URL.
+
+    for (const provider of verificationProviders) {
+      void api.providerRegistry
+        .verify(provider.providerId)
+        .catch(
+          (): VerificationResult => ({
+            ok: false,
+            message: "Could not verify this provider. Reopen this tab to retry.",
+            checkedAt: Date.now(),
+          })
+        )
+        .then((result) => {
+          if (cancelled) return;
+          setVerification((results) => ({ ...results, [provider.providerId]: result }));
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [api, verificationProviders]);
+
   useEffect(() => {
     let cancelled = false;
     const sync = (): void => {
@@ -69,11 +89,9 @@ export const ByokPanel: React.FC = () => {
       .then(() => {
         if (cancelled) return;
         sync();
-        setLoadState("ready");
       })
       .catch((err) => {
         logError("[ByokPanel] catalog ensureLoaded failed", err);
-        if (!cancelled) setLoadState("ready");
       });
     return () => {
       cancelled = true;
@@ -95,15 +113,25 @@ export const ByokPanel: React.FC = () => {
           selfHostOn && providerNeedsSelfHostWarning(provider, { enableSelfHostMode: selfHostOn });
         const all = byProvider.get(provider.providerId) ?? (EMPTY_MODELS as ConfiguredModel[]);
         if (!q || provider.displayName.toLowerCase().includes(q)) {
-          return { provider, models: all, needsSelfHostWarning };
+          return {
+            provider,
+            models: all,
+            needsSelfHostWarning,
+            verification: verification[provider.providerId],
+          };
         }
         const models = all.filter(
           (m) => m.info.displayName.toLowerCase().includes(q) || m.info.id.toLowerCase().includes(q)
         );
-        return { provider, models, needsSelfHostWarning };
+        return {
+          provider,
+          models,
+          needsSelfHostWarning,
+          verification: verification[provider.providerId],
+        };
       })
       .filter((g) => !q || g.models.length > 0 || g.provider.displayName.toLowerCase().includes(q));
-  }, [providers, configuredModels, query, selfHostOn]);
+  }, [providers, configuredModels, query, selfHostOn, verification]);
 
   const handleAddProvider = (): void => {
     new AddProviderModal(app, {
@@ -111,7 +139,11 @@ export const ByokPanel: React.FC = () => {
       localTemplates: LOCAL_PROVIDER_DEFINITIONS,
       customTemplate: CUSTOM_OPENAI_DEFINITION,
       onPick: (source) =>
-        new ConfigureProviderModal(app, { state: { mode: "new", source }, api }).open(),
+        new ConfigureProviderModal(app, {
+          state: { mode: "new", source },
+          api,
+          onSaved: refreshVerification,
+        }).open(),
     }).open();
   };
 
@@ -137,7 +169,8 @@ export const ByokPanel: React.FC = () => {
   };
 
   return (
-    <div className="tw-flex tw-flex-col tw-gap-4 tw-py-4">
+    <div className="tw-relative tw-flex tw-flex-col tw-gap-4 tw-py-4">
+      <ProviderVerificationProgress pending={pendingChecks} />
       <div className="tw-flex tw-items-start tw-justify-between tw-gap-4">
         <div className="tw-flex tw-flex-col tw-gap-1">
           <div className="tw-text-xl tw-font-bold tw-text-normal">Bring Your Own Key</div>
@@ -165,23 +198,20 @@ export const ByokPanel: React.FC = () => {
       <SearchBar value={query} onChange={setQuery} placeholder="Search providers…" />
 
       <div className="tw-flex tw-flex-col">
-        {loadState === "loading" ? (
-          <div className="tw-text-sm tw-text-muted">Loading catalog…</div>
-        ) : (
-          <ByokGlobalTable
-            groups={groups}
-            emptyMessage={
-              query.trim() && providers.length > 0 ? "No providers match your search." : undefined
-            }
-            onConfigure={(id) =>
-              new ConfigureProviderModal(app, {
-                state: { mode: "edit", providerId: id },
-                api,
-              }).open()
-            }
-            onRemove={handleRemove}
-          />
-        )}
+        <ByokGlobalTable
+          groups={groups}
+          emptyMessage={
+            query.trim() && providers.length > 0 ? "No providers match your search." : undefined
+          }
+          onConfigure={(id) =>
+            new ConfigureProviderModal(app, {
+              state: { mode: "edit", providerId: id },
+              api,
+              onSaved: refreshVerification,
+            }).open()
+          }
+          onRemove={handleRemove}
+        />
       </div>
     </div>
   );

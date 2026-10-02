@@ -25,7 +25,7 @@ const sidebar = [
   },
   {
     label: "Everyday tools",
-    items: [{ slug: "custom-commands" }, { slug: "chat-interface" }],
+    items: [{ slug: "custom-commands" }, { slug: "chat-interface" }, { slug: "relevant-notes" }],
   },
   {
     label: "Models, plans, and Miyo",
@@ -33,6 +33,8 @@ const sidebar = [
       { label: "Providers and BYOK", link: "/llm-providers/" },
       { label: "Model selection", link: "/models-and-parameters/" },
       { label: "Miyo and semantic search", link: "/vault-search-and-indexing/" },
+      { slug: "miyo-setup" },
+      { slug: "miyo-remote-setup" },
       { label: "Copilot paid plans", link: "/copilot-plus-and-self-host/" },
     ],
   },
@@ -61,11 +63,15 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "Copilot for Obsidian",
+      markdown: { processedDirs: ["."] },
       favicon: "/favicon.svg",
       logo: {
         dark: "./src/assets/copilot-mark-cream.svg",
         light: "./src/assets/copilot-icon-dark.svg",
         alt: "",
+      },
+      components: {
+        Head: "./src/components/Head.astro",
       },
       sidebar,
     }),

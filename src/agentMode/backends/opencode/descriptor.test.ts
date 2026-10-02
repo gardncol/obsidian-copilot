@@ -1,3 +1,4 @@
+import { OPENCODE_PINNED_VERSION, OPENCODE_MIN_VERSION } from "./ui/opencodeVersion";
 import { getOpencodeBinaryManager, OpencodeBackendDescriptor } from "./descriptor";
 import { legacyVaultDataDir } from "./OpencodeBinaryManager";
 import * as fs from "node:fs";
@@ -5,13 +6,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { FileSystemAdapter } from "obsidian";
 import type { AgentSession } from "@/agentMode/session/AgentSession";
-import type {
-  BackendProcess,
-  BackendState,
-  EffortOption,
-  EnabledModelEntry,
-  ModelState,
-} from "@/agentMode/session/types";
+import type { BackendState, ModelEntry } from "@/agentMode/session/types";
+import { getSettings, setSettings, type CopilotSettings } from "@/settings/model";
+
+jest.mock("@/settings/model", () => ({
+  ...jest.requireActual("@/settings/model"),
+  subscribeToSettingsChange: jest.fn(),
+}));
 
 jest.mock("@/logger", () => ({
   logInfo: jest.fn(),
@@ -19,438 +20,474 @@ jest.mock("@/logger", () => ({
   logError: jest.fn(),
 }));
 
-describe("OpencodeBackendDescriptor.wire.decode", () => {
-  const decode = OpencodeBackendDescriptor.wire.decode;
+describe("descriptor", () => {
+  describe("OpencodeBackendDescriptor", () => {
+    describe("managedInstall.getState()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/578 reports the shared manager's install progress", () => {
+        const plugin = vaultPlugin(os.tmpdir());
+        const manager = getOpencodeBinaryManager(plugin);
+        const getState = jest.spyOn(manager, "getRuntimeState").mockReturnValue({
+          kind: "installing",
+          progress: { label: "Downloading opencode — 1.0 KB / 2.0 KB", percent: 42 },
+        });
 
-  it("parses 2-segment ids as bare/default with provider mapped to Copilot", () => {
-    expect(decode("anthropic/claude-sonnet-4-5")).toEqual({
-      selection: { baseModelId: "anthropic/claude-sonnet-4-5", effort: null },
-      provider: "anthropic",
-    });
-  });
-
-  it("parses 3-segment ids as variants when the suffix is a known effort", () => {
-    expect(decode("anthropic/claude-sonnet-4-5/medium")).toEqual({
-      selection: { baseModelId: "anthropic/claude-sonnet-4-5", effort: "medium" },
-      provider: "anthropic",
-    });
-    expect(decode("openai/gpt-5/minimal")).toEqual({
-      selection: { baseModelId: "openai/gpt-5", effort: "minimal" },
-      provider: "openai",
-    });
-  });
-
-  it("recognizes opencode's full effort vocabulary (none/minimal/low/medium/high/xhigh/max)", () => {
-    // Opencode advertises Anthropic models with `/max` and `/xhigh` and
-    // OpenRouter reasoning models with `/none`. Each must collapse onto
-    // its bare base.
-    for (const effort of ["none", "minimal", "low", "medium", "high", "xhigh", "max"]) {
-      expect(decode(`anthropic/claude-opus-4-7/${effort}`)).toEqual({
-        selection: { baseModelId: "anthropic/claude-opus-4-7", effort },
-        provider: "anthropic",
+        expect(OpencodeBackendDescriptor.managedInstall?.getState(plugin)).toEqual({
+          kind: "running",
+          label: "Downloading opencode — 1.0 KB / 2.0 KB",
+          percent: 42,
+        });
+        getState.mockRestore();
       });
-    }
-  });
+    });
 
-  it("returns no-effort representation for 3-segment ids whose suffix isn't a known effort", () => {
-    // OpenRouter-style 3-segment ids without an effort suffix — the
-    // trailing segment is part of the model name. The whole id is the
-    // baseModelId; provider is still attributed from the leading segment.
-    expect(decode("openrouter/anthropic/claude-sonnet-4-5")).toEqual({
-      selection: { baseModelId: "openrouter/anthropic/claude-sonnet-4-5", effort: null },
-      provider: "openrouterai",
+    describe("managedInstall.subscribe()", () => {
+      it("forwards the listener to the shared manager and returns its unsubscribe function", () => {
+        const plugin = vaultPlugin(os.tmpdir());
+        const manager = getOpencodeBinaryManager(plugin);
+        const cleanup = jest.fn();
+        const subscribe = jest.spyOn(manager, "subscribeRuntimeState").mockReturnValue(cleanup);
+        const listener = jest.fn();
+        expect(OpencodeBackendDescriptor.managedInstall?.subscribe(plugin, listener)).toBe(cleanup);
+        expect(subscribe).toHaveBeenCalledWith(listener);
+        subscribe.mockRestore();
+      });
     });
-    expect(decode("openrouter/anthropic/claude-3.5-haiku")).toEqual({
-      selection: { baseModelId: "openrouter/anthropic/claude-3.5-haiku", effort: null },
-      provider: "openrouterai",
-    });
-  });
 
-  it("parses 4-segment umbrella ids as variants when the last segment is a known effort", () => {
-    // OpenRouter wraps native ids under `openrouter/`, so its variants
-    // are 4-segment: `openrouter/<sub>/<model>/<effort>`. Without this
-    // case the picker would render seven duplicate rows per OpenRouter
-    // reasoning model.
-    expect(decode("openrouter/anthropic/claude-sonnet-4.5/high")).toEqual({
-      selection: { baseModelId: "openrouter/anthropic/claude-sonnet-4.5", effort: "high" },
-      provider: "openrouterai",
-    });
-    expect(decode("openrouter/anthropic/claude-sonnet-4.5/none")).toEqual({
-      selection: { baseModelId: "openrouter/anthropic/claude-sonnet-4.5", effort: "none" },
-      provider: "openrouterai",
-    });
-    expect(decode("openrouter/openai/gpt-5/xhigh")).toEqual({
-      selection: { baseModelId: "openrouter/openai/gpt-5", effort: "xhigh" },
-      provider: "openrouterai",
-    });
-    // OpenRouter route variants like `:exacto` live inside the model
-    // segment — the effort suffix still attaches at the trailing slash.
-    expect(decode("openrouter/openai/gpt-oss-120b:exacto/none")).toEqual({
-      selection: { baseModelId: "openrouter/openai/gpt-oss-120b:exacto", effort: "none" },
-      provider: "openrouterai",
-    });
-  });
+    describe("managedInstall.run()", () => {
+      it("upgrades a custom binary through upgradeCustomBinary and a managed one through upgradeManaged", async () => {
+        const manager = getOpencodeBinaryManager(vaultPlugin(os.tmpdir()));
+        const upgradeCustom = jest.spyOn(manager, "upgradeCustomBinary").mockResolvedValue({
+          version: "1.0.0",
+          path: process.execPath,
+        });
+        const upgradeManaged = jest.spyOn(manager, "upgradeManaged").mockResolvedValue({
+          version: "1.0.0",
+          path: process.execPath,
+        });
+        const original = getSettings().agentMode;
 
-  it("returns no-effort representation for unparseable shapes (1 segment or unknown trailing segment)", () => {
-    // 1-segment ids have no provider segment to attribute.
-    expect(decode("just-a-name")).toEqual({
-      selection: { baseModelId: "just-a-name", effort: null },
-      provider: null,
-    });
-    // 4+ segment ids whose trailing segment isn't a known effort fall
-    // through to a no-effort representation. The leading segment still
-    // attributes a provider when it maps.
-    expect(decode("anthropic/foo/bar/baz")).toEqual({
-      selection: { baseModelId: "anthropic/foo/bar/baz", effort: null },
-      provider: "anthropic",
-    });
-    expect(decode("a/b/c/d")).toEqual({
-      selection: { baseModelId: "a/b/c/d", effort: null },
-      provider: null,
-    });
-  });
-});
-
-describe("OpencodeBackendDescriptor.wire.encode", () => {
-  const encode = OpencodeBackendDescriptor.wire.encode;
-
-  it("returns the bare baseModelId when effort is null", () => {
-    expect(encode({ baseModelId: "anthropic/claude-sonnet-4-5", effort: null })).toBe(
-      "anthropic/claude-sonnet-4-5"
-    );
-  });
-
-  it("appends the variant when effort is set", () => {
-    expect(encode({ baseModelId: "anthropic/claude-sonnet-4-5", effort: "high" })).toBe(
-      "anthropic/claude-sonnet-4-5/high"
-    );
-  });
-
-  it("round-trips via wire.decode", () => {
-    const ids = [
-      "anthropic/claude-sonnet-4-5",
-      "anthropic/claude-sonnet-4-5/low",
-      "openai/gpt-5/high",
-      "anthropic/claude-opus-4-7/max",
-      "openrouter/anthropic/claude-sonnet-4.5",
-      "openrouter/anthropic/claude-sonnet-4.5/none",
-      "openrouter/anthropic/claude-sonnet-4.5/high",
-      // Catalog-less BYOK (openai-compatible) — provider id is the synthetic
-      // copilot providerId, and the model id may itself contain slashes
-      // (LM Studio repo-prefixed ids like `lmstudio-community/Qwen-…-GGUF`).
-      // The trailing segment isn't a known effort, so decode treats the
-      // whole string as `baseModelId` with `effort: null` — and encode
-      // reproduces it verbatim.
-      "lmstudio-byok-id/lmstudio-community/Qwen2.5-7B-Instruct-GGUF",
-      "ollama-byok-id/llama3.2",
-    ];
-    for (const id of ids) {
-      const decoded = OpencodeBackendDescriptor.wire.decode(id);
-      expect(encode(decoded.selection)).toBe(id);
-    }
-  });
-
-  it("preserves slashes-in-model for catalog-less BYOK wire ids", () => {
-    // The wire id `<copilotProviderId>/<lmstudioRepoPrefix>/<modelName>`
-    // round-trips: baseModelId carries the full id, effort is null,
-    // provider is null because the synthetic providerId isn't in
-    // OPENCODE_PROVIDER_MAP (and that's the correct, lossless mapping
-    // — the picker just doesn't get a Copilot-provider section header).
-    const wireId = "byok-uuid-abc/lmstudio-community/Qwen2.5-7B-Instruct-GGUF";
-    const decoded = OpencodeBackendDescriptor.wire.decode(wireId);
-    expect(decoded).toEqual({
-      selection: { baseModelId: wireId, effort: null },
-      provider: null,
-    });
-    expect(OpencodeBackendDescriptor.wire.encode(decoded.selection)).toBe(wireId);
-  });
-});
-
-describe("OpencodeBackendDescriptor.applySelection", () => {
-  function makeSession(state: BackendState): {
-    session: AgentSession;
-    applyModelWireId: jest.Mock;
-    setConfigOption: jest.Mock;
-  } {
-    let currentState = state;
-    const applyModelWireId = jest.fn(async () => {
-      currentState = {
-        ...currentState,
-        model: currentState.model
-          ? {
-              ...currentState.model,
-              current: { baseModelId: "openai/gpt-5", effort: "low" },
-              apply: {
-                kind: "setConfigOption",
-                configId: "model",
-                effortConfigId: "effort",
+        try {
+          for (const source of ["custom", "managed"] as const) {
+            setSettings((current) => ({
+              agentMode: {
+                ...current.agentMode,
+                backends: {
+                  ...current.agentMode.backends,
+                  opencode: {
+                    ...current.agentMode.backends?.opencode,
+                    binaryPath: process.execPath,
+                    binaryVersion: "1.0.0",
+                    binarySource: source,
+                  },
+                },
               },
-            }
-          : null,
-      };
-    });
-    const setConfigOption = jest.fn(async () => undefined);
-    return {
-      session: {
-        getState: () => currentState,
-        applyModelWireId,
-        setConfigOption,
-      } as unknown as AgentSession,
-      applyModelWireId,
-      setConfigOption,
-    };
-  }
+            }));
+            await OpencodeBackendDescriptor.managedInstall?.run(vaultPlugin(os.tmpdir()));
+          }
 
-  it("routes config-option-backed effort through the thought-level option", async () => {
-    const { session, applyModelWireId, setConfigOption } = makeSession({
-      model: {
-        current: { baseModelId: "openai/gpt-5", effort: "low" },
-        availableModels: [],
-        apply: { kind: "setConfigOption", configId: "model", effortConfigId: "effort" },
-      },
-      mode: null,
-    });
-    await OpencodeBackendDescriptor.applySelection(session, {
-      baseModelId: "openai/gpt-5",
-      effort: "high",
-    });
-    expect(applyModelWireId).not.toHaveBeenCalled();
-    expect(setConfigOption).toHaveBeenCalledWith("effort", "high");
-  });
-
-  it("switches the base model before applying its config-option-backed effort", async () => {
-    const { session, applyModelWireId, setConfigOption } = makeSession({
-      model: {
-        current: { baseModelId: "anthropic/claude-sonnet", effort: "low" },
-        availableModels: [],
-        apply: { kind: "setConfigOption", configId: "model", effortConfigId: "effort" },
-      },
-      mode: null,
-    });
-    await OpencodeBackendDescriptor.applySelection(session, {
-      baseModelId: "openai/gpt-5",
-      effort: "high",
-    });
-    expect(applyModelWireId).toHaveBeenCalledWith("openai/gpt-5");
-    expect(setConfigOption).toHaveBeenCalledWith("effort", "high");
-    expect(applyModelWireId.mock.invocationCallOrder[0]).toBeLessThan(
-      setConfigOption.mock.invocationCallOrder[0]
-    );
-  });
-
-  it("uses backend-confirmed startup state instead of the optimistic session state", async () => {
-    const { session, applyModelWireId, setConfigOption } = makeSession({
-      model: {
-        current: { baseModelId: "openai/gpt-5", effort: "high" },
-        availableModels: [],
-        apply: { kind: "setConfigOption", configId: "model", effortConfigId: "effort" },
-      },
-      mode: null,
+          expect(upgradeCustom).toHaveBeenCalledTimes(1);
+          expect(upgradeManaged).toHaveBeenCalledTimes(1);
+        } finally {
+          setSettings({ agentMode: original });
+          upgradeCustom.mockRestore();
+          upgradeManaged.mockRestore();
+        }
+      });
     });
 
-    await OpencodeBackendDescriptor.applySelection(
-      session,
-      { baseModelId: "openai/gpt-5", effort: "high" },
-      { backendReportedCurrent: { baseModelId: "copilot-plus/minimax-m2.7", effort: null } }
-    );
+    describe("wire.decode()", () => {
+      const decode = OpencodeBackendDescriptor.wire.decode;
 
-    expect(applyModelWireId).toHaveBeenCalledWith("openai/gpt-5");
-    expect(setConfigOption).toHaveBeenCalledWith("effort", "high");
-  });
-});
+      it("decodes a provider/model id as a selection with no effort", () => {
+        expect(decode("anthropic/claude-sonnet-4-5")).toEqual({
+          selection: { baseModelId: "anthropic/claude-sonnet-4-5", effort: null },
+          provider: "anthropic",
+        });
+      });
 
-describe("OpencodeBackendDescriptor.prefetchEffortCatalog", () => {
-  const GPT = "github-copilot/gpt-5.4";
-  const QWEN = "openrouter/qwen/qwen3.7-max";
-  const NEMOTRON = "opencode/nemotron-3-super-free";
-  const EFFORTS: Record<string, EffortOption[]> = {
-    [GPT]: [
-      { value: "low", label: "low" },
-      { value: "high", label: "high" },
-    ],
-    [QWEN]: [],
-  };
+      it("decodes every effort suffix from none through max as the effort of its base model id", () => {
+        for (const effort of ["none", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+          expect(decode(`anthropic/claude-opus-4-7/${effort}`)).toEqual({
+            selection: { baseModelId: "anthropic/claude-opus-4-7", effort },
+            provider: "anthropic",
+          });
+        }
+      });
 
-  function stateFor(baseModelId: string): BackendState {
-    return {
-      model: {
-        current: { baseModelId, effort: null },
-        apply: { kind: "setConfigOption", configId: "model" },
-        availableModels: [
-          {
-            baseModelId,
-            name: baseModelId,
-            provider: null,
-            effortOptions: EFFORTS[baseModelId] ?? [],
-          },
-        ],
-      },
-      mode: null,
-    };
-  }
+      it("decodes a three-segment id whose last segment is not an effort as a base model id with no effort", () => {
+        expect(decode("openrouter/anthropic/claude-sonnet-4-5")).toEqual({
+          selection: { baseModelId: "openrouter/anthropic/claude-sonnet-4-5", effort: null },
+          provider: "openrouterai",
+        });
+        expect(decode("openrouter/anthropic/claude-3.5-haiku")).toEqual({
+          selection: { baseModelId: "openrouter/anthropic/claude-3.5-haiku", effort: null },
+          provider: "openrouterai",
+        });
+      });
 
-  const modelState: ModelState = {
-    current: { baseModelId: "orig/model", effort: null },
-    apply: { kind: "setConfigOption", configId: "model" },
-    availableModels: [],
-  };
+      it("decodes a four-segment umbrella id with a known effort suffix as a base model id plus effort", () => {
+        expect(decode("openrouter/anthropic/claude-sonnet-4.5/high")).toEqual({
+          selection: { baseModelId: "openrouter/anthropic/claude-sonnet-4.5", effort: "high" },
+          provider: "openrouterai",
+        });
+        expect(decode("openrouter/anthropic/claude-sonnet-4.5/none")).toEqual({
+          selection: { baseModelId: "openrouter/anthropic/claude-sonnet-4.5", effort: "none" },
+          provider: "openrouterai",
+        });
+        expect(decode("openrouter/openai/gpt-5/xhigh")).toEqual({
+          selection: { baseModelId: "openrouter/openai/gpt-5", effort: "xhigh" },
+          provider: "openrouterai",
+        });
+        expect(decode("openrouter/openai/gpt-oss-120b:exacto/none")).toEqual({
+          selection: { baseModelId: "openrouter/openai/gpt-oss-120b:exacto", effort: "none" },
+          provider: "openrouterai",
+        });
+      });
 
-  function makeProc(impl: (value: string) => Promise<BackendState>): {
-    proc: BackendProcess;
-    setSessionConfigOption: jest.Mock;
-  } {
-    const setSessionConfigOption = jest.fn(
-      async ({ value }: { sessionId: string; configId: string; value: string }) => impl(value)
-    );
-    return {
-      proc: { setSessionConfigOption } as unknown as BackendProcess,
-      setSessionConfigOption,
-    };
-  }
-
-  const run = (
-    proc: BackendProcess,
-    enabledModels: EnabledModelEntry[],
-    isAborted: () => boolean = () => false,
-    state: ModelState = modelState
-  ) =>
-    OpencodeBackendDescriptor.prefetchEffortCatalog!({
-      proc,
-      sessionId: "ses_1",
-      modelState: state,
-      enabledModels,
-      isAborted,
+      it("decodes a single-segment id or an unknown trailing segment as a base model id with no effort", () => {
+        expect(decode("just-a-name")).toEqual({
+          selection: { baseModelId: "just-a-name", effort: null },
+          provider: null,
+        });
+        expect(decode("anthropic/foo/bar/baz")).toEqual({
+          selection: { baseModelId: "anthropic/foo/bar/baz", effort: null },
+          provider: "anthropic",
+        });
+        expect(decode("a/b/c/d")).toEqual({
+          selection: { baseModelId: "a/b/c/d", effort: null },
+          provider: null,
+        });
+      });
     });
 
-  it("collects effort only for models that report it, skips missing_key, and restores the original", async () => {
-    const { proc, setSessionConfigOption } = makeProc((value) => Promise.resolve(stateFor(value)));
-    const result = await run(proc, [
-      { baseModelId: GPT, name: "GPT-5.4", credentialState: "ok" },
-      { baseModelId: QWEN, name: "Qwen", credentialState: "ok" },
-      { baseModelId: NEMOTRON, name: "Nemotron", credentialState: "missing_key" },
-    ]);
+    describe("wire.encode()", () => {
+      const encode = OpencodeBackendDescriptor.wire.encode;
 
-    expect(result).toEqual({ [GPT]: EFFORTS[GPT] });
-    const values = setSessionConfigOption.mock.calls.map((c) => c[0].value);
-    expect(values).not.toContain(NEMOTRON); // missing_key never probed
-    expect(values).toEqual([GPT, QWEN, "orig/model"]); // restore is last
-  });
+      it("encodes a selection without effort as its base model id", () => {
+        expect(encode({ baseModelId: "anthropic/claude-sonnet-4-5", effort: null })).toBe(
+          "anthropic/claude-sonnet-4-5"
+        );
+      });
 
-  it("returns a frozen empty catalog and probes nothing when the catalog is not config-option-backed", async () => {
-    const { proc, setSessionConfigOption } = makeProc((value) => Promise.resolve(stateFor(value)));
-    const result = await run(
-      proc,
-      [{ baseModelId: GPT, name: "GPT", credentialState: "ok" }],
-      () => false,
-      {
-        ...modelState,
-        apply: { kind: "setModel" },
+      it("encodes a selection with effort as the base model id plus the effort suffix", () => {
+        expect(encode({ baseModelId: "anthropic/claude-sonnet-4-5", effort: "high" })).toBe(
+          "anthropic/claude-sonnet-4-5/high"
+        );
+      });
+
+      it("encodes every decoded id back to the original wire id", () => {
+        const ids = [
+          "anthropic/claude-sonnet-4-5",
+          "anthropic/claude-sonnet-4-5/low",
+          "openai/gpt-5/high",
+          "anthropic/claude-opus-4-7/max",
+          "openrouter/anthropic/claude-sonnet-4.5",
+          "openrouter/anthropic/claude-sonnet-4.5/none",
+          "openrouter/anthropic/claude-sonnet-4.5/high",
+          "lmstudio-byok-id/lmstudio-community/Qwen2.5-7B-Instruct-GGUF",
+          "ollama-byok-id/llama3.2",
+        ];
+        for (const id of ids) {
+          const decoded = OpencodeBackendDescriptor.wire.decode(id);
+          expect(encode(decoded.selection)).toBe(id);
+        }
+      });
+
+      it("round-trips a catalog-less BYOK wire id whose model name contains slashes", () => {
+        const wireId = "byok-uuid-abc/lmstudio-community/Qwen2.5-7B-Instruct-GGUF";
+        const decoded = OpencodeBackendDescriptor.wire.decode(wireId);
+        expect(decoded).toEqual({
+          selection: { baseModelId: wireId, effort: null },
+          provider: null,
+        });
+        expect(OpencodeBackendDescriptor.wire.encode(decoded.selection)).toBe(wireId);
+      });
+    });
+
+    describe("applySelection()", () => {
+      function entryOffering(baseModelId: string, efforts: string[]): ModelEntry {
+        return {
+          baseModelId,
+          name: baseModelId,
+          provider: null,
+          effortOptions: efforts.map((effort) => ({ value: effort, label: effort })),
+        };
       }
-    );
-    expect(Object.keys(result)).toHaveLength(0);
-    expect(setSessionConfigOption).not.toHaveBeenCalled();
-  });
 
-  it("stops probing once isAborted() is true but still restores", async () => {
-    const { proc, setSessionConfigOption } = makeProc((value) => Promise.resolve(stateFor(value)));
-    let probed = 0;
-    await run(
-      proc,
-      [
-        { baseModelId: GPT, name: "GPT", credentialState: "ok" },
-        { baseModelId: QWEN, name: "Qwen", credentialState: "ok" },
-      ],
-      () => probed++ >= 1 // false for the first model, true thereafter
-    );
-    const values = setSessionConfigOption.mock.calls.map((c) => c[0].value);
-    expect(values).toEqual([GPT, "orig/model"]); // QWEN skipped, restore still runs
-  });
+      function makeSession(state: BackendState): {
+        session: AgentSession;
+        applyModelWireId: jest.Mock;
+        setConfigOption: jest.Mock;
+      } {
+        let currentState = state;
+        const applyModelWireId = jest.fn(async () => {
+          currentState = {
+            ...currentState,
+            model: currentState.model
+              ? {
+                  ...currentState.model,
+                  current: { baseModelId: "openai/gpt-5", effort: "low" },
+                  apply: {
+                    kind: "setConfigOption",
+                    configId: "model",
+                    effortConfigId: "effort",
+                  },
+                }
+              : null,
+          };
+        });
+        const setConfigOption = jest.fn(async () => undefined);
+        return {
+          session: {
+            getState: () => currentState,
+            applyModelWireId,
+            setConfigOption,
+          } as unknown as AgentSession,
+          applyModelWireId,
+          setConfigOption,
+        };
+      }
 
-  it("survives a throwing probe, keeps going, and still restores", async () => {
-    const { proc, setSessionConfigOption } = makeProc((value) => {
-      if (value === GPT) return Promise.reject(new Error("boom"));
-      return Promise.resolve(stateFor(value));
+      it.each(["high", null])(
+        "https://github.com/Brevilabs/obsidian-copilot-private/issues/219 resolves missing effort on the active model without resetting it: %s",
+        async (effort) => {
+          const { session, applyModelWireId, setConfigOption } = makeSession({
+            model: {
+              current: { baseModelId: "openai/gpt-5", effort },
+              availableModels: [entryOffering("openai/gpt-5", ["high", "low"])],
+              apply: { kind: "setConfigOption", configId: "model", effortConfigId: "effort" },
+            },
+            mode: null,
+          });
+          await OpencodeBackendDescriptor.applySelection(session, {
+            baseModelId: "openai/gpt-5",
+            effort: null,
+          });
+          expect(applyModelWireId).not.toHaveBeenCalled();
+          expect(setConfigOption).toHaveBeenCalledWith("effort", "low");
+        }
+      );
+
+      it("sets the effort config option without switching the model when only the effort changes", async () => {
+        const { session, applyModelWireId, setConfigOption } = makeSession({
+          model: {
+            current: { baseModelId: "openai/gpt-5", effort: "low" },
+            availableModels: [entryOffering("openai/gpt-5", ["low", "high"])],
+            apply: { kind: "setConfigOption", configId: "model", effortConfigId: "effort" },
+          },
+          mode: null,
+        });
+        await OpencodeBackendDescriptor.applySelection(session, {
+          baseModelId: "openai/gpt-5",
+          effort: "high",
+        });
+        expect(applyModelWireId).not.toHaveBeenCalled();
+        expect(setConfigOption).toHaveBeenCalledWith("effort", "high");
+      });
+
+      it("switches the base model before applying its config-option-backed effort", async () => {
+        const { session, applyModelWireId, setConfigOption } = makeSession({
+          model: {
+            current: { baseModelId: "anthropic/claude-sonnet", effort: "low" },
+            availableModels: [entryOffering("openai/gpt-5", ["low", "high"])],
+            apply: { kind: "setConfigOption", configId: "model", effortConfigId: "effort" },
+          },
+          mode: null,
+        });
+        await OpencodeBackendDescriptor.applySelection(session, {
+          baseModelId: "openai/gpt-5",
+          effort: "high",
+        });
+        expect(applyModelWireId).toHaveBeenCalledWith("openai/gpt-5");
+        expect(setConfigOption).toHaveBeenCalledWith("effort", "high");
+        expect(applyModelWireId.mock.invocationCallOrder[0]).toBeLessThan(
+          setConfigOption.mock.invocationCallOrder[0]
+        );
+      });
+
+      it("uses backend-confirmed startup state instead of the optimistic session state", async () => {
+        const { session, applyModelWireId, setConfigOption } = makeSession({
+          model: {
+            current: { baseModelId: "openai/gpt-5", effort: "high" },
+            availableModels: [entryOffering("openai/gpt-5", ["low", "high"])],
+            apply: { kind: "setConfigOption", configId: "model", effortConfigId: "effort" },
+          },
+          mode: null,
+        });
+
+        await OpencodeBackendDescriptor.applySelection(
+          session,
+          { baseModelId: "openai/gpt-5", effort: "high" },
+          { backendReportedCurrent: { baseModelId: "copilot-plus/minimax-m2.7", effort: null } }
+        );
+
+        expect(applyModelWireId).toHaveBeenCalledWith("openai/gpt-5");
+        expect(setConfigOption).toHaveBeenCalledWith("effort", "high");
+      });
+
+      it("activates the bare model when the catalog is config-option backed but publishes no effort option, dropping a saved level instead of suffixing it (https://github.com/Brevilabs/obsidian-copilot-private/issues/364)", async () => {
+        const { session, applyModelWireId, setConfigOption } = makeSession({
+          model: {
+            current: { baseModelId: "opencode/big-pickle", effort: null },
+            availableModels: [entryOffering("copilot-plus/copilot-plus-flash", [])],
+            apply: { kind: "setConfigOption", configId: "model" },
+          },
+          mode: null,
+        });
+
+        await OpencodeBackendDescriptor.applySelection(session, {
+          baseModelId: "copilot-plus/copilot-plus-flash",
+          effort: "high",
+        });
+
+        expect(applyModelWireId).toHaveBeenCalledTimes(1);
+        expect(applyModelWireId).toHaveBeenCalledWith("copilot-plus/copilot-plus-flash");
+        expect(setConfigOption).not.toHaveBeenCalled();
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/219 applies the lowest effort when the saved level is no longer offered (https://github.com/logancyang/obsidian-copilot/issues/2917)", async () => {
+        const { session, applyModelWireId, setConfigOption } = makeSession({
+          model: {
+            current: { baseModelId: "anthropic/claude-sonnet", effort: null },
+            availableModels: [entryOffering("openai/gpt-5", ["low", "high"])],
+            apply: { kind: "setConfigOption", configId: "model", effortConfigId: "effort" },
+          },
+          mode: null,
+        });
+
+        await OpencodeBackendDescriptor.applySelection(session, {
+          baseModelId: "openai/gpt-5",
+          effort: "medium",
+        });
+
+        expect(applyModelWireId).toHaveBeenCalledWith("openai/gpt-5");
+        expect(setConfigOption).toHaveBeenCalledWith("effort", "low");
+      });
     });
-    const result = await run(proc, [
-      { baseModelId: GPT, name: "GPT", credentialState: "ok" },
-      { baseModelId: QWEN, name: "Qwen", credentialState: "ok" },
-    ]);
-    expect(result).toEqual({}); // GPT threw, QWEN has no effort
-    expect(setSessionConfigOption.mock.calls.map((c) => c[0].value)).toEqual([
-      GPT,
-      QWEN,
-      "orig/model",
-    ]);
+
+    describe("onPluginLoad()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/530 reconciles disk state then checks the pin before allowing startup", async () => {
+        const plugin = vaultPlugin(os.tmpdir());
+        const manager = getOpencodeBinaryManager(plugin);
+        const refresh = jest.spyOn(manager, "refreshInstallState").mockResolvedValue();
+        const automatic = jest.spyOn(manager, "autoUpgrade").mockResolvedValue();
+        try {
+          await OpencodeBackendDescriptor.onPluginLoad?.(plugin);
+          expect(refresh).toHaveBeenCalledTimes(1);
+          expect(automatic).toHaveBeenCalledWith(
+            OPENCODE_PINNED_VERSION,
+            OPENCODE_MIN_VERSION,
+            expect.any(Function)
+          );
+        } finally {
+          refresh.mockRestore();
+          automatic.mockRestore();
+        }
+      });
+      it("rebinds the shared manager to the vault of the plugin lifecycle that loads", async () => {
+        const emptyVault = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-load-a-"));
+        const legacyVault = await vaultWithLegacyInstall("opencode-load-b-", 12);
+        try {
+          await OpencodeBackendDescriptor.onPluginLoad?.(vaultPlugin(emptyVault));
+          const manager = getOpencodeBinaryManager(vaultPlugin(emptyVault));
+          const before = await manager.downloadsSize();
+
+          await OpencodeBackendDescriptor.onPluginLoad?.(vaultPlugin(legacyVault));
+
+          expect((await manager.downloadsSize()) - before).toBe(12);
+        } finally {
+          await fs.promises.rm(emptyVault, { recursive: true, force: true });
+          await fs.promises.rm(legacyVault, { recursive: true, force: true });
+        }
+      });
+    });
+
+    describe("subscribeInstallState()", () => {
+      it("ignores model and probe writes while reporting binary changes (https://github.com/logancyang/obsidian-copilot-preview/issues/103)", () => {
+        const unsubscribe = jest.fn();
+        const { subscribeToSettingsChange } = jest.requireMock<{
+          subscribeToSettingsChange: jest.Mock;
+        }>("@/settings/model");
+        subscribeToSettingsChange.mockReturnValue(unsubscribe);
+
+        const callback = jest.fn();
+        expect(OpencodeBackendDescriptor.subscribeInstallState({} as never, callback)).toBe(
+          unsubscribe
+        );
+        const settingsChangeHandler = subscribeToSettingsChange.mock.calls[0][0] as (
+          prev: CopilotSettings,
+          next: CopilotSettings
+        ) => void;
+        const settings = (opencode: Record<string, unknown>): CopilotSettings =>
+          ({ agentMode: { backends: { opencode } } }) as unknown as CopilotSettings;
+        const previousOpencode = {
+          binaryPath: "/bin/opencode",
+          binaryVersion: "1.0.0",
+          binarySource: "managed",
+          defaultModel: { baseModelId: "openai/gpt-5", effort: null },
+          probeSessionId: "probe-1",
+        };
+        const previous = settings(previousOpencode);
+
+        for (const change of [
+          { defaultModel: { baseModelId: "anthropic/claude-sonnet-4-5", effort: null } },
+          { probeSessionId: "probe-2" },
+        ]) {
+          settingsChangeHandler(previous, settings({ ...previousOpencode, ...change }));
+        }
+        expect(callback).not.toHaveBeenCalled();
+
+        for (const opencode of [
+          { ...previousOpencode, binaryPath: "/new/opencode" },
+          { ...previousOpencode, binaryVersion: "2.0.0" },
+          { ...previousOpencode, binarySource: "custom" },
+        ]) {
+          settingsChangeHandler(previous, settings(opencode));
+        }
+        expect(callback).toHaveBeenCalledTimes(3);
+      });
+    });
   });
-});
 
-const CONFIG_DIR = "my-config";
+  const CONFIG_DIR = "my-config";
 
-/** Desktop CopilotPlugin stand-in whose in-vault paths resolve under `vaultBase`. */
-function vaultPlugin(vaultBase: string): never {
-  const adapter = new FileSystemAdapter();
-  adapter.getBasePath = () => vaultBase;
-  return {
-    app: { vault: { adapter, configDir: CONFIG_DIR } },
-    manifest: { id: "copilot-test" },
-  } as never;
-}
+  function vaultPlugin(vaultBase: string): never {
+    const adapter = new FileSystemAdapter();
+    adapter.getBasePath = () => vaultBase;
+    return {
+      app: { vault: { adapter, configDir: CONFIG_DIR } },
+      manifest: { id: "copilot-test" },
+    } as never;
+  }
 
-/** A vault holding `bytes` of pre-#2569 in-vault opencode install. */
-async function vaultWithLegacyInstall(prefix: string, bytes: number): Promise<string> {
-  const vaultBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), prefix));
-  const bin = path.join(
-    legacyVaultDataDir(vaultBase, CONFIG_DIR, "copilot-test"),
-    "1.14.0",
-    "bin",
-    "opencode"
-  );
-  await fs.promises.mkdir(path.dirname(bin), { recursive: true });
-  await fs.promises.writeFile(bin, "z".repeat(bytes));
-  return vaultBase;
-}
+  async function vaultWithLegacyInstall(prefix: string, bytes: number): Promise<string> {
+    const vaultBase = await fs.promises.mkdtemp(path.join(os.tmpdir(), prefix));
+    const bin = path.join(
+      legacyVaultDataDir(vaultBase, CONFIG_DIR, "copilot-test"),
+      "1.14.0",
+      "bin",
+      "opencode"
+    );
+    await fs.promises.mkdir(path.dirname(bin), { recursive: true });
+    await fs.promises.writeFile(bin, "z".repeat(bytes));
+    return vaultBase;
+  }
 
-describe("getOpencodeBinaryManager()", () => {
-  it("hands back the one manager without repointing it at the asking vault", async () => {
-    const emptyVault = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-desc-a-"));
-    const legacyVault = await vaultWithLegacyInstall("opencode-desc-b-", 12);
-    try {
-      const first = getOpencodeBinaryManager(vaultPlugin(emptyVault));
-      // Only `legacyVault` holds an in-vault copy, so a change here is the
-      // manager having switched vaults. Measured as a delta because the
-      // OS-local install root is real and may be non-empty on this machine.
-      const before = await first.downloadsSize();
-      const second = getOpencodeBinaryManager(vaultPlugin(legacyVault));
+  describe("getOpencodeBinaryManager()", () => {
+    it("hands back the one manager without repointing it at the asking vault", async () => {
+      const emptyVault = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-desc-a-"));
+      const legacyVault = await vaultWithLegacyInstall("opencode-desc-b-", 12);
+      try {
+        const first = getOpencodeBinaryManager(vaultPlugin(emptyVault));
+        const before = await first.downloadsSize();
+        const second = getOpencodeBinaryManager(vaultPlugin(legacyVault));
 
-      // One manager, so an install running from the previous lifecycle survives.
-      expect(second).toBe(first);
-      // Resolving is not a claim to be the running lifecycle: a settings tree
-      // that outlived its own could otherwise aim the singleton — and the
-      // uninstall of whoever else holds it — at a vault nobody is in.
-      expect((await second.downloadsSize()) - before).toBe(0);
-    } finally {
-      await fs.promises.rm(emptyVault, { recursive: true, force: true });
-      await fs.promises.rm(legacyVault, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("OpencodeBackendDescriptor.onPluginLoad()", () => {
-  it("rebinds the surviving manager to the loading lifecycle's vault", async () => {
-    const emptyVault = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-load-a-"));
-    const legacyVault = await vaultWithLegacyInstall("opencode-load-b-", 12);
-    try {
-      await OpencodeBackendDescriptor.onPluginLoad?.(vaultPlugin(emptyVault));
-      // Held across the reload, the way an open Configure dialog holds it.
-      const manager = getOpencodeBinaryManager(vaultPlugin(emptyVault));
-      const before = await manager.downloadsSize();
-
-      await OpencodeBackendDescriptor.onPluginLoad?.(vaultPlugin(legacyVault));
-
-      expect((await manager.downloadsSize()) - before).toBe(12);
-    } finally {
-      await fs.promises.rm(emptyVault, { recursive: true, force: true });
-      await fs.promises.rm(legacyVault, { recursive: true, force: true });
-    }
+        expect(second).toBe(first);
+        expect((await second.downloadsSize()) - before).toBe(0);
+      } finally {
+        await fs.promises.rm(emptyVault, { recursive: true, force: true });
+        await fs.promises.rm(legacyVault, { recursive: true, force: true });
+      }
+    });
   });
 });
