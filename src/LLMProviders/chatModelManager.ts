@@ -62,6 +62,7 @@ const CHAT_PROVIDER_CONSTRUCTORS = {
   [ChatModelProviders.COPILOT_PLUS]: ChatOpenRouter,
   [ChatModelProviders.MISTRAL]: ChatOpenAI,
   [ChatModelProviders.DEEPSEEK]: ChatDeepSeek,
+  [ChatModelProviders.OLLAMA_CLOUD]: ChatOllama,
 } as const;
 
 type ChatProviderConstructMap = typeof CHAT_PROVIDER_CONSTRUCTORS;
@@ -94,6 +95,7 @@ export default class ChatModelManager {
     [ChatModelProviders.MISTRAL]: () => getSettings().mistralApiKey,
     [ChatModelProviders.DEEPSEEK]: () => getSettings().deepseekApiKey,
     [ChatModelProviders.SILICONFLOW]: () => getSettings().siliconflowApiKey,
+    [ChatModelProviders.OLLAMA_CLOUD]: () => getSettings().ollamaCloudApiKey,
   } as const;
 
   private constructor() {
@@ -214,6 +216,15 @@ export default class ChatModelManager {
         think: customModel.capabilities?.includes(ModelCapability.REASONING) ?? false,
         repeatPenalty: 1.1,
         numCtx: customModel.numCtx ?? DEFAULT_OLLAMA_NUM_CTX,
+      },
+      [ChatModelProviders.OLLAMA_CLOUD]: {
+        model: modelName,
+        baseUrl: customModel.baseUrl || "https://api.ollama.com",
+        headers: {
+          Authorization: `Bearer ${customModel.apiKey || getSettings().ollamaCloudApiKey || "default-key"}`,
+        },
+        fetch: customModel.enableCors ? safeFetchNoThrow : undefined,
+        think: customModel.capabilities?.includes(ModelCapability.REASONING) ?? false,
       },
       [ChatModelProviders.LM_STUDIO]: {
         modelName: modelName,

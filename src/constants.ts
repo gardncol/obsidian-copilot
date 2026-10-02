@@ -208,6 +208,9 @@ export enum ChatModels {
   OPENROUTER_GROK_4_3 = "x-ai/grok-4.3",
   SILICONFLOW_DEEPSEEK_V3 = "deepseek-ai/DeepSeek-V3",
   SILICONFLOW_DEEPSEEK_R1 = "deepseek-ai/DeepSeek-R1",
+  OLLAMA_CLOUD_LLAMA3 = "llama3",
+  OLLAMA_CLOUD_QWEN3 = "qwen3",
+  OLLAMA_CLOUD_MISTRAL = "mistral",
 }
 
 export enum ChatModelProviders {
@@ -225,6 +228,7 @@ export enum ChatModelProviders {
   DEEPSEEK = "deepseek",
   COHEREAI = "cohereai",
   SILICONFLOW = "siliconflow",
+  OLLAMA_CLOUD = "ollama-cloud",
 }
 
 export enum ModelCapability {
@@ -421,6 +425,28 @@ export const BUILTIN_CHAT_MODELS: CustomModel[] = [
     baseUrl: "https://api.siliconflow.com/v1",
     capabilities: [ModelCapability.REASONING],
   },
+  {
+    name: ChatModels.OLLAMA_CLOUD_LLAMA3,
+    provider: ChatModelProviders.OLLAMA_CLOUD,
+    enabled: true,
+    isBuiltIn: true,
+    baseUrl: "https://api.ollama.com",
+  },
+  {
+    name: ChatModels.OLLAMA_CLOUD_QWEN3,
+    provider: ChatModelProviders.OLLAMA_CLOUD,
+    enabled: false,
+    isBuiltIn: true,
+    baseUrl: "https://api.ollama.com",
+    capabilities: [ModelCapability.VISION],
+  },
+  {
+    name: ChatModels.OLLAMA_CLOUD_MISTRAL,
+    provider: ChatModelProviders.OLLAMA_CLOUD,
+    enabled: false,
+    isBuiltIn: true,
+    baseUrl: "https://api.ollama.com",
+  },
 ];
 
 export type Provider = ChatModelProviders;
@@ -533,6 +559,12 @@ export const ProviderInfo: Record<Provider, ProviderMetadata> = {
     curlBaseURL: BREVILABS_MODELS_BASE_URL,
     keyManagementURL: "",
   },
+  [ChatModelProviders.OLLAMA_CLOUD]: {
+    label: "Ollama Cloud",
+    host: "https://api.ollama.com",
+    curlBaseURL: "https://api.ollama.com",
+    keyManagementURL: "https://ollama.com/settings/keys",
+  },
 };
 
 export const ProviderSettingsKeyMap: Record<SettingKeyProviders, keyof CopilotSettings> = {
@@ -547,6 +579,7 @@ export const ProviderSettingsKeyMap: Record<SettingKeyProviders, keyof CopilotSe
   mistralai: "mistralApiKey",
   deepseek: "deepseekApiKey",
   siliconflow: "siliconflowApiKey",
+  "ollama-cloud": "ollamaCloudApiKey",
 };
 
 export enum DEFAULT_OPEN_AREA {
@@ -671,6 +704,7 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   mistralApiKey: "",
   deepseekApiKey: "",
   siliconflowApiKey: "",
+  ollamaCloudApiKey: "",
   defaultChainType: ChainType.LLM_CHAIN,
   defaultModelKey: ChatModels.OPENROUTER_GEMINI_2_5_FLASH + "|" + ChatModelProviders.OPENROUTERAI,
   contextTurns: 15,
