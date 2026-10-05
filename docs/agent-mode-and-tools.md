@@ -30,7 +30,7 @@ opencode is the most flexible choice because it can use Copilot-hosted, BYOK, an
 2. If you already installed it, choose **My own binary** in **Configure**, then select **Auto-detect** or enter the absolute path and click **Apply**.
 3. Enable the models you want to see and choose a **Default model**.
 
-Managed installs download and verify OpenCode 2.0.3 directly. You do not need to install npm, Bun, Node, or a separate archive tool. Copilot accepts your own OpenCode 2.0.3 or newer binary; some later 2.0.x releases have an upstream bug that can hide configured models when a chat starts.
+Managed installs download and verify a pinned OpenCode release directly. You do not need to install npm, Bun, Node, or a separate archive tool. Copilot accepts your own OpenCode 2.0.21 or newer binary.
 
 If OpenCode's internal service stops responding, Copilot refreshes it. The failed turn explains the problem; send the message again when the agent is ready. If OpenCode cannot reopen the conversation, Copilot starts a new chat. If the service fails before it answers any chat, Copilot stops retrying and shows the error; check the Copilot log for the cause.
 
@@ -108,6 +108,7 @@ Each agent has its own model list. The models shown in one agent do not automati
 - Before the first message, choosing a model from another installed agent switches the empty chat to that agent. Once a conversation has started, it stays with its agent.
 - **Effort** appears only when the selected agent and model support it. Higher effort can improve difficult reasoning but may take longer and use more of your account allowance.
 - Models with effort controls always use a concrete effort. A supported saved effort is kept; otherwise Copilot chooses the lowest supported effort and updates the saved default. Models without effort controls omit effort. **Agent default** clears the saved model preference; the new session shows the agent's model and its resolved effort.
+- Reloading an agent keeps each open chat's model and effort. If that model is no longer enabled for the agent, or is still waiting for its API key, the chat falls back to your saved default, or to one of your enabled models.
 
 The permission picker shows only choices supported by the current agent:
 
