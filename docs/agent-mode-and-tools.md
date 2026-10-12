@@ -124,7 +124,7 @@ With Codex, **Safe** uses the adapter's **Ask for approval** preset. It can edit
 
 When Codex presents a plan, you can **Approve** it, **Reject** it, or type feedback in the plan card. Feedback starts a new chat turn so Codex can revise the plan; review the new proposal before approving it. If you ask Codex to save the plan to a note, approve the revised plan to let it create the note.
 
-When an action needs approval, Agent Chat displays a **Permission required** card with the proposed change or tool input. Choose one of the temporary or persistent allow or deny options offered by that agent. Stopping the turn cancels unanswered requests.
+When an action needs approval, Agent Chat displays a **Permission required** card with the proposed change or tool input. Choose one of the temporary or persistent allow or deny options offered by that agent. The one-time allow is highlighted. Hover an "always" option to see what it covers and how long it lasts: Claude names its rule and the settings file it saves to, and Codex and opencode say when they save a rule for later chats. Claude offers "Allow always" only when it has a rule to save. Stopping the turn cancels unanswered requests.
 
 When Claude or Codex asks a set of questions, answer the current tab and select **Next**. On the final tab, **Submit** becomes available after every question has an answer. You can use the tabs to review or skip ahead. **Cancel** dismisses the entire request. If Codex withdraws or times out the question, its card disappears.
 
@@ -201,7 +201,7 @@ The notice names the agent that needs to reload. Changing Claude's enabled model
 
 Choose **Reload** when you want the change to take effect. The agent restarts and reopens every chat using that agent, keeping each chat’s history and anything you had typed but not sent. During a running turn the reload waits for that turn to finish. If the agent cannot reopen a conversation, that tab starts a fresh chat and the old one remains under Recent Chats. If a chat failed to start, correct its settings and choose **Retry** to apply them.
 
-Two changes never wait. Narrowing Miyo's **Search scope** and turning on Self-Host Mode both restart the agent straight away, so no later step in the conversation can search or browse outside the new boundary.
+Two changes never wait. Narrowing Miyo's **Search scope** and turning on Self-Host Mode both restart the agent straight away, so no later step in the conversation can search or browse outside the new boundary. Agents also search the other Miyo folders you tick under **Current vault**. Unticking one narrows the scope, so it also restarts the agent straight away. Ticking one waits for **Reload**.
 
 ## Related
 

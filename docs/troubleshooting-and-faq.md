@@ -2,6 +2,18 @@
 
 Start in **Settings → Copilot → Basic → Agents** and check the status beside the Agent Chat backend you want to use.
 
+## Copilot is starting or did not start
+
+### A Copilot tab or Copilot's settings say “Starting Copilot…”
+
+Copilot finishes loading in the background after Obsidian opens your vault, so the vault never waits for it. Until it is ready, Copilot tabs that were open last time and **Settings → Copilot** show **Starting Copilot…**, and Copilot's commands and ribbon icon are not there yet. This usually lasts a moment. The first start after an update can take longer while Copilot updates your settings.
+
+Keep the tab open. It turns back into your chat as soon as Copilot is ready, and the settings page fills in on its own.
+
+### “Copilot failed to start”
+
+Copilot ran into an error while loading and stayed off for this session. To see the error, open the developer console (**View → Toggle Developer Tools**, then the **Console** tab). Then turn Copilot off and on again under **Settings → Community plugins**, or restart Obsidian. If the notice comes back, open an issue and include the error from the console.
+
 ## Agent Chat setup
 
 ### opencode shows “Not set up” or “Error”
@@ -140,7 +152,7 @@ That deletion covers the uploaded copy only. The zip on your own computer is you
 
 ### Collecting logs by hand
 
-Run **Copilot: Create log file** from the command palette to save the regular chat log into your vault as a note and open it. The Agent Chat log can be opened or cleared under **Advanced → Debugging & support → Agent Mode activity log**.
+Run **Copilot: Create log file** from the command palette to save the Copilot log into your vault as a note and open it. The Agent Chat log can be opened or cleared under **Advanced → Debugging & support → Agent Mode activity log**.
 
 Logs and screenshots can contain prompts, note contents, paths, and tool inputs. Review them before attaching anything to a public issue.
 

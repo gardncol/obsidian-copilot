@@ -95,6 +95,23 @@ function verb(part: ToolCallPart, progressive: string, past: string): string {
   return part.status === "completed" || part.status === "failed" ? past : progressive;
 }
 
+function fileChangeVerb(
+  part: ToolCallPart,
+  progressive: string,
+  past: string,
+  negated: string
+): string {
+  // A failed or denied file change leaves the note untouched, so the label
+  // must not claim it happened.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/691
+  return part.status === "failed" ? `Didn't ${negated}` : verb(part, progressive, past);
+}
+
+function createsNewFile(part: ToolCallPart): boolean {
+  const diffs = (part.output ?? []).filter((o) => o.type === "diff");
+  return diffs.length > 0 && diffs.every((o) => o.oldText === null);
+}
+
 function diffTargetPaths(part: ToolCallPart): string[] {
   const paths = new Set<string>();
   for (const output of part.output ?? []) {
@@ -118,7 +135,7 @@ function targetFromPath(part: ToolCallPart, vaultBase: string | null): string | 
   return null;
 }
 
-function displayTargetFromPath(part: ToolCallPart, vaultBase: string | null): string | null {
+export function displayTargetFromPath(part: ToolCallPart, vaultBase: string | null): string | null {
   const path = targetFromPath(part, vaultBase);
   if (!path || !isAbsolutePath(path)) return path;
   const leaf = path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop();
@@ -191,7 +208,8 @@ const EDIT_SUMMARY: ToolSummary = {
   icon: pickToolIcon({ vendorToolName: "Edit" }),
   collapsedLine: (p, ctx) => {
     const diffPathCount = diffTargetPaths(p).length;
-    return `${verb(p, "Editing", "Edited")} ${
+    const lead = fileChangeVerb(p, "Editing", "Edited", createsNewFile(p) ? "create" : "edit");
+    return `${lead} ${
       diffPathCount > 1
         ? pluralize(diffPathCount, "file")
         : (displayTargetFromPath(p, ctx?.vaultBase ?? null) ?? "files")
@@ -209,11 +227,11 @@ const EDIT_SUMMARY: ToolSummary = {
 const BASH_SUMMARY: ToolSummary = {
   icon: pickToolIcon({ vendorToolName: "Bash" }),
   collapsedLine: (p) => {
-    const v = verb(p, "Running", "Ran");
     const input = p.input as { command?: unknown; description?: unknown } | null | undefined;
     if (typeof input?.description === "string" && input.description.length > 0) {
-      return `${v} ${input.description}`;
+      return input.description;
     }
+    const v = verb(p, "Running", "Ran");
     if (typeof input?.command === "string") {
       const cmd = input.command.length > 60 ? input.command.slice(0, 60) + "…" : input.command;
       return `${v} \`${cmd}\``;
@@ -372,7 +390,7 @@ const KIND_FETCH_SUMMARY: ToolSummary = {
 const KIND_DELETE_SUMMARY: ToolSummary = {
   icon: pickToolIcon({ toolKind: "delete" }),
   collapsedLine: (p, ctx) =>
-    `${verb(p, "Deleting", "Deleted")} ${displayTargetFromPath(p, ctx?.vaultBase ?? null) ?? targetFromTitle(p)}`,
+    `${fileChangeVerb(p, "Deleting", "Deleted", "delete")} ${displayTargetFromPath(p, ctx?.vaultBase ?? null) ?? targetFromTitle(p)}`,
   outcome: () => null,
 };
 const KIND_MOVE_SUMMARY: ToolSummary = {

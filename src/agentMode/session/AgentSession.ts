@@ -43,7 +43,7 @@ import {
   isWebSelectedTextContext,
   MessageContext,
 } from "@/types/message";
-import { err2String, formatDateTime } from "@/utils";
+import { err2String, formatDateTime, type FormattedDateTime } from "@/utils";
 import { ensureMultiAgentEntitlement, showMultiAgentUpgradePrompt } from "@/plusUtils";
 import type { App } from "obsidian";
 import { MethodUnsupportedError } from "@/agentMode/session/errors";
@@ -72,6 +72,7 @@ import {
   noEnabledModelError,
   pickEnabledModel,
 } from "@/agentMode/session/enabledModelSelection";
+import { stripUserMessageWrapper } from "@/agentMode/session/promptEnvelope";
 import { replayPersistedMode } from "@/agentMode/session/replayPersistedMode";
 
 export type RunFanoutTurn = (input: FanoutRunInput) => Promise<FanoutTurn>;
@@ -142,7 +143,6 @@ export interface AgentSessionStateOptions extends ProjectContextUpdatesHooks {
   chatInputId?: string;
   backendId: BackendId;
   projectId?: ProjectScopeId;
-  initialState?: BackendState | null;
   defaultModelSelection?: ModelSelection;
   defaultMode?: CopilotMode | null;
   cwd?: string | null;
@@ -166,6 +166,7 @@ export class AgentSession {
   private readonly contextReady: Promise<ContextMaterializationResult> | null;
   private projectContextBlock: string | null = null;
   private firstPromptSent = false;
+  private lastSentWebTabBlock: string | null = null;
   private readonly getDescriptor: (() => BackendDescriptor | undefined) | null;
   private readonly runFanoutTurn: RunFanoutTurn | null;
   private readonly getDisplayName: ((backendId: BackendId) => string) | null;
@@ -196,6 +197,14 @@ export class AgentSession {
   private label: string | null = null;
   private labelSource: "user" | "agent" | null = null;
   private disposed = false;
+  private resumeSelection: ModelSelection | undefined;
+  private resumeMode: CopilotMode | null | undefined;
+  private settleReady: () => void = () => {};
+  private historyOpen = false;
+  private historyUser: { wireId: string | undefined; raw: string; occurredAt?: number } | null =
+    null;
+  private historyAiId: string | null = null;
+  private historyTurnStartedAt: number | undefined;
   private pendingPlanResolvers = new Map<
     string,
     {
@@ -246,31 +255,38 @@ export class AgentSession {
     this.contextReady = "contextReady" in opts ? (opts.contextReady ?? null) : null;
     if ("backendSessionId" in opts) {
       this.backendSessionId = opts.backendSessionId;
-      const originalState = opts.initialState ?? null;
-      this.currentState = originalState;
+      this.resumeSelection = opts.defaultModelSelection;
+      this.resumeMode = opts.defaultMode;
+      // The backend replays the chat as live-shaped updates until its load response; collect them from the first frame. https://github.com/Brevilabs/obsidian-copilot-private/issues/602
+      this.historyOpen = true;
       this.unregisterSessionHandler = this.backend.registerSessionHandler(
         opts.backendSessionId,
         (event) => this.handleSessionEvent(event)
       );
-      const selection = opts.defaultModelSelection ?? originalState?.model?.current;
-      if (selection && originalState) {
-        this.ready = this.applyStartupSelection(selection, opts.defaultMode)
-          // A resumed chat stays open to pick an enabled model; sends on any other model are refused.
-          // https://github.com/Brevilabs/obsidian-copilot-private/issues/625
-          .catch((e) => logWarn(`[AgentMode] resumed ${this.backendId} session kept its model`, e))
-          .finally(() => {
-            this.startupSettled = true;
-            this.recomputeStatusIfChanged();
-          });
-      } else {
-        this.startupSettled = true;
-        this.ready = Promise.resolve();
-      }
-      this.cachedStatus = this.getStatus();
+      this.ready = new Promise<void>((resolve) => {
+        this.settleReady = resolve;
+      });
     } else {
       this.currentState = null;
       this.ready = this.initialize(opts);
     }
+  }
+
+  completeResume(state: BackendState | null): void {
+    this.endHistory();
+    this.currentState = state;
+    const settle = () => {
+      this.startupSettled = true;
+      this.recomputeStatusIfChanged();
+      this.settleReady();
+    };
+    const selection = this.resumeSelection ?? state?.model?.current;
+    if (!selection || !state) return settle();
+    void this.applyStartupSelection(selection, this.resumeMode)
+      // A resumed chat stays open to pick an enabled model; sends on any other model are refused.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/625
+      .catch((e) => logWarn(`[AgentMode] resumed ${this.backendId} session kept its model`, e))
+      .finally(settle);
   }
 
   static start(opts: AgentSessionStartOptions): AgentSession {
@@ -716,11 +732,14 @@ export class AgentSession {
       }
 
       const leadingContextBlock = buildPriorFanoutContextBlock(this.pendingFanoutContext);
+      // The agent keeps every earlier turn, so resending an unchanged page fills its context
+      // window with copies. https://github.com/Brevilabs/obsidian-copilot-private/issues/667
+      const webTabPromptBlock = webTabBlock === this.lastSentWebTabBlock ? "" : webTabBlock;
       const promptBlocks = buildPromptBlocks(
         displayText,
         context,
         promptContent,
-        webTabBlock,
+        webTabPromptBlock,
         projectContextBlock,
         leadingContextBlock,
         projectContextUpdatesBlock
@@ -767,6 +786,7 @@ export class AgentSession {
         this.pendingFanoutContext = [];
       }
       if (isFirstTurn && promptStarted) this.firstPromptSent = true;
+      if (webTabBlock && promptStarted) this.lastSentWebTabBlock = webTabBlock;
       if (projectContextUpdates && promptStarted) {
         this.markProjectContextUpdatesDeliveredFn?.(projectContextUpdates.epoch);
       }
@@ -1245,6 +1265,12 @@ export class AgentSession {
 
   private handleSessionEvent(event: SessionEvent): void {
     const update = event.update;
+    // A user message echoed outside the replay is already shown from the prompt that sent it. https://github.com/Brevilabs/obsidian-copilot-private/issues/602
+    if (update.sessionUpdate === "user_message_chunk" && !this.historyOpen) return;
+    if (this.historyOpen && this.appendHistory(update, event.occurredAt)) {
+      this.extendHistoryTurn(event.occurredAt);
+      return;
+    }
     const toolOwnerMessageId =
       update.sessionUpdate === "tool_call_update"
         ? this.store.findMessageIdWithToolCall(update.toolCallId)
@@ -1396,6 +1422,110 @@ export class AgentSession {
         );
         return;
     }
+  }
+
+  // Frames replayed before the load response are the chat's past turns, not a turn in flight. https://github.com/Brevilabs/obsidian-copilot-private/issues/602
+  private appendHistory(update: SessionEvent["update"], occurredAt: number | undefined): boolean {
+    switch (update.sessionUpdate) {
+      case "user_message_chunk": {
+        const text = extractText(update.content);
+        const current = this.historyUser;
+        if (current && update.messageId !== undefined && current.wireId === update.messageId) {
+          current.raw += text;
+          return true;
+        }
+        if (!text.trim()) return true;
+        this.flushHistoryUser();
+        this.historyAiId = null;
+        this.historyUser = { wireId: update.messageId, raw: text, occurredAt };
+        this.historyTurnStartedAt = occurredAt;
+        return true;
+      }
+      case "agent_message_chunk":
+      case "agent_thought_chunk": {
+        const text = extractText(update.content);
+        if (!text) return true;
+        const id = this.historyAiBubbleId(occurredAt);
+        const appended =
+          update.sessionUpdate === "agent_message_chunk"
+            ? this.store.appendAgentText(id, text)
+            : this.store.appendAgentThought(id, text);
+        if (appended) this.scheduleNotifyMessages();
+        return true;
+      }
+      case "tool_call":
+        if (
+          this.store.upsertAgentPart(this.historyAiBubbleId(occurredAt), toolCallToPart(update))
+        ) {
+          this.scheduleNotifyMessages();
+        }
+        return true;
+      case "tool_call_update": {
+        const id =
+          this.store.findMessageIdWithToolCall(update.toolCallId) ??
+          this.historyAiBubbleId(occurredAt);
+        const merged = mergeToolCallUpdate(this.findToolCallPart(id, update.toolCallId), update);
+        if (this.store.upsertAgentPart(id, merged)) this.scheduleNotifyMessages();
+        return true;
+      }
+      case "plan":
+        if (this.store.upsertAgentPart(this.historyAiBubbleId(occurredAt), planToPart(update))) {
+          this.scheduleNotifyMessages();
+        }
+        // The last replayed task list is the one the chat closed with, so the project popover shows it again. https://github.com/Brevilabs/obsidian-copilot-private/issues/643
+        if (this.applyCurrentTodoList(update.entries)) this.notifyCurrentTodoListChanged();
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  // A prompt's context envelope stays hidden until its wrapper is complete, so a user bubble waits for the message to end. https://github.com/Brevilabs/obsidian-copilot-private/issues/602
+  private flushHistoryUser(): void {
+    const pending = this.historyUser;
+    this.historyUser = null;
+    if (!pending) return;
+    this.store.addMessage({
+      message: stripUserMessageWrapper(pending.raw),
+      sender: USER_SENDER,
+      timestamp: historyTimestamp(pending.occurredAt),
+      isVisible: true,
+    });
+    this.scheduleNotifyMessages();
+  }
+
+  private historyAiBubbleId(occurredAt: number | undefined): string {
+    if (this.historyAiId) return this.historyAiId;
+    this.flushHistoryUser();
+    const startedAt = this.historyTurnStartedAt;
+    this.historyAiId = this.store.addMessage({
+      message: "",
+      sender: AI_SENDER,
+      timestamp: historyTimestamp(occurredAt),
+      isVisible: true,
+      parts: [],
+      turnDurationMs:
+        startedAt === undefined || occurredAt === undefined
+          ? undefined
+          : Math.max(0, occurredAt - startedAt),
+    });
+    return this.historyAiId;
+  }
+
+  // A replayed turn lasts from its prompt to its last timed frame; frames from an agent that sends no times leave it untimed. https://github.com/Brevilabs/obsidian-copilot-private/issues/643
+  private extendHistoryTurn(occurredAt: number | undefined): void {
+    const startedAt = this.historyTurnStartedAt;
+    if (!this.historyAiId || startedAt === undefined || occurredAt === undefined) return;
+    if (this.store.extendTurnDuration(this.historyAiId, occurredAt - startedAt)) {
+      this.scheduleNotifyMessages();
+    }
+  }
+
+  private endHistory(): void {
+    this.flushHistoryUser();
+    this.historyOpen = false;
+    this.historyAiId = null;
+    this.historyTurnStartedAt = undefined;
   }
 
   private resolveContentTarget(messageId: string | undefined): string | null {
@@ -1708,7 +1838,7 @@ function buildContextEnvelope(context: MessageContext | undefined): string | nul
 
   const lines: string[] = [
     "<copilot-context>",
-    "The user attached the following vault items. The vault is your current working directory; use the Read tool to inspect them when relevant.",
+    "The user attached the following vault items as context. The vault is your current working directory; open them if you need their contents.",
   ];
   if (notePaths.length > 0) {
     lines.push("", "Notes:");
@@ -1858,4 +1988,8 @@ function planToPart(plan: PlanSummary & { sessionUpdate?: "plan" }): AgentMessag
       status: e.status,
     })),
   };
+}
+
+function historyTimestamp(occurredAt: number | undefined): FormattedDateTime | null {
+  return occurredAt === undefined ? null : formatDateTime(new Date(occurredAt));
 }

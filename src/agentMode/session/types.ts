@@ -246,6 +246,7 @@ export interface PlanSummary {
 }
 
 export type SessionUpdate =
+  | { sessionUpdate: "user_message_chunk"; content: PromptContent; messageId?: string }
   | { sessionUpdate: "agent_message_chunk"; content: PromptContent; messageId?: string }
   | { sessionUpdate: "agent_thought_chunk"; content: PromptContent; messageId?: string }
   | ({ sessionUpdate: "tool_call" } & ToolCallSnapshot)
@@ -271,6 +272,7 @@ export interface SessionUsage {
 export interface SessionEvent {
   sessionId: SessionId;
   update: SessionUpdate;
+  occurredAt?: number;
 }
 
 export type PermissionOptionKind = "allow_once" | "allow_always" | "reject_once" | "reject_always";
@@ -355,9 +357,7 @@ export interface LoadSessionInput {
   additionalDirectories?: string[];
 }
 
-export interface LoadSessionOutput extends OpenSessionOutput {
-  transcript?: AgentChatMessage[];
-}
+export type LoadSessionOutput = OpenSessionOutput;
 
 export interface PromptInput {
   sessionId: SessionId;
@@ -418,10 +418,6 @@ export interface BackendProcess {
   listSessions(params: ListSessionsInput): Promise<ListSessionsOutput>;
   resumeSession(params: ResumeSessionInput): Promise<ResumeSessionOutput>;
   loadSession(params: LoadSessionInput): Promise<LoadSessionOutput>;
-  readPersistedTranscript?(params: {
-    sessionId: SessionId;
-    cwd: string;
-  }): Promise<AgentChatMessage[]>;
   sessionExistsLocally?(params: { sessionId: SessionId; cwd: string }): Promise<boolean>;
   supportsAdditionalDirectories?(): boolean;
   shutdown(): Promise<void>;

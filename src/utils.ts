@@ -1,5 +1,4 @@
 import { compareSemver } from "@/utils/semver";
-import { Buffer } from "buffer/";
 
 import { ChainType } from "@/chainType";
 import {
@@ -280,16 +279,6 @@ export function isPlusChain(chainType: ChainType): boolean {
   return chainType === ChainType.COPILOT_PLUS_CHAIN;
 }
 
-export function isAllowedFileForChainContext(file: TFile | null, chainType: ChainType): boolean {
-  if (!file) return false;
-
-  if (isTextReadableFile(file)) {
-    return true;
-  }
-
-  return isPlusChain(chainType);
-}
-
 export interface ChatHistoryEntry {
   role: "user" | "assistant";
   content: string;
@@ -532,14 +521,7 @@ export async function safeFetch(
     bodyUsed: true,
     json: (): Promise<unknown> => Promise.resolve(response.json as unknown),
     text: async () => response.text,
-    arrayBuffer: async () => {
-      if (response.arrayBuffer) {
-        return response.arrayBuffer;
-      }
-      const base64 = response.text.replace(/^data:.*;base64,/, "");
-      const buf = Buffer.from(base64, "base64");
-      return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-    },
+    arrayBuffer: () => Promise.resolve(response.arrayBuffer),
     blob: () => {
       throw new Error("not implemented");
     },

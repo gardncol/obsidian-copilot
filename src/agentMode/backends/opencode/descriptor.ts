@@ -25,6 +25,7 @@ import { opencodeEnabledModelEntries, opencodeWireBaseIdFor } from "./opencodeMo
 import { OpencodeSettingsPanel } from "./OpencodeSettingsPanel";
 import { mapNodeArch, mapNodePlatform } from "./platformResolver";
 import { cacheRoot } from "@/context/conversionsLocation";
+import { opencodeTrimPluginDir } from "./opencodeTrimPlugin";
 import type { ModelSelectionSession } from "@/agentMode/session/types";
 import { simpleBinaryBackendProcess } from "@/agentMode/backends/shared/simpleBinaryBackend";
 import type {
@@ -32,6 +33,7 @@ import type {
   ModeMapping,
   ModelSelection,
   ModelWireCodec,
+  PermissionOption,
 } from "@/agentMode/session/types";
 import type { BackendDescriptor, BackendProcess, InstallState } from "@/agentMode/session/types";
 import { EFFORT_LEVELS_ASCENDING } from "@/agentMode/session/types";
@@ -87,6 +89,17 @@ export const OpencodeBackendDescriptor: BackendDescriptor = {
 
   getEnabledModelEntries(settings: CopilotSettings): EnabledModelEntry[] {
     return [...opencodeEnabledModelEntries(settings)];
+  },
+
+  // OpenCode 2.0.22 stores an "always" reply as a saved rule for its project folder.
+  // https://github.com/logancyang/obsidian-copilot/issues/2889
+  presentPermissionOption(option: PermissionOption): PermissionOption {
+    if (option.kind !== "allow_always") return option;
+    return {
+      ...option,
+      description:
+        "Saves a rule that opencode uses in later chats in this folder: the vault folder, or the project note's folder for a project chat.",
+    };
   },
 
   getWireBaseId(configuredModelId: string, settings: CopilotSettings): string | null {
@@ -185,6 +198,7 @@ export const OpencodeBackendDescriptor: BackendDescriptor = {
         backendConfigRegistry,
         clientVersion: args.clientVersion,
         getCacheRoot: () => cacheRoot(args.plugin.app),
+        getTrimPluginDir: opencodeTrimPluginDir,
         getSelfHostWebSearchChannel: () => {
           const bridge = args.plugin.selfHostWebSearchAgentBridge;
           if (!bridge) {

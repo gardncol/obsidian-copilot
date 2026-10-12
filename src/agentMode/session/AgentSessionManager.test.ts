@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { waitFor } from "@testing-library/react";
 import { AgentSession } from "./AgentSession";
 import { buildNativeChatId } from "@/utils/nativeChatId";
-import { CHAT_AGENT_VIEWTYPE } from "@/constants";
+import { AI_SENDER, CHAT_AGENT_VIEWTYPE, USER_SENDER } from "@/constants";
+import { serializeFanoutComposite } from "@/agentMode/session/fanout/fanoutTypes";
+import { formatDateTime } from "@/utils";
 import { playNotificationSound } from "@/utils/notificationSound";
 import { AgentSessionIndex } from "./AgentSessionIndex";
 import { AgentSessionManager } from "./AgentSessionManager";
@@ -29,6 +31,7 @@ import { getProjectContextSignature } from "@/projects/projectContextSignature";
 import { MethodUnsupportedError } from "@/agentMode/session/errors";
 import { buildCodexModeMapping } from "@/agentMode/backends/codex/codexModeMapping";
 import type {
+  AgentChatMessage,
   BackendProcess,
   BackendDescriptor,
   BackendId,
@@ -36,6 +39,7 @@ import type {
   BackendState,
   InstallState,
   ModelSelection,
+  SessionEvent,
 } from "./types";
 
 const mockEnsureMaterialized = ensureProjectContextMaterialized as jest.Mock;
@@ -511,6 +515,59 @@ function holdNextBackendShutdown(): { started: Promise<void>; release: () => voi
     );
   });
   return { started, release: () => release() };
+}
+
+type ReplayFrame = SessionEvent["update"];
+
+function buildReplayingBackend(
+  opts: {
+    onLoad?: (emit: (update: ReplayFrame) => void) => void;
+    loadSession?: jest.Mock;
+    resumeSession?: jest.Mock;
+  } = {}
+) {
+  const handlers = new Map<string, (event: SessionEvent) => void>();
+  const buffered: SessionEvent[] = [];
+  const unregister = jest.fn();
+  const handlerCountAtOpen: Record<"load" | "resume", number> = { load: -1, resume: -1 };
+  const deliver = (sessionId: string, update: ReplayFrame) => {
+    const handler = handlers.get(sessionId);
+    if (handler) handler({ sessionId, update });
+    else buffered.push({ sessionId, update });
+  };
+  const state = { model: null, mode: null };
+  const backend = {
+    ...makeMockBackendProcess(),
+    registerSessionHandler: jest.fn((sessionId: string, handler: (event: SessionEvent) => void) => {
+      handlers.set(sessionId, handler);
+      for (const event of buffered.splice(0)) handler(event);
+      return unregister;
+    }),
+    loadSession:
+      opts.loadSession ??
+      jest.fn(async ({ sessionId }: { sessionId: string }) => {
+        handlerCountAtOpen.load = handlers.size;
+        opts.onLoad?.((update) => deliver(sessionId, update));
+        return { sessionId, state };
+      }),
+    resumeSession:
+      opts.resumeSession ??
+      jest.fn(async ({ sessionId }: { sessionId: string }) => {
+        handlerCountAtOpen.resume = handlers.size;
+        return { sessionId, state };
+      }),
+  };
+  return { backend, unregister, handlerCountAtOpen, emit: deliver };
+}
+
+const replayChunk = (
+  sessionUpdate: "user_message_chunk" | "agent_message_chunk",
+  text: string,
+  messageId: string
+): ReplayFrame => ({ sessionUpdate, content: { type: "text", text }, messageId });
+
+function senderAndText(session: AgentSession): [string, string][] {
+  return session.store.getDisplayMessages().map((m) => [m.sender, m.message]);
 }
 
 function buildManagerWithReplay(
@@ -2387,6 +2444,36 @@ describe("AgentSessionManager", () => {
         expect(mgr.getSessions()).toHaveLength(1);
       });
 
+      it("rebuilds the replaced tab with the tool calls its backend replays during load (https://github.com/Brevilabs/obsidian-copilot-private/issues/643)", async () => {
+        const replay = buildReplayingBackend({
+          onLoad: (emit) => {
+            emit(replayChunk("user_message_chunk", "list the notes", "u1"));
+            emit({
+              sessionUpdate: "tool_call",
+              toolCallId: "tool-ls",
+              title: "Bash: ls",
+              kind: "execute",
+              status: "in_progress",
+            });
+            emit({ sessionUpdate: "tool_call_update", toolCallId: "tool-ls", status: "completed" });
+          },
+        });
+        const mgr = buildManager({
+          descriptor: buildDescriptor({ createBackendProcess: () => replay.backend }),
+        });
+        await mgr.createSession();
+
+        await mgr.restartBackend("opencode", "managed skills changed");
+
+        expect(senderAndText(mgr.getActiveSession()!)).toEqual([
+          [USER_SENDER, "list the notes"],
+          [AI_SENDER, ""],
+        ]);
+        expect(mgr.getActiveSession()!.store.getDisplayMessages()[1].parts).toMatchObject([
+          { kind: "tool_call", id: "tool-ls", status: "completed" },
+        ]);
+      });
+
       it("keeps the replaced tab's title across the restart (https://github.com/Brevilabs/obsidian-copilot-private/issues/475)", async () => {
         const mgr = buildManagerWithReplay();
         const first = await mgr.createSession();
@@ -3624,7 +3711,288 @@ describe("AgentSessionManager", () => {
       });
     });
 
+    describe("loadSessionFromHistory()", () => {
+      const savedAt = formatDateTime(new Date("2026-01-02T03:04:05Z"));
+      const savedChat = (messages: AgentChatMessage[]) =>
+        jest.fn().mockResolvedValue({
+          backendId: "opencode",
+          sessionId: "native-1",
+          projectId: GLOBAL_SCOPE,
+          messages,
+        });
+      const savedTurn: AgentChatMessage[] = [
+        {
+          id: "s1",
+          sender: USER_SENDER,
+          message: "saved question",
+          isVisible: true,
+          timestamp: savedAt,
+        },
+        {
+          id: "s2",
+          sender: AI_SENDER,
+          message: "saved answer",
+          isVisible: true,
+          timestamp: savedAt,
+        },
+      ];
+      const openSavedChat = (
+        replay: ReturnType<typeof buildReplayingBackend>,
+        messages: AgentChatMessage[] = savedTurn
+      ) =>
+        buildManager({
+          persistence: { loadFile: savedChat(messages) },
+          descriptor: buildDescriptor({ createBackendProcess: () => replay.backend }),
+        }).loadSessionFromHistory(mockTFile({ path: "chat/Saved.md" }));
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/671 shows the replayed chat with its tool calls instead of the note's text when the session reattaches, and drops frames that arrive after the load response", async () => {
+        const replay = buildReplayingBackend({
+          onLoad: (emit) => {
+            emit(replayChunk("user_message_chunk", "replayed question", "u1"));
+            emit({
+              sessionUpdate: "tool_call",
+              toolCallId: "tool-read",
+              title: "Read note.md",
+              kind: "read",
+              status: "completed",
+            });
+            emit(replayChunk("agent_message_chunk", "replayed answer", "a1"));
+          },
+        });
+
+        const session = await openSavedChat(replay);
+        replay.emit("native-1", replayChunk("agent_message_chunk", "late replayed answer", "a1"));
+
+        expect(senderAndText(session)).toEqual([
+          [USER_SENDER, "replayed question"],
+          [AI_SENDER, "replayed answer"],
+        ]);
+        expect(session.store.getDisplayMessages()[1].parts?.map((p) => p.kind)).toEqual([
+          "tool_call",
+          "text",
+        ]);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/671 gives replayed messages without send times the note's times so the next autosave keeps them", async () => {
+        const replay = buildReplayingBackend({
+          onLoad: (emit) => {
+            emit(replayChunk("user_message_chunk", "replayed question", "u1"));
+            emit(replayChunk("agent_message_chunk", "replayed answer", "a1"));
+          },
+        });
+
+        const session = await openSavedChat(replay);
+
+        expect(session.store.getDisplayMessages().map((m) => [m.message, m.timestamp])).toEqual([
+          ["replayed question", savedAt],
+          ["replayed answer", savedAt],
+        ]);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/671 shows the note's messages when the reattached session replays nothing", async () => {
+        const replay = buildReplayingBackend({
+          loadSession: jest.fn(async () => {
+            throw new MethodUnsupportedError("session/load");
+          }),
+        });
+
+        const session = await openSavedChat(replay);
+
+        expect(senderAndText(session)).toEqual([
+          [USER_SENDER, "saved question"],
+          [AI_SENDER, "saved answer"],
+        ]);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/671 shows the note's messages when the note holds a fanout turn the agent's own session never saw", async () => {
+        const fanoutBody = serializeFanoutComposite(
+          {
+            answers: { codex: { backendId: "codex", status: "done", text: "codex answer" } },
+            summary: { status: "done", text: "the summary" },
+          },
+          (id) => id
+        );
+        const replay = buildReplayingBackend({
+          onLoad: (emit) => {
+            emit(replayChunk("user_message_chunk", "replayed question", "u1"));
+            emit(replayChunk("agent_message_chunk", "replayed answer", "a1"));
+          },
+        });
+
+        const session = await openSavedChat(replay, [
+          ...savedTurn,
+          { id: "s3", sender: USER_SENDER, message: "ask both", isVisible: true, timestamp: null },
+          { id: "s4", sender: AI_SENDER, message: fanoutBody, isVisible: true, timestamp: null },
+        ]);
+
+        expect(senderAndText(session)).toEqual([
+          [USER_SENDER, "saved question"],
+          [AI_SENDER, "saved answer"],
+          [USER_SENDER, "ask both"],
+          [AI_SENDER, fanoutBody],
+        ]);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/671 shows the note's messages when the note holds a refused turn that never reached the agent", async () => {
+        const replay = buildReplayingBackend({
+          onLoad: (emit) => {
+            emit(replayChunk("user_message_chunk", "replayed question", "u1"));
+            emit(replayChunk("agent_message_chunk", "replayed answer", "a1"));
+          },
+        });
+        const refusal = "This chat's model isn't enabled. Pick an enabled model to continue.";
+
+        const session = await openSavedChat(replay, [
+          ...savedTurn,
+          { id: "s3", sender: USER_SENDER, message: "try again", isVisible: true, timestamp: null },
+          { id: "s4", sender: AI_SENDER, message: refusal, isVisible: true, timestamp: null },
+        ]);
+
+        expect(senderAndText(session)).toEqual([
+          [USER_SENDER, "saved question"],
+          [AI_SENDER, "saved answer"],
+          [USER_SENDER, "try again"],
+          [AI_SENDER, refusal],
+        ]);
+      });
+    });
+
     describe("loadNativeSessionFromHistory()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/602 keeps the frames replayed before the load response as history bubbles and drops out-of-turn frames that arrive after it", async () => {
+        const replay = buildReplayingBackend({
+          onLoad: (emit) => {
+            emit(replayChunk("user_message_chunk", "test", "u1"));
+            emit(replayChunk("agent_message_chunk", "first ", "a1"));
+          },
+        });
+        const { manager } = buildHistoryHarness({
+          createBackendProcess: jest.fn(() => replay.backend),
+        });
+
+        const session = await manager.loadNativeSessionFromHistory("opencode", "saved-chat");
+        replay.emit("saved-chat", replayChunk("agent_message_chunk", "second", "a1"));
+
+        expect(senderAndText(session)).toEqual([
+          [USER_SENDER, "test"],
+          [AI_SENDER, "first "],
+        ]);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/643 shows a reopened Claude chat's thinking, tool call with its result, todo plan, and reply from the frames its backend replays during load", async () => {
+        const replay = buildReplayingBackend({
+          onLoad: (emit) => {
+            emit(replayChunk("user_message_chunk", "rename the note", "u1"));
+            emit({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "mv" } });
+            emit({
+              sessionUpdate: "tool_call",
+              toolCallId: "tool-mv",
+              title: "Bash: mv a.md b.md",
+              kind: "execute",
+              status: "in_progress",
+            });
+            emit({ sessionUpdate: "tool_call_update", toolCallId: "tool-mv", status: "completed" });
+            emit({
+              sessionUpdate: "plan",
+              entries: [{ content: "Rename the note", status: "completed", priority: "medium" }],
+            });
+            emit(replayChunk("agent_message_chunk", "Renamed.", "a1"));
+          },
+        });
+        const { manager } = buildHistoryHarness({
+          backendId: "claude",
+          createBackendProcess: jest.fn(() => replay.backend),
+        });
+
+        const session = await manager.loadNativeSessionFromHistory("claude", "saved-chat");
+
+        const [user, reply] = session.store.getDisplayMessages();
+        expect(session.store.getDisplayMessages()).toHaveLength(2);
+        expect([user.sender, user.message]).toEqual([USER_SENDER, "rename the note"]);
+        expect(reply.parts?.map((p) => p.kind)).toEqual(["thought", "tool_call", "plan", "text"]);
+        expect(reply.parts?.find((p) => p.kind === "tool_call")).toMatchObject({
+          id: "tool-mv",
+          status: "completed",
+        });
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/602 registers the chat's handler before asking the backend to load the session", async () => {
+        const replay = buildReplayingBackend();
+        const { manager } = buildHistoryHarness({
+          createBackendProcess: jest.fn(() => replay.backend),
+        });
+
+        await manager.loadNativeSessionFromHistory("opencode", "saved-chat");
+
+        expect(replay.handlerCountAtOpen.load).toBe(1);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/602 registers the chat's handler before falling back to resumeSession when load is unsupported", async () => {
+        const replay = buildReplayingBackend({
+          loadSession: jest.fn(async () => {
+            throw new MethodUnsupportedError("session/load");
+          }),
+        });
+        const { manager } = buildHistoryHarness({
+          createBackendProcess: jest.fn(() => replay.backend),
+        });
+
+        await manager.loadNativeSessionFromHistory("opencode", "saved-chat");
+
+        expect(replay.backend.resumeSession).toHaveBeenCalledTimes(1);
+        expect(replay.handlerCountAtOpen.resume).toBe(1);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/602 drops out-of-turn agent frames for a chat reopened through resumeSession, which replays nothing", async () => {
+        const replay = buildReplayingBackend({
+          loadSession: jest.fn(async () => {
+            throw new MethodUnsupportedError("session/load");
+          }),
+        });
+        const { manager } = buildHistoryHarness({
+          createBackendProcess: jest.fn(() => replay.backend),
+        });
+
+        const session = await manager.loadNativeSessionFromHistory("opencode", "saved-chat");
+        replay.emit("saved-chat", replayChunk("agent_message_chunk", "background", "a1"));
+
+        expect(senderAndText(session)).toEqual([]);
+      });
+
+      it.each([
+        ["load fails", new Error("load blew up"), undefined],
+        [
+          "load is unsupported and resume fails",
+          new MethodUnsupportedError("session/load"),
+          new Error("resume blew up"),
+        ],
+      ] as const)(
+        "https://github.com/Brevilabs/obsidian-copilot-private/issues/602 disposes the attached chat and opens nothing when %s",
+        async (_case, loadError, resumeError) => {
+          const replay = buildReplayingBackend({
+            loadSession: jest.fn(async () => {
+              throw loadError;
+            }),
+            ...(resumeError
+              ? {
+                  resumeSession: jest.fn(async () => {
+                    throw resumeError;
+                  }),
+                }
+              : {}),
+          });
+          const { manager } = buildHistoryHarness({
+            createBackendProcess: jest.fn(() => replay.backend),
+          });
+
+          await expect(
+            manager.loadNativeSessionFromHistory("opencode", "saved-chat")
+          ).rejects.toThrow("Could not resume");
+
+          expect(replay.unregister).toHaveBeenCalledTimes(1);
+          expect(manager.getSessions()).toEqual([]);
+        }
+      );
+
       it("matches live sessions by the (backendId, sessionId) pair, not session id alone", async () => {
         const { manager } = buildHistoryHarness();
         const session = await manager.createSession("opencode");

@@ -1,4 +1,5 @@
 import {
+  displayTargetFromPath,
   lookupToolSummary,
   extractSubAgentInputPrompt,
   extractSubAgentReturnText,
@@ -251,6 +252,116 @@ describe("toolSummaries", () => {
       expect(lookupToolSummary(done).collapsedLine(done, CTX)).toBe("Edited draft.md");
     });
 
+    it("says Didn't edit when a Claude Edit fails or is denied (https://github.com/Brevilabs/obsidian-copilot-private/issues/691)", () => {
+      const failed = tool({
+        vendorToolName: "Edit",
+        title: "Edit",
+        status: "failed",
+        input: { file_path: "/Users/me/vault/plan.md" },
+      });
+      expect(lookupToolSummary(failed).collapsedLine(failed, CTX)).toBe("Didn't edit plan.md");
+    });
+
+    it("says Didn't edit when a Claude Write is denied with no diff, since its whole-file content cannot tell a create from an overwrite (https://github.com/Brevilabs/obsidian-copilot-private/issues/691)", () => {
+      const failed = tool({
+        vendorToolName: "Write",
+        title: "Write",
+        toolKind: "edit",
+        status: "failed",
+        input: { file_path: "/Users/me/vault/notes.md", content: "# Notes\n" },
+        output: [{ type: "text", text: "User declined" }],
+      });
+      expect(lookupToolSummary(failed).collapsedLine(failed, CTX)).toBe("Didn't edit notes.md");
+    });
+
+    it("says Didn't edit when an OpenCode write of full content fails with no diff (https://github.com/Brevilabs/obsidian-copilot-private/issues/691)", () => {
+      const failed = tool({
+        toolKind: "edit",
+        title: "notes.md",
+        status: "failed",
+        input: { filePath: "/Users/me/vault/notes.md", content: "# Notes\n" },
+      });
+      expect(lookupToolSummary(failed).collapsedLine(failed, CTX)).toBe("Didn't edit notes.md");
+    });
+
+    it("says Didn't create when a Codex diff adds a new file and fails (https://github.com/Brevilabs/obsidian-copilot-private/issues/691)", () => {
+      const failed = tool({
+        toolKind: "edit",
+        title: "Editing files",
+        status: "failed",
+        output: [
+          { type: "diff", path: "/Users/me/vault/notes.md", oldText: null, newText: "# Notes" },
+        ],
+      });
+      expect(lookupToolSummary(failed).collapsedLine(failed, CTX)).toBe("Didn't create notes.md");
+    });
+
+    it("says Didn't edit when a Write replacing existing text fails (https://github.com/Brevilabs/obsidian-copilot-private/issues/691)", () => {
+      const failed = tool({
+        vendorToolName: "Write",
+        title: "Write",
+        status: "failed",
+        input: { file_path: "/Users/me/vault/plan.md" },
+        output: [{ type: "diff", path: "/Users/me/vault/plan.md", oldText: "old", newText: "new" }],
+      });
+      expect(lookupToolSummary(failed).collapsedLine(failed, CTX)).toBe("Didn't edit plan.md");
+    });
+
+    it("says Didn't edit for a failed Codex multi-file edit (https://github.com/Brevilabs/obsidian-copilot-private/issues/691)", () => {
+      const failed = tool({
+        toolKind: "edit",
+        title: "Editing files",
+        status: "failed",
+        output: [
+          { type: "diff", path: "src/a.ts", oldText: "a", newText: "A" },
+          { type: "diff", path: "src/b.ts", oldText: "b", newText: "B" },
+        ],
+      });
+      expect(lookupToolSummary(failed).collapsedLine(failed, CTX)).toBe("Didn't edit 2 files");
+    });
+
+    it("says Didn't edit for a failed OpenCode edit (https://github.com/Brevilabs/obsidian-copilot-private/issues/691)", () => {
+      const failed = tool({
+        toolKind: "edit",
+        title: "plan.md",
+        status: "failed",
+        input: { filePath: "/Users/me/vault/plan.md" },
+      });
+      expect(lookupToolSummary(failed).collapsedLine(failed, CTX)).toBe("Didn't edit plan.md");
+    });
+
+    it("uses Deleting, Deleted and Didn't delete across the delete lifecycle (https://github.com/Brevilabs/obsidian-copilot-private/issues/691)", () => {
+      const inflight = tool({
+        toolKind: "delete",
+        title: "old.md",
+        status: "in_progress",
+        input: { filePath: "/Users/me/vault/old.md" },
+      });
+      const summary = lookupToolSummary(inflight);
+      expect(summary.collapsedLine(inflight, CTX)).toBe("Deleting old.md");
+      expect(summary.collapsedLine({ ...inflight, status: "completed" }, CTX)).toBe(
+        "Deleted old.md"
+      );
+      expect(summary.collapsedLine({ ...inflight, status: "failed" }, CTX)).toBe(
+        "Didn't delete old.md"
+      );
+    });
+
+    it("keeps past-tense labels on failed tools that do not change files (https://github.com/Brevilabs/obsidian-copilot-private/issues/691)", () => {
+      const bash = tool({
+        vendorToolName: "Bash",
+        status: "failed",
+        input: { command: "npm test" },
+      });
+      expect(lookupToolSummary(bash).collapsedLine(bash, CTX)).toBe("Ran `npm test`");
+      const read = tool({
+        vendorToolName: "Read",
+        status: "failed",
+        input: { file_path: "/Users/me/vault/plan.md" },
+      });
+      expect(lookupToolSummary(read).collapsedLine(read, CTX)).toBe("Read plan.md");
+    });
+
     it("uses a single Codex diff path as the edit target", () => {
       const t = tool({
         toolKind: "edit",
@@ -324,13 +435,31 @@ describe("toolSummaries", () => {
         vendorToolName: "Bash",
         title: "Bash",
         status: "in_progress",
-        input: { description: "Check working tree" },
+        input: { command: "git status" },
       });
-      expect(lookupToolSummary(inflight).collapsedLine(inflight, CTX)).toBe(
-        "Running Check working tree"
-      );
+      expect(lookupToolSummary(inflight).collapsedLine(inflight, CTX)).toBe("Running `git status`");
       const done = tool({ ...inflight, status: "completed" });
-      expect(lookupToolSummary(done).collapsedLine(done, CTX)).toBe("Ran Check working tree");
+      expect(lookupToolSummary(done).collapsedLine(done, CTX)).toBe("Ran `git status`");
+    });
+
+    it("shows a Bash description verbatim because it already starts with its own verb", () => {
+      const inflight = tool({
+        vendorToolName: "Bash",
+        status: "in_progress",
+        input: { command: "git status", description: "Check working tree" },
+      });
+      expect(lookupToolSummary(inflight).collapsedLine(inflight, CTX)).toBe("Check working tree");
+      const done = tool({ ...inflight, status: "completed" });
+      expect(lookupToolSummary(done).collapsedLine(done, CTX)).toBe("Check working tree");
+    });
+
+    it("shows an execute-kind description verbatim for any agent that sends one", () => {
+      const t = tool({
+        toolKind: "execute",
+        status: "completed",
+        input: { command: "date", description: "Show current date and time" },
+      });
+      expect(lookupToolSummary(t).collapsedLine(t, CTX)).toBe("Show current date and time");
     });
 
     it("expands a Bash call to its full untruncated command", () => {
@@ -365,6 +494,22 @@ describe("toolSummaries", () => {
       expect(lookupToolSummary(read).expandedDetails).toBeUndefined();
       const edit = tool({ vendorToolName: "Edit", title: "edit" });
       expect(lookupToolSummary(edit).expandedDetails).toBeUndefined();
+    });
+  });
+
+  describe("displayTargetFromPath()", () => {
+    it("shows an in-vault target as its vault-relative path", () => {
+      const t = tool({ input: { file_path: "/Users/me/vault/notes/today.md" } });
+      expect(displayTargetFromPath(t, CTX.vaultBase)).toBe("notes/today.md");
+    });
+
+    it("shortens an out-of-vault target to its file name", () => {
+      const t = tool({ input: { file_path: "/Users/me/private/draft.md" } });
+      expect(displayTargetFromPath(t, CTX.vaultBase)).toBe("…/draft.md");
+    });
+
+    it("returns null when the tool call names no path", () => {
+      expect(displayTargetFromPath(tool({ input: {} }), CTX.vaultBase)).toBeNull();
     });
   });
 

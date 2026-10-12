@@ -12,9 +12,8 @@ import {
   ContextSelectedTextBadge,
 } from "@/components/chat-components/ContextBadges";
 import { SelectedTextContext, WebTabContext } from "@/types/message";
-import { useChainType } from "@/aiParams";
 import { useApp } from "@/context";
-import { isPlusChain, openFileInWorkspace } from "@/utils";
+import { openFileInWorkspace } from "@/utils";
 import { mergeWebTabContexts } from "@/utils/urlNormalization";
 import { AtMentionTypeahead } from "./AtMentionTypeahead";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -58,10 +57,8 @@ export const ChatContextMenu: React.FC<ChatContextMenuProps> = ({
   isAgentMode = false,
 }) => {
   const app = useApp();
-  const [currentChain] = useChainType();
   const [showTypeahead, setShowTypeahead] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
-  const isCopilotPlus = isPlusChain(currentChain);
 
   const handleTypeaheadClose = () => {
     setShowTypeahead(false);
@@ -93,13 +90,10 @@ export const ChatContextMenu: React.FC<ChatContextMenuProps> = ({
 
   const uniqueWebTabs = React.useMemo(() => mergeWebTabContexts(contextWebTabs), [contextWebTabs]);
 
-  const hasAnySelection = selectedTextContexts.length > 0;
-
   // Removing an excerpt must not change whether the full note is attached.
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/465
   const activeNoteVisible = includeActiveNote && Boolean(currentActiveFile);
-  const activeWebTabVisible =
-    includeActiveWebTab && !hasAnySelection && Boolean(activeWebTab) && isDesktopRuntime();
+  const activeWebTabVisible = includeActiveWebTab && Boolean(activeWebTab) && isDesktopRuntime();
 
   const hasContext =
     uniqueNotes.length > 0 ||
@@ -137,7 +131,6 @@ export const ChatContextMenu: React.FC<ChatContextMenuProps> = ({
                 isOpen={showTypeahead}
                 onClose={handleTypeaheadClose}
                 onSelect={handleTypeaheadSelect}
-                isCopilotPlus={isCopilotPlus}
                 currentActiveFile={currentActiveFile}
               />
             </PopoverContent>

@@ -66,7 +66,6 @@ export interface CopilotSettings {
   defaultSaveFolder: string;
   defaultConversationTag: string;
   autosaveChat: boolean;
-  autoAddActiveContentToContext: boolean;
   customPromptsFolder: string;
   chatNoteContextPath: string;
   chatNoteContextTags: string[];
@@ -97,6 +96,7 @@ export interface CopilotSettings {
   enableMiyo: boolean;
   enableMiyoSearchSkill: boolean;
   miyoSearchAll: boolean;
+  miyoExtraSearchFolders: string[];
   relevantNotesLiveUpdate: boolean;
   miyoServerUrl: string;
   miyoConnectionMode?: "local" | "remote";
@@ -246,6 +246,22 @@ export function normalizeRootFolders(input: readonly (string | undefined)[]): st
     result.push(normalized);
   }
   return result.length > 0 ? result : EMPTY_COPILOT_ROOT_HISTORY;
+}
+
+const EMPTY_MIYO_FOLDER_NAMES = Object.freeze([]) as unknown as string[];
+
+export function normalizeMiyoFolderNames(input: unknown): string[] {
+  if (!Array.isArray(input)) return EMPTY_MIYO_FOLDER_NAMES;
+  const names = new Set<string>();
+  for (const raw of input) {
+    if (typeof raw !== "string") continue;
+    const name = raw.trim();
+    // Folder names reach Miyo requests and agent search wrappers verbatim, so names a
+    // path, a quoted argument, or a terminal could reinterpret are never stored.
+    // https://github.com/logancyang/obsidian-copilot/issues/3508
+    if (name && !/[/\\"\p{Cc}]/u.test(name)) names.add(name);
+  }
+  return names.size > 0 ? [...names] : EMPTY_MIYO_FOLDER_NAMES;
 }
 
 export function setSettings(
@@ -533,17 +549,6 @@ export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
     sanitizedSettings.lexicalSearchRamLimit = Math.min(1000, Math.max(20, lexicalSearchRamLimit));
   }
 
-  if (typeof sanitizedSettings.autoAddActiveContentToContext !== "boolean") {
-    const oldNoteContext = (settingsToSanitize as unknown as Record<string, unknown>)
-      .includeActiveNoteAsContext;
-    if (typeof oldNoteContext === "boolean") {
-      sanitizedSettings.autoAddActiveContentToContext = oldNoteContext;
-    } else {
-      sanitizedSettings.autoAddActiveContentToContext =
-        DEFAULT_SETTINGS.autoAddActiveContentToContext;
-    }
-  }
-
   if (typeof sanitizedSettings.enableMiyo !== "boolean") {
     sanitizedSettings.enableMiyo = DEFAULT_SETTINGS.enableMiyo;
   }
@@ -555,6 +560,10 @@ export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
   if (typeof sanitizedSettings.miyoSearchAll !== "boolean") {
     sanitizedSettings.miyoSearchAll = DEFAULT_SETTINGS.miyoSearchAll;
   }
+
+  sanitizedSettings.miyoExtraSearchFolders = normalizeMiyoFolderNames(
+    settingsToSanitize.miyoExtraSearchFolders
+  );
 
   if (typeof sanitizedSettings.relevantNotesLiveUpdate !== "boolean") {
     sanitizedSettings.relevantNotesLiveUpdate = DEFAULT_SETTINGS.relevantNotesLiveUpdate;

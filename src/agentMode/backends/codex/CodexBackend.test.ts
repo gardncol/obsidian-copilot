@@ -3,8 +3,8 @@ import { OPENARTIFACTS_WORKSPACE_ROOT_ENV } from "@/openArtifacts/constants";
 import { buildAgentSystemPrompt } from "@/agentMode/backends/shared/agentSystemPrompt";
 import { MIYO_SEARCH_FOLDER_ENV, MIYO_SEARCH_SCOPE_ENV } from "@/builtinSkills/builtinSkills";
 import { detectBinary } from "@/utils/detectBinary";
-import { CodexBackend } from "./CodexBackend";
-import { resolveSupportedCodexAcpEntry } from "./codexVersion";
+import { setDisableBuiltinSystemPrompt } from "@/system-prompts/state";
+import { CODEX_QUESTION_CARD_STEERING, CodexBackend } from "./CodexBackend";
 import * as codexVersion from "./codexVersion";
 
 jest.mock("@/utils/detectBinary", () => ({ detectBinary: jest.fn() }));
@@ -15,19 +15,18 @@ jest.mock("@/logger", () => ({
   logError: jest.fn(),
 }));
 
+const mockAdapterEntry = jest.fn();
+
 jest.mock("./codexVersion", () => {
   const actual = jest.requireActual("./codexVersion");
   return {
     ...actual,
     __esModule: true,
     inspectCodexAcpPackage: (path: string) => ({
-      entryPath: jest.mocked(resolveSupportedCodexAcpEntry)(path),
+      entryPath: mockAdapterEntry(path),
       version: "2.0.0",
       runtimeVersion: "2.0.0",
     }),
-    resolveSupportedCodexAcpEntry: jest
-      .fn()
-      .mockReturnValue("/npm/lib/node_modules/@agentclientprotocol/codex-acp/dist/index.js"),
   };
 });
 
@@ -70,8 +69,7 @@ describe("CodexBackend", () => {
       afterEach(() => Object.defineProperty(process, "platform", { value: hostPlatform }));
       beforeEach(() => {
         Object.defineProperty(process, "platform", { value: "darwin" });
-        jest
-          .mocked(resolveSupportedCodexAcpEntry)
+        mockAdapterEntry
           .mockReset()
           .mockReturnValue("/npm/lib/node_modules/@agentclientprotocol/codex-acp/dist/index.js");
         resetSettings();
@@ -88,12 +86,26 @@ describe("CodexBackend", () => {
         expect(desc.env[OPENARTIFACTS_WORKSPACE_ROOT_ENV]).toBe("/vault");
       });
 
-      it("encodes the shared product prompt byte for byte", async () => {
+      it("encodes the shared product prompt byte for byte, followed by the question-card steering", async () => {
         const desc = await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
 
         expect(JSON.parse(desc.env.CODEX_CONFIG as string).developer_instructions).toBe(
-          buildAgentSystemPrompt("codex")
+          `${buildAgentSystemPrompt("codex")}\n\n${CODEX_QUESTION_CARD_STEERING}`
         );
+      });
+
+      it("https://github.com/logancyang/obsidian-copilot/issues/3536 steers Codex to the request_user_input card even when the built-in system prompt is disabled", async () => {
+        setDisableBuiltinSystemPrompt(true);
+        try {
+          const desc = await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
+          const prompt = JSON.parse(desc.env.CODEX_CONFIG as string).developer_instructions;
+
+          expect(prompt).not.toContain("You are Obsidian Copilot");
+          expect(prompt).toContain("call the `request_user_input` tool");
+          expect(prompt).toContain("including Default");
+        } finally {
+          setDisableBuiltinSystemPrompt(false);
+        }
       });
 
       it("passes the plugin version to built-in Copilot Plus skills", async () => {
@@ -183,7 +195,7 @@ describe("CodexBackend", () => {
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/379 launches a Windows native bundle without detecting Node", async () => {
         Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
-        jest.mocked(resolveSupportedCodexAcpEntry).mockReturnValue("C:\\bundle\\codex-acp.exe");
+        mockAdapterEntry.mockReturnValue("C:\\bundle\\codex-acp.exe");
         jest.mocked(detectBinary).mockClear();
 
         const result = await new CodexBackend().buildSpawnDescriptor({
@@ -210,14 +222,14 @@ describe("CodexBackend", () => {
       });
 
       it("https://github.com/logancyang/obsidian-copilot/issues/2916 enforces the supported adapter before spawning", async () => {
-        jest.mocked(resolveSupportedCodexAcpEntry).mockImplementationOnce(() => {
+        mockAdapterEntry.mockImplementationOnce(() => {
           throw new Error("unsupported Codex adapter");
         });
 
         await expect(
           new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" })
         ).rejects.toThrow("unsupported Codex adapter");
-        expect(resolveSupportedCodexAcpEntry).toHaveBeenCalledWith("/usr/local/bin/codex-acp");
+        expect(mockAdapterEntry).toHaveBeenCalledWith("/usr/local/bin/codex-acp");
       });
 
       it("throws when the codex binary path is unset", async () => {

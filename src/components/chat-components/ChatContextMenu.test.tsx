@@ -13,10 +13,6 @@ jest.mock("@/context", () => ({
   useApp: () => ({}),
 }));
 
-jest.mock("@/aiParams", () => ({
-  useChainType: () => ["llm_chain"],
-}));
-
 /* eslint-enable @eslint-react/hooks-extra/no-unnecessary-use-prefix */
 
 jest.mock("@/utils/desktopRuntime", () => ({
@@ -24,8 +20,8 @@ jest.mock("@/utils/desktopRuntime", () => ({
 }));
 
 jest.mock("@/utils", () => ({
-  isPlusChain: () => false,
   openFileInWorkspace: jest.fn(),
+  getDomainFromUrl: (url: string) => new URL(url).hostname,
 }));
 
 jest.mock("./AtMentionTypeahead", () => ({
@@ -111,6 +107,31 @@ describe("ChatContextMenu", () => {
         expect(Boolean(screen.queryByText("L2-3"))).toBe(includeSelection);
       }
     );
+    it("shows the active web tab beside a web selection - https://github.com/Brevilabs/obsidian-copilot-private/issues/667", () => {
+      render(
+        <ChatContextMenu
+          {...baseProps}
+          includeActiveWebTab
+          activeWebTab={{
+            url: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            title: "Me at the zoo",
+          }}
+          selectedTextContexts={[
+            {
+              id: "video-excerpt",
+              sourceType: "web",
+              title: "Video description",
+              url: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+              content: "really really long trunks",
+            },
+          ]}
+          isAgentMode
+          hideAddContextButton
+        />
+      );
+      expect(screen.getByText("Me at the zoo")).toBeTruthy();
+      expect(screen.getByText("really really long trunks")).toBeTruthy();
+    });
     it.each(["Note.md", "Other note.md"])(
       "keeps the active note beside a selection from %s - https://github.com/Brevilabs/obsidian-copilot-private/issues/465",
       (notePath) => {
