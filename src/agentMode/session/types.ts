@@ -228,6 +228,7 @@ export interface ToolCallDelta {
   kind?: AgentToolKind;
   status?: AgentToolStatus;
   rawInput?: unknown;
+  originalFiles?: Readonly<Record<string, string | null>>;
   content?: ToolCallContent[] | null;
   locations?: Array<{ path: string; line?: number | null }> | null;
   vendorToolName?: string;
@@ -245,6 +246,19 @@ export interface PlanSummary {
   entries: AgentPlanEntry[];
 }
 
+export type CompactionStatus = "in_progress" | "completed" | "failed" | "cancelled" | "skipped";
+
+export type CompactionTrigger = "manual" | "auto";
+
+export interface CompactionSnapshot {
+  id: string;
+  status: CompactionStatus;
+  trigger: CompactionTrigger;
+  error?: string;
+  preTokens?: number;
+  postTokens?: number;
+}
+
 export type SessionUpdate =
   | { sessionUpdate: "user_message_chunk"; content: PromptContent; messageId?: string }
   | { sessionUpdate: "agent_message_chunk"; content: PromptContent; messageId?: string }
@@ -252,6 +266,7 @@ export type SessionUpdate =
   | ({ sessionUpdate: "tool_call" } & ToolCallSnapshot)
   | ({ sessionUpdate: "tool_call_update" } & ToolCallDelta)
   | { sessionUpdate: "plan"; entries: AgentPlanEntry[] }
+  | ({ sessionUpdate: "compaction" } & CompactionSnapshot)
   | { sessionUpdate: "session_info_update"; title?: string | null }
   | { sessionUpdate: "current_mode_update"; currentModeId: string }
   | { sessionUpdate: "config_option_update"; configOptions: BackendConfigOption[] }
@@ -330,10 +345,16 @@ export interface AskUserQuestionPrompt {
   signal?: AbortSignal;
 }
 
+export interface AgentMcpServer {
+  name: string;
+  url: string;
+  headers: Readonly<Record<string, string>>;
+}
+
 export interface OpenSessionInput {
   cwd: string;
   projectId?: ProjectScopeId;
-  additionalDirectories?: string[];
+  mcpServers?: ReadonlyArray<AgentMcpServer>;
 }
 
 export interface OpenSessionOutput {
@@ -345,7 +366,7 @@ export interface ResumeSessionInput {
   sessionId: SessionId;
   cwd: string;
   projectId?: ProjectScopeId;
-  additionalDirectories?: string[];
+  mcpServers?: ReadonlyArray<AgentMcpServer>;
 }
 
 export type ResumeSessionOutput = OpenSessionOutput;
@@ -354,7 +375,7 @@ export interface LoadSessionInput {
   sessionId: SessionId;
   cwd: string;
   projectId?: ProjectScopeId;
-  additionalDirectories?: string[];
+  mcpServers?: ReadonlyArray<AgentMcpServer>;
 }
 
 export type LoadSessionOutput = OpenSessionOutput;
@@ -366,6 +387,12 @@ export interface PromptInput {
 
 export interface PromptOutput {
   stopReason: StopReason;
+  turnDiff?: TurnDiff;
+}
+
+export interface TurnDiff {
+  root: string;
+  unifiedDiff: string;
 }
 
 export interface ListSessionsInput {
@@ -419,7 +446,6 @@ export interface BackendProcess {
   resumeSession(params: ResumeSessionInput): Promise<ResumeSessionOutput>;
   loadSession(params: LoadSessionInput): Promise<LoadSessionOutput>;
   sessionExistsLocally?(params: { sessionId: SessionId; cwd: string }): Promise<boolean>;
-  supportsAdditionalDirectories?(): boolean;
   shutdown(): Promise<void>;
 }
 
@@ -452,7 +478,8 @@ export type AgentMessagePart =
   | {
       kind: "plan";
       entries: AgentPlanEntry[];
-    };
+    }
+  | ({ kind: "compaction"; startedAtMs: number } & CompactionSnapshot);
 
 export interface AgentChatMessage {
   id: string;
@@ -467,6 +494,16 @@ export interface AgentChatMessage {
   turnStopReason?: StopReason;
   turnDurationMs?: number;
   fanout?: FanoutTurn;
+  fileChanges?: TurnFileChange[];
+}
+
+export interface TurnFileChange {
+  path: string;
+  status: "modified" | "created" | "deleted";
+  before: string | null;
+  after: string | null;
+  additions: number;
+  deletions: number;
 }
 
 export type NewAgentChatMessage = Omit<AgentChatMessage, "id"> & { id?: string };

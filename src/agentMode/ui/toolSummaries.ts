@@ -2,8 +2,11 @@ import type { LucideIcon } from "lucide-react";
 import { Bot, MessageCircleQuestion } from "lucide-react";
 import { pickToolIcon } from "@/agentMode/ui/toolIcons";
 import type { ToolCallPart } from "@/agentMode/ui/agentTrail";
+import type { AgentMessagePart } from "@/agentMode/session/types";
 import { formatDuration } from "@/lib/duration";
-import { isAbsolutePath, toVaultRelative } from "@/utils/vaultPath";
+import { diffTargetPaths, primaryEditTargetPath } from "@/agentMode/session/editTargets";
+import { isAbsolutePath } from "@/utils/vaultPath";
+import { MIYO_SEARCH_SKILL } from "@/builtinSkills/builtinSkills";
 
 export interface ToolSummaryContext {
   vaultBase: string | null;
@@ -112,27 +115,11 @@ function createsNewFile(part: ToolCallPart): boolean {
   return diffs.length > 0 && diffs.every((o) => o.oldText === null);
 }
 
-function diffTargetPaths(part: ToolCallPart): string[] {
-  const paths = new Set<string>();
-  for (const output of part.output ?? []) {
-    if (output.type === "diff" && output.path.length > 0) paths.add(output.path);
-  }
-  return [...paths];
-}
-
 function targetFromPath(part: ToolCallPart, vaultBase: string | null): string | null {
-  const loc = part.locations?.[0]?.path;
-  if (typeof loc === "string" && loc.length > 0) return toVaultRelative(loc, vaultBase);
-  const input = part.input as
-    | { file_path?: unknown; filePath?: unknown; path?: unknown }
-    | null
-    | undefined;
-  if (typeof input?.file_path === "string") return toVaultRelative(input.file_path, vaultBase);
-  if (typeof input?.filePath === "string") return toVaultRelative(input.filePath, vaultBase);
-  if (typeof input?.path === "string") return toVaultRelative(input.path, vaultBase);
-  const diffPaths = diffTargetPaths(part);
-  if (diffPaths.length === 1) return toVaultRelative(diffPaths[0], vaultBase);
-  return null;
+  return primaryEditTargetPath(
+    { locations: part.locations, input: part.input, diffPaths: diffTargetPaths(part.output) },
+    vaultBase
+  );
 }
 
 export function displayTargetFromPath(part: ToolCallPart, vaultBase: string | null): string | null {
@@ -207,7 +194,7 @@ const LIST_SUMMARY: ToolSummary = {
 const EDIT_SUMMARY: ToolSummary = {
   icon: pickToolIcon({ vendorToolName: "Edit" }),
   collapsedLine: (p, ctx) => {
-    const diffPathCount = diffTargetPaths(p).length;
+    const diffPathCount = diffTargetPaths(p.output).length;
     const lead = fileChangeVerb(p, "Editing", "Edited", createsNewFile(p) ? "create" : "edit");
     return `${lead} ${
       diffPathCount > 1
@@ -221,7 +208,7 @@ const EDIT_SUMMARY: ToolSummary = {
     return `+${added} / −${removed} lines`;
   },
   targetPath: (p, ctx) =>
-    diffTargetPaths(p).length > 1 ? null : targetFromPath(p, ctx?.vaultBase ?? null),
+    diffTargetPaths(p.output).length > 1 ? null : targetFromPath(p, ctx?.vaultBase ?? null),
 };
 
 const BASH_SUMMARY: ToolSummary = {
@@ -457,4 +444,82 @@ export function extractSubAgentReturnText(part: ToolCallPart): string | null {
   const prompt = extractSubAgentInputPrompt(part);
   if (prompt && prompt === result) return null;
   return result;
+}
+
+export const EMPTY_MIYO_PATHS: readonly string[] = Object.freeze([]);
+
+export interface MiyoSearchRun {
+  query: string | null;
+  noteCount: number | null;
+  notePaths: readonly string[];
+}
+
+const MIYO_SEARCH_SCRIPTS: ReadonlySet<string> = new Set(
+  MIYO_SEARCH_SKILL.files.map((file) => file.path)
+);
+
+function shellWords(command: string): string[] {
+  // Codex wraps some commands as `/bin/zsh -lc "<command>"` with the inner quotes escaped.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/718
+  const inner = command.replace(/^\S+\s+-lc\s+"([\s\S]*)"$/, (_, body: string) =>
+    body.replace(/\\"/g, '"')
+  );
+  return (inner.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((word) =>
+    word.replace(/^(["'])([\s\S]*)\1$/, "$2")
+  );
+}
+
+// Words after which the next word is the program being run, so `cat miyo-search.sh` is not a run.
+// https://github.com/Brevilabs/obsidian-copilot-private/issues/718
+const MIYO_LAUNCHERS: ReadonlySet<string> = new Set(["sh", "bash", "zsh", "&", "&&", ";", "||"]);
+
+function miyoSearchQuery(command: string): string | null | undefined {
+  const words = shellWords(command);
+  for (let i = 0; i < words.length; i++) {
+    if (i > 0 && !MIYO_LAUNCHERS.has(words[i - 1].split("/").pop() ?? "")) continue;
+    const name = words[i].split(/[\\/]/).pop() ?? "";
+    const isScript = MIYO_SEARCH_SCRIPTS.has(name);
+    if (!isScript && !(/^miyo(\.exe)?$/.test(name) && words[i + 1] === "search")) continue;
+    const query: string[] = [];
+    for (let j = i + (isScript ? 1 : 2); j < words.length; j++) {
+      if (/^(\d?[<>]|[|&;])/.test(words[j])) break;
+      if (words[j] === "--json") continue;
+      if (words[j].startsWith("-")) j++;
+      else query.push(words[j]);
+    }
+    return query.length > 0 ? query.join(" ") : null;
+  }
+  return undefined;
+}
+
+function miyoNotePaths(part: ToolCallPart): string[] | null {
+  const stdout = (part.output ?? []).flatMap((o) => (o.type === "text" ? [o.text] : [])).join("");
+  try {
+    const results = (JSON.parse(stdout) as { results?: unknown }).results;
+    if (!Array.isArray(results)) return null;
+    const paths = results.map((r: { path?: unknown } | null) => r?.path);
+    return [...new Set(paths.filter((path): path is string => typeof path === "string"))];
+  } catch {
+    return null;
+  }
+}
+
+export function miyoSearchRun(part: ToolCallPart): MiyoSearchRun | null {
+  const command = (part.input as { command?: unknown } | null | undefined)?.command;
+  if (typeof command !== "string") return null;
+  const query = miyoSearchQuery(command);
+  if (query === undefined) return null;
+  const paths = miyoNotePaths(part);
+  return { query, noteCount: paths?.length ?? null, notePaths: paths ?? EMPTY_MIYO_PATHS };
+}
+
+export function miyoResultPaths(parts: readonly AgentMessagePart[]): readonly string[] {
+  const paths = parts.flatMap((part) =>
+    part.kind === "tool_call" ? (miyoSearchRun(part)?.notePaths ?? []) : []
+  );
+  return paths.length > 0 ? paths : EMPTY_MIYO_PATHS;
+}
+
+export function isMiyoSkillLoad(part: ToolCallPart): boolean {
+  return part.vendorToolName === "Skill" && skillNameFromInput(part) === MIYO_SEARCH_SKILL.name;
 }

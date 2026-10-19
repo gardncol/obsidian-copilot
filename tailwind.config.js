@@ -66,6 +66,11 @@ module.exports = {
       success: "rgba(var(--color-green-rgb),0.2)",
       warning: "var(--text-warning)",
       error: "rgba(var(--color-red-rgb),0.2)",
+      change: {
+        inserted: "var(--color-green)",
+        deleted: "var(--color-red)",
+        modified: "var(--color-blue)",
+      },
       project: {
         red: "rgba(var(--color-red-rgb),0.16)",
         orange: "rgba(var(--color-orange-rgb),0.16)",
@@ -220,6 +225,15 @@ module.exports = {
         5.5: "calc(var(--size-4-5) + 2px)",
         6: "var(--size-4-6)",
       },
+      // A tint painted as an image layers over the reading view's striped table cells instead of
+      // competing with their background-color rules on specificity.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/348
+      backgroundImage: {
+        "overlay-success":
+          "linear-gradient(rgba(var(--color-green-rgb),0.2),rgba(var(--color-green-rgb),0.2))",
+        "overlay-error":
+          "linear-gradient(rgba(var(--color-red-rgb),0.2),rgba(var(--color-red-rgb),0.2))",
+      },
       cursor: {
         DEFAULT: "var(--cursor)",
         auto: "var(--cursor)",
@@ -256,6 +270,14 @@ module.exports = {
         "icon-l": "var(--icon-l)",
         "icon-xl": "var(--icon-xl)",
         checkbox: "var(--checkbox-size)",
+      },
+      keyframes: {
+        twinkle: {
+          "50%": { transform: "scale(0.6) rotate(45deg)", opacity: "0.45" },
+        },
+      },
+      animation: {
+        twinkle: "twinkle 1.4s ease-in-out infinite",
       },
       opacity: {
         icon: "var(--icon-opacity)",

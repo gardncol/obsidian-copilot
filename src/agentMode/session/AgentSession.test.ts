@@ -1,9 +1,11 @@
+import { mockTFile } from "@/__tests__/mockObsidian";
 import { resolveEffort } from "@/lib/model-effort";
 import { OpencodeBackendDescriptor } from "@/agentMode/backends/opencode/descriptor";
+import { logWarn } from "@/logger";
 import { AI_SENDER, USER_SENDER } from "@/constants";
 import { ClaudeBackendDescriptor } from "@/agentMode/backends/claude/descriptor";
 import { waitFor } from "@testing-library/react";
-import type { TFile } from "obsidian";
+import { FileSystemAdapter, type App, type TFile } from "obsidian";
 import {
   AgentSession,
   buildPromptBlocks,
@@ -18,10 +20,12 @@ import { ensureMultiAgentEntitlement, showMultiAgentUpgradePrompt } from "@/plus
 import { getSettings } from "@/settings/model";
 import { ContextProcessor } from "@/contextProcessor";
 import { GLOBAL_SCOPE } from "./scope";
+import { __resetVaultBaseCache } from "@/utils/vaultPath";
 import { AuthRequiredError, MethodUnsupportedError } from "./errors";
 import type { FanoutRunInput } from "./fanout/FanoutOrchestrator";
 import { FANOUT_READONLY_PREAMBLE, type FanoutTurn } from "./fanout/fanoutTypes";
 import type {
+  AgentChatMessage,
   AgentToolCallOutput,
   BackendDescriptor,
   BackendProcess,
@@ -720,6 +724,119 @@ describe("AgentSession", () => {
         expect(tool).toMatchObject({ id: "t1", status: "completed" });
       });
 
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/638 attaches a replayed compaction to the reply it followed, ahead of the next user message, without a dropped-update warning", () => {
+        const mock = makeMockBackend();
+        const session = makeAwaitingResumeSession(mock);
+        jest.mocked(logWarn).mockClear();
+
+        mock.emitUpdate(replayText("user_message_chunk", "first", "u1"));
+        mock.emitUpdate(replayText("agent_message_chunk", "one", "a1"));
+        mock.emitUpdate({
+          sessionUpdate: "compaction",
+          id: "c1",
+          status: "completed",
+          trigger: "manual",
+        });
+        mock.emitUpdate(replayText("user_message_chunk", "second", "u2"));
+        mock.emitUpdate(replayText("agent_message_chunk", "two", "a2"));
+        session.completeResume(emptyState());
+
+        const [, firstReply, , secondReply] = session.store.getDisplayMessages();
+        expect(session.store.getDisplayMessages()).toHaveLength(4);
+        expect(firstReply.parts?.map((p) => p.kind)).toEqual(["text", "compaction"]);
+        expect(firstReply.parts?.[1]).toMatchObject({
+          kind: "compaction",
+          id: "c1",
+          status: "completed",
+          trigger: "manual",
+        });
+        expect(secondReply.parts?.map((p) => p.kind)).toEqual(["text"]);
+        expect(logWarn).not.toHaveBeenCalled();
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/638 opens a reply bubble for a replayed compaction that no reply precedes", () => {
+        const mock = makeMockBackend();
+        const session = makeAwaitingResumeSession(mock);
+
+        mock.emitUpdate(replayText("user_message_chunk", "hello", "u1"));
+        mock.emitUpdate({
+          sessionUpdate: "compaction",
+          id: "c1",
+          status: "completed",
+          trigger: "auto",
+        });
+        session.completeResume(emptyState());
+
+        const [user, reply] = session.store.getDisplayMessages();
+        expect(user.sender).toBe(USER_SENDER);
+        expect(reply.sender).toBe(AI_SENDER);
+        expect(reply.parts?.map((p) => p.kind)).toEqual(["compaction"]);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/638 upserts a replayed compaction's later status over its earlier one", () => {
+        const mock = makeMockBackend();
+        const session = makeAwaitingResumeSession(mock);
+
+        mock.emitUpdate(replayText("user_message_chunk", "hello", "u1"));
+        mock.emitUpdate({
+          sessionUpdate: "compaction",
+          id: "c1",
+          status: "in_progress",
+          trigger: "auto",
+        });
+        mock.emitUpdate({
+          sessionUpdate: "compaction",
+          id: "c1",
+          status: "completed",
+          trigger: "auto",
+        });
+        session.completeResume(emptyState());
+
+        const parts = session.store.getDisplayMessages()[1].parts;
+        expect(parts).toHaveLength(1);
+        expect(parts?.[0]).toMatchObject({ kind: "compaction", status: "completed" });
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/638 settles a replayed compaction that never reports an end as cancelled so no spinner shows", () => {
+        const mock = makeMockBackend();
+        const session = makeAwaitingResumeSession(mock);
+
+        mock.emitUpdate(replayText("user_message_chunk", "hello", "u1"));
+        mock.emitUpdate({
+          sessionUpdate: "compaction",
+          id: "c1",
+          status: "in_progress",
+          trigger: "manual",
+        });
+        session.completeResume(emptyState());
+
+        const parts = session.store.getDisplayMessages()[1].parts;
+        expect(parts?.[0]).toMatchObject({ kind: "compaction", status: "cancelled" });
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/638 keeps the meter reading a replayed compaction's post-compaction tokens would otherwise overwrite", () => {
+        const mock = makeMockBackend();
+        const session = makeAwaitingResumeSession(mock);
+        mock.emitUpdate({
+          sessionUpdate: "usage_update",
+          usage: { usedTokens: 90_000, contextWindow: 200_000, updatedAt: 1 },
+        });
+
+        mock.emitUpdate({
+          sessionUpdate: "compaction",
+          id: "c1",
+          status: "completed",
+          trigger: "manual",
+          postTokens: 4_000,
+        });
+
+        expect(session.getSessionUsage()).toEqual({
+          usedTokens: 90_000,
+          contextWindow: 200_000,
+          updatedAt: 1,
+        });
+      });
+
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/643 dates replayed bubbles from their frames' times and times the agent's turn from its prompt to its last frame", () => {
         const mock = makeMockBackend();
         const session = makeAwaitingResumeSession(mock);
@@ -940,15 +1057,21 @@ describe("AgentSession", () => {
         expect(session.getState()?.model?.availableModels).toHaveLength(2);
       });
 
-      it("creates the backend session in the global scope with no extra roots when started with defaults", async () => {
+      it("creates the backend session in the global scope when started with defaults", async () => {
         const mock = makeMockBackend();
         const session = startSession(mock);
         await session.ready;
-        expect(mock.newSession).toHaveBeenCalledWith({
-          cwd: "/vault",
-          projectId: GLOBAL_SCOPE,
-          additionalDirectories: [],
-        });
+        expect(mock.newSession).toHaveBeenCalledWith({ cwd: "/vault", projectId: GLOBAL_SCOPE });
+      });
+
+      it("passes the plugin's MCP servers into the newSession payload", async () => {
+        const mock = makeMockBackend();
+        const mcpServers = [
+          { name: "obsidian-copilot", url: "http://127.0.0.1:1/mcp", headers: { A: "b" } },
+        ];
+        const session = startSession(mock, { mcpServers });
+        await session.ready;
+        expect(mock.newSession).toHaveBeenCalledWith(expect.objectContaining({ mcpServers }));
       });
 
       it("passes the session's projectId into the newSession payload", async () => {
@@ -957,27 +1080,6 @@ describe("AgentSession", () => {
         await session.ready;
         expect(mock.newSession).toHaveBeenCalledWith(
           expect.objectContaining({ cwd: "/vault/Projects/p", projectId: "proj-7" })
-        );
-      });
-
-      it("does not call newSession until contextReady resolves (non-blocking visibility)", async () => {
-        const mock = makeMockBackend();
-        let release!: (result: { additionalDirectories: string[] }) => void;
-        const contextReady = new Promise<{ additionalDirectories: string[] }>((resolve) => {
-          release = resolve;
-        });
-        const session = startSession(mock, {
-          cwd: "/vault/Projects/p",
-          projectId: "proj-7",
-          contextReady,
-        });
-        await Promise.resolve();
-        expect(mock.newSession).not.toHaveBeenCalled();
-        expect(session.getStatus()).toBe("starting");
-        release({ additionalDirectories: ["/vault/SharedResearch"] });
-        await session.ready;
-        expect(mock.newSession).toHaveBeenCalledWith(
-          expect.objectContaining({ additionalDirectories: ["/vault/SharedResearch"] })
         );
       });
 
@@ -1662,6 +1764,166 @@ describe("AgentSession", () => {
         expect(markDelivered).not.toHaveBeenCalled();
       });
 
+      const PROJECT_CONTEXT =
+        "<project_context>\n## Included folders\n- `/vault/Papers`\n</project_context>";
+      const UPDATES = {
+        epoch: 7,
+        block: "<project_context_updates>changed</project_context_updates>",
+      };
+      const noteFile = mockTFile({ path: "Notes/Active.md", basename: "Active" });
+      const richContext = {
+        notes: [noteFile],
+        urls: [],
+        selectedTextContexts: [
+          {
+            id: "sel-1",
+            sourceType: "web" as const,
+            title: "Page",
+            url: "https://example.com",
+            content: "selected words",
+          },
+        ],
+        webTabs: [{ url: "https://example.com/tab", title: "Tab" }],
+      };
+      const imageBlock = { type: "image" as const, mimeType: "image/png", data: "aGVsbG8=" };
+
+      const promptBlocks = (mock: MockBackend, call: number) =>
+        (mock.prompt.mock.calls[call][0] as { prompt: unknown[] }).prompt;
+
+      async function startProjectSession(
+        mock: MockBackend,
+        overrides: Partial<AgentSessionStartOptions> = {}
+      ): Promise<AgentSession> {
+        const session = startSession(mock, {
+          cwd: "/vault/Projects/p",
+          projectId: "proj-7",
+          getProjectContextBlock: () => PROJECT_CONTEXT,
+          getProjectContextUpdates: () => UPDATES,
+          ...overrides,
+        });
+        await session.ready;
+        return session;
+      }
+
+      it(`https://github.com/Brevilabs/obsidian-copilot-private/issues/634 sends /compact as the whole prompt even with every context source present`, async () => {
+        const processContextWebTabs = jest.fn().mockResolvedValue("<active_web_tab />");
+        const getInstance = jest
+          .spyOn(ContextProcessor, "getInstance")
+          .mockReturnValue({ processContextWebTabs } as never);
+        try {
+          const mock = makeMockBackend();
+          const session = await startProjectSession(mock);
+
+          await session.sendPrompt("/compact", richContext, [imageBlock]).turn;
+
+          expect(promptBlocks(mock, 0)).toEqual([{ type: "text", text: "/compact" }]);
+          expect(processContextWebTabs).not.toHaveBeenCalled();
+        } finally {
+          getInstance.mockRestore();
+        }
+      });
+
+      it(`https://github.com/Brevilabs/obsidian-copilot-private/issues/634 shows the /compact message without the attachments that were not sent`, async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock);
+
+        await session.sendPrompt("/compact", richContext, [imageBlock]).turn;
+
+        const [userMessage] = session.store.getDisplayMessages();
+        expect(userMessage.message).toBe("/compact");
+        expect(userMessage.context).toBeUndefined();
+        expect(userMessage.content).toBeUndefined();
+      });
+
+      it(`https://github.com/Brevilabs/obsidian-copilot-private/issues/634 passes arguments after /compact through unchanged on the trimmed text`, async () => {
+        const mock = makeMockBackend();
+        const session = await startProjectSession(mock);
+
+        await session.sendPrompt("  /compact keep the API shapes \n", richContext).turn;
+
+        expect(promptBlocks(mock, 0)).toEqual([
+          { type: "text", text: "/compact keep the API shapes" },
+        ]);
+      });
+
+      it(`https://github.com/Brevilabs/obsidian-copilot-private/issues/634 leaves project context and project-context updates for the next normal turn`, async () => {
+        const mock = makeMockBackend();
+        const markDelivered = jest.fn();
+        const session = await startProjectSession(mock, {
+          markProjectContextUpdatesDelivered: markDelivered,
+        });
+
+        await session.sendPrompt("/compact").turn;
+        expect(markDelivered).not.toHaveBeenCalled();
+
+        await session.sendPrompt("now continue").turn;
+        const nextText = (promptBlocks(mock, 1)[0] as { text: string }).text;
+        expect(nextText).toContain("<project_context>");
+        expect(nextText).toContain("<project_context_updates>changed</project_context_updates>");
+        expect(markDelivered).toHaveBeenCalledWith(7);
+      });
+
+      it(`https://github.com/Brevilabs/obsidian-copilot-private/issues/634 keeps buffered fan-out context for the next normal turn`, async () => {
+        const mock = makeMockBackend();
+        const fanoutTurn: FanoutTurn = {
+          answers: {
+            opencode: { backendId: "opencode", status: "done", text: "a" },
+            claude: { backendId: "claude", status: "done", text: "b" },
+          },
+          summary: { status: "done", text: "the fan-out summary", complete: true },
+        };
+        const runFanoutTurn = jest.fn(async (input: FanoutRunInput) => {
+          input.onChange(fanoutTurn);
+          return fanoutTurn;
+        });
+        const session = makeSession(mock, { runFanoutTurn });
+        await session.sendPrompt("compare X and Y", undefined, undefined, ["opencode", "claude"])
+          .turn;
+
+        await session.sendPrompt("/compact").turn;
+        expect(promptBlocks(mock, 0)).toEqual([{ type: "text", text: "/compact" }]);
+
+        await session.sendPrompt("now expand").turn;
+        expect((promptBlocks(mock, 1)[0] as { text: string }).text).toContain(
+          "the fan-out summary"
+        );
+      });
+
+      it(`https://github.com/Brevilabs/obsidian-copilot-private/issues/634 compacts only this chat's agent when other agents are @mentioned`, async () => {
+        const mock = makeMockBackend();
+        const runFanoutTurn = jest.fn();
+        const session = makeSession(mock, { runFanoutTurn });
+        jest.mocked(ensureMultiAgentEntitlement).mockClear();
+
+        await session.sendPrompt("/compact", undefined, undefined, ["opencode", "claude"]).turn;
+
+        expect(ensureMultiAgentEntitlement).not.toHaveBeenCalled();
+        expect(runFanoutTurn).not.toHaveBeenCalled();
+        expect(promptBlocks(mock, 0)).toEqual([{ type: "text", text: "/compact" }]);
+      });
+
+      it(`https://github.com/Brevilabs/obsidian-copilot-private/issues/634 does not title a chat from its /compact message`, async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock, { getDescriptor: nonSummarizingDescriptor });
+
+        await session.sendPrompt("/compact").turn;
+        expect(session.getLabel()).toBeNull();
+
+        await session.sendPrompt("Plan the migration").turn;
+        expect(session.getLabel()).toBe("Plan the migration");
+      });
+
+      it(`https://github.com/Brevilabs/obsidian-copilot-private/issues/634 wraps text that only mentions /compact like any other message`, async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock);
+
+        await session.sendPrompt("please /compact", { notes: [noteFile], urls: [] }).turn;
+
+        const text = (promptBlocks(mock, 0)[0] as { text: string }).text;
+        expect(text).toContain("<copilot-context>");
+        expect(text).toContain("<user-message>\nplease /compact\n</user-message>");
+      });
+
       it("marks an empty completed turn as a visible error message", async () => {
         const mock = makeMockBackend();
         const session = makeSession(mock);
@@ -1673,6 +1935,126 @@ describe("AgentSession", () => {
         expect(placeholder?.message).toMatch(
           /without returning any assistant text or tool activity/
         );
+      });
+
+      it("replaces the compaction row in the in-flight reply as its status advances, keeping when it started", async () => {
+        jest.useFakeTimers();
+        try {
+          jest.setSystemTime(10_000);
+          const mock = makeMockBackend();
+          const finishPrompt = holdPrompt(mock);
+          const session = makeSession(mock);
+          const { turn } = session.sendPrompt("/compact");
+
+          mock.emitUpdate({
+            sessionUpdate: "compaction",
+            id: "c1",
+            status: "in_progress",
+            trigger: "manual",
+          });
+          jest.advanceTimersByTime(7_000);
+          mock.emitUpdate({
+            sessionUpdate: "compaction",
+            id: "c1",
+            status: "completed",
+            trigger: "manual",
+            preTokens: 182_000,
+            postTokens: 24_000,
+          });
+
+          expect(aiMessage(session)?.parts).toEqual([
+            {
+              kind: "compaction",
+              id: "c1",
+              status: "completed",
+              trigger: "manual",
+              preTokens: 182_000,
+              postTokens: 24_000,
+              startedAtMs: 10_000,
+            },
+          ]);
+
+          finishPrompt();
+          await turn;
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/633 finishes a turn whose only activity is a compaction without the empty-turn error", async () => {
+        const mock = makeMockBackend();
+        const finishPrompt = holdPrompt(mock);
+        const session = makeSession(mock);
+        const { turn } = session.sendPrompt("/compact");
+        mock.emitUpdate({
+          sessionUpdate: "compaction",
+          id: "c1",
+          status: "completed",
+          trigger: "manual",
+        });
+
+        finishPrompt();
+        await turn;
+
+        const reply = aiMessage(session);
+        expect(reply?.isErrorMessage).toBeFalsy();
+        expect(reply?.message).toBe("");
+        expect(reply?.turnStopReason).toBe("end_turn");
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/633 settles a compaction still in progress when the turn ends to cancelled", async () => {
+        const mock = makeMockBackend();
+        const finishPrompt = holdPrompt(mock);
+        const session = makeSession(mock);
+        const { turn } = session.sendPrompt("keep going");
+        mock.emitUpdate({
+          sessionUpdate: "compaction",
+          id: "auto-1",
+          status: "in_progress",
+          trigger: "auto",
+        });
+        mock.emitUpdate({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Done." },
+        });
+
+        finishPrompt();
+        await turn;
+
+        expect(aiMessage(session)?.parts).toEqual([
+          expect.objectContaining({ kind: "compaction", id: "auto-1", status: "cancelled" }),
+          { kind: "text", text: "Done." },
+        ]);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/633 settles a compaction still in progress to failed and reports the prompt's error once, on the turn, when the prompt rejects", async () => {
+        const mock = makeMockBackend();
+        let rejectPrompt: (error: Error) => void = () => {};
+        mock.prompt.mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectPrompt = reject;
+            })
+        );
+        const session = makeSession(mock);
+        const { turn } = session.sendPrompt("/compact");
+        mock.emitUpdate({
+          sessionUpdate: "compaction",
+          id: "c1",
+          status: "in_progress",
+          trigger: "manual",
+        });
+
+        rejectPrompt(new Error("stream error"));
+        await expect(turn).rejects.toThrow("stream error");
+
+        const message = aiMessage(session);
+        expect(message?.parts?.[0]).toMatchObject({
+          kind: "compaction",
+          status: "failed",
+          error: undefined,
+        });
+        expect(message?.message).toContain("stream error");
       });
 
       it("shows the nested provider error on the placeholder when the prompt rejects", async () => {
@@ -1962,18 +2344,18 @@ describe("AgentSession", () => {
         expect(output.text).toContain("The agent received the full output");
       });
 
-      it("injects the <project_context> block into the first user prompt only", async () => {
+      it("builds the <project_context> block when the first prompt is sent and injects it into that prompt only", async () => {
         const mock = makeMockBackend();
+        const getProjectContextBlock = jest.fn(
+          () => "<project_context>\n## Included folders\n- `/vault/Papers`\n</project_context>"
+        );
         const session = startSession(mock, {
           cwd: "/vault/Projects/p",
           projectId: "proj-7",
-          contextReady: Promise.resolve({
-            additionalDirectories: [],
-            projectContextBlock:
-              "<project_context>\n## Included folders\n- `/vault/Papers`\n</project_context>",
-          }),
+          getProjectContextBlock,
         });
         await session.ready;
+        expect(getProjectContextBlock).not.toHaveBeenCalled();
 
         await session.sendPrompt("first").turn;
         await session.sendPrompt("second").turn;
@@ -1988,6 +2370,7 @@ describe("AgentSession", () => {
         expect(promptText(0)).toContain("`/vault/Papers`");
         expect(promptText(0)).toContain("<user-message>\nfirst\n</user-message>");
         expect(promptText(1)).not.toContain("<project_context>");
+        expect(getProjectContextBlock).toHaveBeenCalledTimes(1);
       });
 
       it("re-injects the <project_context> block on retry when the first prompt fails", async () => {
@@ -1996,11 +2379,8 @@ describe("AgentSession", () => {
         const session = startSession(mock, {
           cwd: "/vault/Projects/p",
           projectId: "proj-7",
-          contextReady: Promise.resolve({
-            additionalDirectories: [],
-            projectContextBlock:
-              "<project_context>\n## Included folders\n- `/vault/Papers`\n</project_context>",
-          }),
+          getProjectContextBlock: () =>
+            "<project_context>\n## Included folders\n- `/vault/Papers`\n</project_context>",
         });
         await session.ready;
 
@@ -2240,7 +2620,9 @@ describe("AgentSession", () => {
           const mock = makeMockBackend();
           const runFanoutTurn = fanoutRunner(twoAgentTurn());
           const session = makeSession(mock, { runFanoutTurn });
-          (session as unknown as { projectContextBlock: string | null }).projectContextBlock =
+          (
+            session as unknown as { getProjectContextBlockFn: () => string }
+          ).getProjectContextBlockFn = () =>
             "<project_context>\n## Included folders\n- `/vault/Papers`\n</project_context>";
 
           await session.sendPrompt("review", undefined, undefined, BOTH_AGENTS).turn;
@@ -2314,6 +2696,473 @@ describe("AgentSession", () => {
           expect(text).not.toContain("a combined summary could not be generated");
         });
       });
+
+      describe("turn file changes", () => {
+        function makeVault(initial: Record<string, string>) {
+          const files = new Map(Object.entries(initial));
+          const adapter = new FileSystemAdapter();
+          adapter.read = jest.fn((p: string) => {
+            const content = files.get(p);
+            return content === undefined
+              ? Promise.reject(new Error(`ENOENT: ${p}`))
+              : Promise.resolve(content);
+          });
+          const app = { vault: { adapter } } as unknown as App;
+          return { files, adapter, app };
+        }
+
+        function makeSession(mock: ReturnType<typeof makeMockBackend>, app: App) {
+          const session = new AgentSession({
+            backend: mock.asBackend,
+            backendSessionId: "acp-1",
+            internalId: "internal-1",
+            backendId: "claude",
+            getApp: () => app,
+          });
+          session.completeResume(null);
+          return session;
+        }
+
+        const toolCall = (
+          toolCallId: string,
+          kind: "edit" | "delete" | "read",
+          locations: string[]
+        ) => ({
+          sessionId: "acp-1",
+          update: {
+            sessionUpdate: "tool_call" as const,
+            toolCallId,
+            title: kind,
+            kind,
+            status: "in_progress" as const,
+            locations: locations.map((path) => ({ path })),
+          },
+        });
+
+        const editCall = (toolCallId: string, filePath: string) =>
+          toolCall(toolCallId, "edit", [filePath]);
+
+        const toolResult = (toolCallId: string, originalFiles: Record<string, string | null>) => ({
+          sessionId: "acp-1",
+          update: {
+            sessionUpdate: "tool_call_update" as const,
+            toolCallId,
+            status: "completed" as const,
+            originalFiles,
+          },
+        });
+
+        function fileChangesOf(session: AgentSession) {
+          const messages = session.store.getDisplayMessages().filter((m) => m.sender === AI_SENDER);
+          return messages[messages.length - 1]?.fileChanges;
+        }
+
+        beforeEach(() => {
+          __resetVaultBaseCache();
+        });
+
+        afterEach(() => {
+          __resetVaultBaseCache();
+        });
+
+        it("reports one change per file, from the file the turn first saw to the file at turn end", async () => {
+          const vault = makeVault({ "notes/a.md": "one\ntwo\n" });
+          const mock = makeMockBackend();
+          mock.prompt.mockImplementation(async () => {
+            mock.emit(editCall("t1", "/vault/notes/a.md"));
+            mock.emit(editCall("t2", "/vault/notes/a.md"));
+            mock.emit(editCall("t3", "/vault/notes/a.md"));
+            vault.files.set("notes/a.md", "ONE\ntwo\nthree\n");
+            return { stopReason: "end_turn" as const };
+          });
+          const session = makeSession(mock, vault.app);
+
+          await session.sendPrompt("edit it three times").turn;
+
+          expect(fileChangesOf(session)).toEqual([
+            {
+              path: "notes/a.md",
+              status: "modified",
+              before: "one\ntwo\n",
+              after: "ONE\ntwo\nthree\n",
+              additions: 2,
+              deletions: 1,
+            },
+          ]);
+        });
+
+        it("reports a file missing when the turn first named it as created, and one missing at turn end as deleted", async () => {
+          const vault = makeVault({ "notes/old.md": "stale\n" });
+          const mock = makeMockBackend();
+          mock.prompt.mockImplementation(async () => {
+            mock.emit(editCall("t1", "/vault/notes/new.md"));
+            mock.emit(toolCall("t2", "delete", ["/vault/notes/old.md"]));
+            vault.files.set("notes/new.md", "fresh\n");
+            vault.files.delete("notes/old.md");
+            return { stopReason: "end_turn" as const };
+          });
+          const session = makeSession(mock, vault.app);
+
+          await session.sendPrompt("replace the old note").turn;
+
+          expect(fileChangesOf(session)).toEqual([
+            {
+              path: "notes/new.md",
+              status: "created",
+              before: null,
+              after: "fresh\n",
+              additions: 1,
+              deletions: 0,
+            },
+            {
+              path: "notes/old.md",
+              status: "deleted",
+              before: "stale\n",
+              after: null,
+              additions: 0,
+              deletions: 1,
+            },
+          ]);
+        });
+
+        it("reports nothing for a file the turn edited and then restored", async () => {
+          const vault = makeVault({ "notes/a.md": "original\n" });
+          const mock = makeMockBackend();
+          mock.prompt.mockImplementation(async () => {
+            mock.emit(editCall("t1", "/vault/notes/a.md"));
+            vault.files.set("notes/a.md", "changed\n");
+            vault.files.set("notes/a.md", "original\n");
+            return { stopReason: "end_turn" as const };
+          });
+          const session = makeSession(mock, vault.app);
+
+          await session.sendPrompt("edit and undo").turn;
+
+          expect(fileChangesOf(session)).toBeUndefined();
+        });
+
+        it("leaves a file the turn only read out of the reported changes https://github.com/Brevilabs/obsidian-copilot-private/issues/347", async () => {
+          const vault = makeVault({ "notes/a.md": "unchanged\n" });
+          const mock = makeMockBackend();
+          mock.prompt.mockImplementation(async () => {
+            mock.emit(toolCall("t1", "read", ["/vault/notes/a.md"]));
+            vault.files.set("notes/a.md", "changed by someone else\n");
+            return { stopReason: "end_turn" as const };
+          });
+          const session = makeSession(mock, vault.app);
+
+          await session.sendPrompt("read it").turn;
+
+          expect(fileChangesOf(session)).toBeUndefined();
+        });
+
+        it("ignores paths outside the vault and inside hidden folders https://github.com/Brevilabs/obsidian-copilot-private/issues/347", async () => {
+          const vault = makeVault({});
+          const mock = makeMockBackend();
+          mock.prompt.mockImplementation(async () => {
+            mock.emit(editCall("t1", "/tmp/scratch.md"));
+            mock.emit(editCall("t2", "/vault/.config/plugins/copilot/data.json"));
+            vault.files.set(".config/plugins/copilot/data.json", "{}");
+            return { stopReason: "end_turn" as const };
+          });
+          const session = makeSession(mock, vault.app);
+
+          await session.sendPrompt("touch everything").turn;
+
+          expect(fileChangesOf(session)).toBeUndefined();
+          expect(vault.adapter.read).not.toHaveBeenCalled();
+        });
+
+        it("still reports what landed when the user cancels the turn", async () => {
+          const vault = makeVault({ "notes/a.md": "one\n" });
+          const mock = makeMockBackend();
+          let markPromptEntered!: () => void;
+          const promptEntered = new Promise<void>((resolve) => {
+            markPromptEntered = resolve;
+          });
+          mock.prompt.mockImplementation(() => {
+            mock.emit(editCall("t1", "/vault/notes/a.md"));
+            vault.files.set("notes/a.md", "one\ntwo\n");
+            markPromptEntered();
+            return new Promise<never>(() => {});
+          });
+          const session = makeSession(mock, vault.app);
+
+          const { turn } = session.sendPrompt("edit it");
+          await promptEntered;
+          await session.cancel();
+          await turn;
+
+          expect(fileChangesOf(session)).toMatchObject([
+            { path: "notes/a.md", status: "modified", additions: 1, deletions: 0 },
+          ]);
+        });
+
+        it("starts each turn from a clean slate so an earlier turn's files are not re-reported", async () => {
+          const vault = makeVault({ "notes/a.md": "one\n" });
+          const mock = makeMockBackend();
+          mock.prompt.mockImplementationOnce(async () => {
+            mock.emit(editCall("t1", "/vault/notes/a.md"));
+            vault.files.set("notes/a.md", "one\ntwo\n");
+            return { stopReason: "end_turn" as const };
+          });
+          mock.prompt.mockImplementationOnce(async () => ({ stopReason: "end_turn" as const }));
+          const session = makeSession(mock, vault.app);
+
+          await session.sendPrompt("edit it").turn;
+          expect(fileChangesOf(session)).toHaveLength(1);
+
+          await session.sendPrompt("say hello").turn;
+          expect(fileChangesOf(session)).toBeUndefined();
+        });
+
+        it("ignores a late update to an earlier turn's edit so the current turn does not report it https://github.com/Brevilabs/obsidian-copilot-private/issues/347", async () => {
+          const vault = makeVault({ "notes/a.md": "one\n" });
+          const mock = makeMockBackend();
+          mock.prompt.mockImplementationOnce(async () => {
+            mock.emit(editCall("t1", "/vault/notes/a.md"));
+            vault.files.set("notes/a.md", "one\ntwo\n");
+            return { stopReason: "end_turn" as const };
+          });
+          mock.prompt.mockImplementationOnce(async () => {
+            mock.emit(toolResult("t1", { "/vault/notes/a.md": "one\n" }));
+            return { stopReason: "end_turn" as const };
+          });
+          const session = makeSession(mock, vault.app);
+
+          await session.sendPrompt("edit it").turn;
+          expect(fileChangesOf(session)).toHaveLength(1);
+
+          await session.sendPrompt("say hello").turn;
+          expect(fileChangesOf(session)).toBeUndefined();
+        });
+
+        it("captures nothing when the session has no app to read the vault through", async () => {
+          const mock = makeMockBackend();
+          mock.prompt.mockImplementation(async () => {
+            mock.emit(editCall("t1", "notes/a.md"));
+            return { stopReason: "end_turn" as const };
+          });
+          const session = new AgentSession({
+            backend: mock.asBackend,
+            backendSessionId: "acp-1",
+            internalId: "internal-1",
+            backendId: "claude",
+          });
+          session.completeResume(null);
+
+          await session.sendPrompt("edit it").turn;
+
+          expect(fileChangesOf(session)).toBeUndefined();
+        });
+
+        describe("before text from the first-mention snapshot", () => {
+          it("snapshots as soon as a permission request names the file it wants to edit", async () => {
+            const vault = makeVault({ "notes/a.md": "before the turn\n" });
+            const mock = makeMockBackend();
+            mock.prompt.mockImplementation(async () => {
+              void session.handleToolPermission({
+                sessionId: "acp-1",
+                toolCall: {
+                  toolCallId: "t1",
+                  title: "write",
+                  kind: "edit",
+                  locations: [{ path: "/vault/notes/a.md" }],
+                },
+                options: [{ optionId: "once", name: "Allow once", kind: "allow_once" }],
+              });
+              vault.files.set("notes/a.md", "written by the agent\n");
+              mock.emit(editCall("t1", "/vault/notes/a.md"));
+              return { stopReason: "end_turn" as const };
+            });
+            const session = makeSession(mock, vault.app);
+
+            await session.sendPrompt("write it").turn;
+
+            expect(fileChangesOf(session)).toMatchObject([
+              { path: "notes/a.md", before: "before the turn\n", after: "written by the agent\n" },
+            ]);
+          });
+
+          it("keeps the snapshot from an earlier read so a later write's announcement cannot overtake it", async () => {
+            const vault = makeVault({ "notes/a.md": "before the turn\n" });
+            const mock = makeMockBackend();
+            mock.prompt.mockImplementation(async () => {
+              mock.emit(toolCall("t1", "read", ["/vault/notes/a.md"]));
+              vault.files.set("notes/a.md", "written by the agent\n");
+              mock.emit(editCall("t2", "/vault/notes/a.md"));
+              return { stopReason: "end_turn" as const };
+            });
+            const session = makeSession(mock, vault.app);
+
+            await session.sendPrompt("rewrite it").turn;
+
+            expect(fileChangesOf(session)).toMatchObject([
+              { path: "notes/a.md", before: "before the turn\n", after: "written by the agent\n" },
+            ]);
+          });
+
+          it("captures an edit whose path and kind arrive only in later updates to the tool call", async () => {
+            const vault = makeVault({ "notes/a.md": "one\n" });
+            const mock = makeMockBackend();
+            mock.prompt.mockImplementation(async () => {
+              mock.emit({
+                sessionId: "acp-1",
+                update: {
+                  sessionUpdate: "tool_call",
+                  toolCallId: "t1",
+                  title: "edit",
+                  kind: "edit",
+                  status: "pending",
+                },
+              });
+              mock.emit({
+                sessionId: "acp-1",
+                update: {
+                  sessionUpdate: "tool_call_update",
+                  toolCallId: "t1",
+                  status: "in_progress",
+                  locations: [{ path: "/vault/notes/a.md" }],
+                },
+              });
+              vault.files.set("notes/a.md", "one\ntwo\n");
+              return { stopReason: "end_turn" as const };
+            });
+            const session = makeSession(mock, vault.app);
+
+            await session.sendPrompt("edit it").turn;
+
+            expect(fileChangesOf(session)).toMatchObject([
+              { path: "notes/a.md", before: "one\n", after: "one\ntwo\n" },
+            ]);
+          });
+        });
+
+        describe("before text from tool result originals", () => {
+          it("takes the original a tool result reports over a snapshot the write overtook https://github.com/Brevilabs/obsidian-copilot-private/issues/347", async () => {
+            const vault = makeVault({ "notes/a.md": "already written by the agent\n" });
+            const mock = makeMockBackend();
+            mock.prompt.mockImplementation(async () => {
+              mock.emit(editCall("t1", "/vault/notes/a.md"));
+              mock.emit(toolResult("t1", { "/vault/notes/a.md": "the true original\n" }));
+              return { stopReason: "end_turn" as const };
+            });
+            const session = makeSession(mock, vault.app);
+
+            await session.sendPrompt("edit it").turn;
+
+            expect(fileChangesOf(session)).toMatchObject([
+              { before: "the true original\n", after: "already written by the agent\n" },
+            ]);
+          });
+
+          it("keeps the first original when a later edit to the same file reports its own https://github.com/Brevilabs/obsidian-copilot-private/issues/347", async () => {
+            const vault = makeVault({ "notes/a.md": "third\n" });
+            const mock = makeMockBackend();
+            mock.prompt.mockImplementation(async () => {
+              mock.emit(editCall("t1", "/vault/notes/a.md"));
+              mock.emit(toolResult("t1", { "/vault/notes/a.md": "first\n" }));
+              mock.emit(editCall("t2", "/vault/notes/a.md"));
+              mock.emit(toolResult("t2", { "/vault/notes/a.md": "second\n" }));
+              return { stopReason: "end_turn" as const };
+            });
+            const session = makeSession(mock, vault.app);
+
+            await session.sendPrompt("edit it twice").turn;
+
+            expect(fileChangesOf(session)).toMatchObject([
+              { path: "notes/a.md", before: "first\n", after: "third\n" },
+            ]);
+          });
+
+          it("matches each original to its own file when one call changes several https://github.com/Brevilabs/obsidian-copilot-private/issues/687", async () => {
+            const vault = makeVault({ "notes/a.md": "a after\n", "notes/moved.md": "moved\n" });
+            const mock = makeMockBackend();
+            mock.prompt.mockImplementation(async () => {
+              mock.emit(
+                toolCall("t1", "edit", [
+                  "/vault/notes/a.md",
+                  "/vault/notes/old.md",
+                  "/vault/notes/moved.md",
+                ])
+              );
+              mock.emit(
+                toolResult("t1", {
+                  "/vault/notes/a.md": "a before\n",
+                  "/vault/notes/old.md": "moved\n",
+                  "/vault/notes/moved.md": null,
+                })
+              );
+              return { stopReason: "end_turn" as const };
+            });
+            const session = makeSession(mock, vault.app);
+
+            await session.sendPrompt("patch and move").turn;
+
+            expect(fileChangesOf(session)).toEqual([
+              expect.objectContaining({ path: "notes/a.md", before: "a before\n" }),
+              expect.objectContaining({ path: "notes/old.md", status: "deleted" }),
+              expect.objectContaining({ path: "notes/moved.md", status: "created" }),
+            ]);
+          });
+        });
+
+        describe("before text from the backend's turn diff", () => {
+          const turnDiff = {
+            root: "/vault",
+            unifiedDiff: [
+              "diff --git a/notes/a.md b/notes/a.md",
+              "--- a/notes/a.md",
+              "+++ b/notes/a.md",
+              "@@ -1,3 +1,4 @@",
+              " one",
+              "-two",
+              "+TWO",
+              "+inserted",
+              " three",
+              "",
+            ].join("\n"),
+          };
+
+          it("recovers a file's before text by reversing the turn diff over a snapshot the write overtook https://github.com/Brevilabs/obsidian-copilot-private/issues/347", async () => {
+            const vault = makeVault({ "notes/a.md": "one\nTWO\ninserted\nthree\n" });
+            const mock = makeMockBackend();
+            mock.prompt.mockImplementation(async () => {
+              mock.emit(editCall("t1", "/vault/notes/a.md"));
+              return { stopReason: "end_turn" as const, turnDiff };
+            });
+            const session = makeSession(mock, vault.app);
+
+            await session.sendPrompt("patch it").turn;
+
+            expect(fileChangesOf(session)).toMatchObject([
+              {
+                path: "notes/a.md",
+                status: "modified",
+                before: "one\ntwo\nthree\n",
+                after: "one\nTWO\ninserted\nthree\n",
+              },
+            ]);
+          });
+
+          it("falls back to the snapshot for a file the turn diff no longer applies to https://github.com/Brevilabs/obsidian-copilot-private/issues/347", async () => {
+            const vault = makeVault({ "notes/a.md": "snapshot\n" });
+            const mock = makeMockBackend();
+            mock.prompt.mockImplementation(async () => {
+              mock.emit(editCall("t1", "/vault/notes/a.md"));
+              vault.files.set("notes/a.md", "rewritten after the patch\n");
+              return { stopReason: "end_turn" as const, turnDiff };
+            });
+            const session = makeSession(mock, vault.app);
+
+            await session.sendPrompt("patch it").turn;
+
+            expect(fileChangesOf(session)).toMatchObject([
+              { path: "notes/a.md", before: "snapshot\n", after: "rewritten after the patch\n" },
+            ]);
+          });
+        });
+      });
     });
 
     describe("cancel()", () => {
@@ -2326,6 +3175,39 @@ describe("AgentSession", () => {
         expect(mock.cancel).toHaveBeenCalledWith({ sessionId: "acp-1" });
         finishPrompt("cancelled");
         expect(await turn).toBe("cancelled");
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/633 drops compaction updates that arrive after a cancel and settles the open row to cancelled", async () => {
+        const mock = makeMockBackend();
+        const finishPrompt = holdPrompt(mock);
+        const session = makeSession(mock);
+        const { turn } = session.sendPrompt("/compact");
+        mock.emitUpdate({
+          sessionUpdate: "compaction",
+          id: "c1",
+          status: "in_progress",
+          trigger: "manual",
+        });
+
+        await session.cancel();
+        mock.emitUpdate({
+          sessionUpdate: "compaction",
+          id: "c1",
+          status: "completed",
+          trigger: "manual",
+        });
+        mock.emitUpdate({
+          sessionUpdate: "compaction",
+          id: "late",
+          status: "in_progress",
+          trigger: "auto",
+        });
+        finishPrompt("cancelled");
+        await turn;
+
+        expect(aiMessage(session)?.parts).toEqual([
+          expect.objectContaining({ kind: "compaction", id: "c1", status: "cancelled" }),
+        ]);
       });
 
       it("settles locally and drops retry output when backend cancellation fails", async () => {
@@ -2590,6 +3472,72 @@ describe("AgentSession", () => {
           "earlier prompt",
           "earlier reply",
         ]);
+      });
+    });
+
+    describe("resendSavedHistoryOnNextTurn()", () => {
+      const ISSUE_3643 = "https://github.com/logancyang/obsidian-copilot/issues/3643";
+      const savedChat: AgentChatMessage[] = [
+        {
+          id: "m0",
+          sender: USER_SENDER,
+          message: "my secret word is PELICAN",
+          isVisible: true,
+          timestamp: null,
+        },
+        {
+          id: "m1",
+          sender: AI_SENDER,
+          message: "Noted: PELICAN",
+          isVisible: true,
+          timestamp: null,
+        },
+      ];
+      const promptTexts = (mock: MockBackend): string[] =>
+        mock.prompt.mock.calls.map(
+          (call) => (call[0] as { prompt: Array<{ text: string }> }).prompt[0].text
+        );
+
+      it(`${ISSUE_3643} sends the saved turns as conversation_history ahead of the next prompt, then never again`, async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock);
+        session.loadDisplayMessages(savedChat);
+        session.resendSavedHistoryOnNextTurn();
+
+        await session.sendPrompt("what is my secret word?").turn;
+        await session.sendPrompt("and backwards?").turn;
+
+        const [first, second] = promptTexts(mock);
+        expect(first).toContain("<conversation_history>");
+        expect(first).toContain('<turn role="user">\nmy secret word is PELICAN\n</turn>');
+        expect(first).toContain('<turn role="assistant">\nNoted: PELICAN\n</turn>');
+        expect(first).toContain("<user-message>\nwhat is my secret word?\n</user-message>");
+        expect(second).toBe("and backwards?");
+      });
+
+      it(`${ISSUE_3643} keeps the saved turns for the following prompt when the first turn is cancelled`, async () => {
+        const mock = makeMockBackend();
+        mock.prompt.mockResolvedValueOnce({ stopReason: "cancelled" });
+        const session = makeSession(mock);
+        session.loadDisplayMessages(savedChat);
+        session.resendSavedHistoryOnNextTurn();
+
+        await session.sendPrompt("what is my secret word?").turn;
+        await session.sendPrompt("what is my secret word?").turn;
+
+        const [, retry] = promptTexts(mock);
+        expect(retry).toContain("<conversation_history>");
+        expect(retry).toContain("my secret word is PELICAN");
+      });
+
+      it("sends no conversation_history when no saved history is queued", async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock);
+        session.loadDisplayMessages(savedChat);
+
+        await session.sendPrompt("what is my secret word?").turn;
+
+        expect(promptTexts(mock)).toEqual(["what is my secret word?"]);
       });
     });
 
@@ -2950,6 +3898,76 @@ describe("AgentSession", () => {
         expect(onMessagesChanged).toHaveBeenCalled();
       });
 
+      it.each([
+        ["without a prior reading", undefined],
+        ["keeping the held context window", 200_000],
+      ])(
+        "https://github.com/Brevilabs/obsidian-copilot-private/issues/635 sets the meter to a completed compaction's post-compaction tokens %s",
+        async (_label, contextWindow) => {
+          const mock = makeMockBackend();
+          const finishPrompt = holdPrompt(mock);
+          const session = makeSession(mock);
+          if (contextWindow) {
+            mock.emitUpdate({
+              sessionUpdate: "usage_update",
+              usage: { usedTokens: 103_000, contextWindow, updatedAt: 1 },
+            });
+          }
+          const { turn } = session.sendPrompt("/compact");
+
+          mock.emitUpdate({
+            sessionUpdate: "compaction",
+            id: "c1",
+            status: "completed",
+            trigger: "manual",
+            preTokens: 103_249,
+            postTokens: 4_046,
+          });
+
+          expect(session.getSessionUsage()).toEqual({
+            usedTokens: 4_046,
+            contextWindow,
+            updatedAt: expect.any(Number),
+          });
+          finishPrompt();
+          await turn;
+        }
+      );
+
+      it.each([
+        ["still running", { status: "in_progress" as const }],
+        ["skipped", { status: "skipped" as const }],
+        ["failed", { status: "failed" as const, error: "boom" }],
+        ["completed without a post-compaction count", { status: "completed" as const }],
+      ])(
+        "https://github.com/Brevilabs/obsidian-copilot-private/issues/635 leaves the meter alone for a compaction that is %s",
+        async (_label, snapshot) => {
+          const mock = makeMockBackend();
+          const finishPrompt = holdPrompt(mock);
+          const session = makeSession(mock);
+          mock.emitUpdate({
+            sessionUpdate: "usage_update",
+            usage: { usedTokens: 103_000, contextWindow: 200_000, updatedAt: 1 },
+          });
+          const { turn } = session.sendPrompt("/compact");
+
+          mock.emitUpdate({
+            sessionUpdate: "compaction",
+            id: "c1",
+            trigger: "manual",
+            ...snapshot,
+          });
+
+          expect(session.getSessionUsage()).toEqual({
+            usedTokens: 103_000,
+            contextWindow: 200_000,
+            updatedAt: 1,
+          });
+          finishPrompt();
+          await turn;
+        }
+      );
+
       it("lets a fuller snapshot's contextWindow replace an earlier one", () => {
         const mock = makeMockBackend();
         const session = makeSession(mock);
@@ -3249,6 +4267,19 @@ describe("AgentSession", () => {
 
           mock.emitUpdate({ sessionUpdate: "session_info_update", title: "Second" });
           expect(session.getLabel()).toBe("Second");
+        });
+
+        it("keeps the agent title when an update omits the title, such as an opencode compaction marker (https://github.com/Brevilabs/obsidian-copilot-private/issues/632)", () => {
+          const mock = makeMockBackend();
+          const session = makeSession(mock);
+          const onLabelChanged = jest.fn();
+          mock.emitUpdate({ sessionUpdate: "session_info_update", title: "Autumn leaves" });
+          subscribeTo(session, { onLabelChanged });
+
+          mock.emitUpdate({ sessionUpdate: "session_info_update" });
+
+          expect(session.getLabel()).toBe("Autumn leaves");
+          expect(onLabelChanged).not.toHaveBeenCalled();
         });
       });
 
@@ -3833,6 +4864,150 @@ describe("AgentSession", () => {
         const session = makeSession(mock, { backendId: "claude" });
         expect(session.getPendingAskUserQuestions()).toHaveLength(0);
         expect(session.getPendingAskUserQuestions()).toBe(session.getPendingAskUserQuestions());
+      });
+    });
+
+    describe("getReportEvidence()", () => {
+      it("describes the chat for a bug report by backend, current model, backend session and time", () => {
+        const session = makeSession(makeMockBackend(), {
+          backendId: "codex",
+          initialState: sonnetAndGpt5State(),
+        });
+
+        expect(session.getReportEvidence()).toEqual({
+          backendId: "codex",
+          model: "anthropic/sonnet",
+          sessionId: "acp-1",
+          raisedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+        });
+      });
+    });
+
+    describe("getFeedbackOffer()", () => {
+      it("starts with no feedback card", () => {
+        expect(makeSession(makeMockBackend()).getFeedbackOffer()).toBeNull();
+      });
+    });
+
+    describe("offerFeedback()", () => {
+      const DRAFT = {
+        title: "Replied in Swedish to an English request",
+        whatHappened: "The agent answered 'hej'.",
+        userSaid: "Why do you switch to a different language?",
+        repro: "1. Ask in English.",
+      };
+
+      const sessionWithTranscript = () => {
+        const session = makeSession(makeMockBackend(), {
+          backendId: "codex",
+          initialState: sonnetAndGpt5State(),
+        });
+        session.loadDisplayMessages([
+          { id: "u1", sender: USER_SENDER, message: "hej", isVisible: true, timestamp: null },
+          { id: "a1", sender: AI_SENDER, message: "hej", isVisible: true, timestamp: null },
+          { id: "u2", sender: USER_SENDER, message: "why?", isVisible: true, timestamp: null },
+        ]);
+        return session;
+      };
+
+      it("opens a card with the draft, session evidence and the latest user message as its anchor", () => {
+        const session = sessionWithTranscript();
+        const onMessagesChanged = jest.fn();
+        subscribeTo(session, { onMessagesChanged });
+
+        expect(session.offerFeedback(DRAFT)).toBe("shown");
+
+        expect(onMessagesChanged).toHaveBeenCalled();
+        expect(session.getFeedbackOffer()).toEqual({
+          draft: DRAFT,
+          evidence: {
+            backendId: "codex",
+            model: "anthropic/sonnet",
+            sessionId: "acp-1",
+            raisedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+          },
+          afterUserMessageId: "u2",
+          status: "open",
+        });
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/672 refuses a second card in the same session whether the first is open, dismissed or sent", () => {
+        const session = sessionWithTranscript();
+        session.offerFeedback(DRAFT);
+        const first = session.getFeedbackOffer();
+
+        expect(session.offerFeedback({ ...DRAFT, title: "Another problem" })).toBe(
+          "already_offered"
+        );
+        session.dismissFeedbackOffer();
+        expect(session.offerFeedback(DRAFT)).toBe("already_offered");
+        expect(session.getFeedbackOffer()?.draft).toBe(first?.draft);
+      });
+
+      it("anchors to nothing when the session has no user message yet", () => {
+        const session = makeSession(makeMockBackend());
+        session.offerFeedback(DRAFT);
+        expect(session.getFeedbackOffer()?.afterUserMessageId).toBeNull();
+      });
+    });
+
+    describe("dismissFeedbackOffer()", () => {
+      const DRAFT = { title: "t", whatHappened: "w", userSaid: "", repro: "r" };
+
+      it("marks an open card dismissed and notifies, without any other effect", () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock);
+        session.offerFeedback(DRAFT);
+        const onMessagesChanged = jest.fn();
+        subscribeTo(session, { onMessagesChanged });
+
+        session.dismissFeedbackOffer();
+
+        expect(session.getFeedbackOffer()?.status).toBe("dismissed");
+        expect(onMessagesChanged).toHaveBeenCalledTimes(1);
+        expect(mock.prompt).not.toHaveBeenCalled();
+      });
+
+      it("leaves a sent card and a missing card unchanged", () => {
+        const session = makeSession(makeMockBackend());
+        session.dismissFeedbackOffer();
+        expect(session.getFeedbackOffer()).toBeNull();
+
+        session.offerFeedback(DRAFT);
+        session.markFeedbackReported({ reportId: "r1", issueUrl: "https://example.com" });
+        session.dismissFeedbackOffer();
+        expect(session.getFeedbackOffer()?.status).toBe("reported");
+      });
+    });
+
+    describe("markFeedbackReported()", () => {
+      it("records the report ID and issue link on the card", () => {
+        const session = makeSession(makeMockBackend());
+        session.offerFeedback({ title: "t", whatHappened: "w", userSaid: "", repro: "r" });
+
+        session.markFeedbackReported({ reportId: "r1", issueUrl: "https://example.com" });
+
+        expect(session.getFeedbackOffer()).toMatchObject({
+          status: "reported",
+          report: { reportId: "r1", issueUrl: "https://example.com" },
+        });
+      });
+
+      it("ignores a report when no card was offered", () => {
+        const session = makeSession(makeMockBackend());
+        session.markFeedbackReported({ reportId: "r1", issueUrl: "https://example.com" });
+        expect(session.getFeedbackOffer()).toBeNull();
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/672 keeps a dismissed card dismissed when its upload lands afterwards", () => {
+        const session = makeSession(makeMockBackend());
+        session.offerFeedback({ title: "t", whatHappened: "w", userSaid: "", repro: "r" });
+        session.dismissFeedbackOffer();
+
+        session.markFeedbackReported({ reportId: "r1", issueUrl: "https://example.com" });
+
+        expect(session.getFeedbackOffer()).toMatchObject({ status: "dismissed" });
+        expect(session.getFeedbackOffer()?.report).toBeUndefined();
       });
     });
 

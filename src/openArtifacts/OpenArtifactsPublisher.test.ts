@@ -33,6 +33,7 @@ interface Harness {
     publish: jest.Mock;
     update: jest.Mock;
     delete: jest.Mock;
+    setLinkAccess: jest.Mock;
   };
   file: TFile;
   frontmatter: Record<string, unknown>;
@@ -43,6 +44,8 @@ interface Harness {
   processFrontMatter: jest.Mock;
   publisher: OpenArtifactsPublisher;
   recordLedger: jest.Mock<Promise<void>, [OpenArtifactsLedgerEntry]>;
+  isLinkOfferPending: jest.Mock<Promise<boolean>, []>;
+  markLinkOfferShown: jest.Mock<Promise<void>, []>;
 }
 
 function createHarness(frontmatter: Record<string, unknown> = {}): Harness {
@@ -70,6 +73,9 @@ function createHarness(frontmatter: Record<string, unknown> = {}): Harness {
     publish: jest.fn().mockResolvedValue(RECEIPT),
     update: jest.fn().mockResolvedValue({ ...RECEIPT, version: 2 }),
     delete: jest.fn().mockResolvedValue(undefined),
+    getAccess: jest.fn(),
+    setLinkAccess: jest.fn(),
+    openAsOwner: jest.fn(),
   };
   const loadLicenseKey = jest.fn().mockResolvedValue("decrypted-license");
   const buildDocument = jest.fn().mockResolvedValue(DOCUMENT);
@@ -79,11 +85,15 @@ function createHarness(frontmatter: Record<string, unknown> = {}): Harness {
   const recordLedger = jest
     .fn<Promise<void>, [OpenArtifactsLedgerEntry]>()
     .mockResolvedValue(undefined);
+  const isLinkOfferPending = jest.fn<Promise<boolean>, []>().mockResolvedValue(false);
+  const markLinkOfferShown = jest.fn<Promise<void>, []>().mockResolvedValue(undefined);
   const publisher = new OpenArtifactsPublisher(app, {
     client,
     loadLicenseKey,
     buildDocument,
     recordLedger,
+    isLinkOfferPending,
+    markLinkOfferShown,
     createModal: (options) => {
       modalOptions.push(options);
       return {
@@ -109,6 +119,8 @@ function createHarness(frontmatter: Record<string, unknown> = {}): Harness {
     processFrontMatter,
     publisher,
     recordLedger,
+    isLinkOfferPending,
+    markLinkOfferShown,
   };
 }
 
@@ -140,7 +152,12 @@ describe("OpenArtifactsPublisher", () => {
         expect(result).toEqual({ kind: "success", action: "publish", receipt: RECEIPT });
         expect(harness.loadLicenseKey).toHaveBeenCalledTimes(1);
         expect(harness.buildDocument).toHaveBeenCalledWith(harness.file, activeDocument);
-        expect(harness.client.publish).toHaveBeenCalledWith(DOCUMENT, "decrypted-license");
+        expect(harness.client.publish).toHaveBeenCalledWith(
+          DOCUMENT,
+          "decrypted-license",
+          undefined,
+          false
+        );
         const ledgerEntry = harness.recordLedger.mock.calls[0][0];
         expect(ledgerEntry).toMatchObject({
           docId: DOC_ID,
@@ -154,6 +171,54 @@ describe("OpenArtifactsPublisher", () => {
         expect(harness.recordLedger.mock.invocationCallOrder[0]).toBeLessThan(
           harness.processFrontMatter.mock.invocationCallOrder[0]
         );
+        expect(harness.frontmatter.openartifacts).toBe(DOC_URL);
+      });
+
+      it("https://github.com/Brevilabs/OpenArtifacts/issues/94 requests the account-link offer on a create while it is pending and records it once the receipt carries guidance", async () => {
+        const harness = createHarness();
+        const guidance = { message: "Link your account.", url: "https://openartifacts.ai/account" };
+        harness.isLinkOfferPending.mockResolvedValue(true);
+        harness.client.publish.mockResolvedValue({ ...RECEIPT, guidance });
+
+        const result = await openAndConfirm(harness, "publish");
+
+        expect(harness.client.publish).toHaveBeenCalledWith(
+          DOCUMENT,
+          "decrypted-license",
+          undefined,
+          true
+        );
+        expect(harness.markLinkOfferShown).toHaveBeenCalledTimes(1);
+        expect(result).toEqual({
+          kind: "success",
+          action: "publish",
+          receipt: { ...RECEIPT, guidance },
+        });
+      });
+
+      it("https://github.com/Brevilabs/OpenArtifacts/issues/94 records nothing when a requested offer comes back without guidance, and never requests one on an update", async () => {
+        const created = createHarness();
+        created.isLinkOfferPending.mockResolvedValue(true);
+        await openAndConfirm(created, "publish");
+        expect(created.markLinkOfferShown).not.toHaveBeenCalled();
+
+        const updated = createHarness({ openartifacts: DOC_URL });
+        updated.isLinkOfferPending.mockResolvedValue(true);
+        await openAndConfirm(updated, "update");
+        expect(updated.isLinkOfferPending).not.toHaveBeenCalled();
+      });
+
+      it("https://github.com/Brevilabs/OpenArtifacts/issues/94 keeps a successful publish when the offer marker cannot be written", async () => {
+        const harness = createHarness();
+        harness.client.publish.mockResolvedValue({
+          ...RECEIPT,
+          guidance: { message: "Link your account.", url: "https://openartifacts.ai/account" },
+        });
+        harness.markLinkOfferShown.mockRejectedValue(new Error("vault is read-only"));
+
+        const result = await openAndConfirm(harness, "publish");
+
+        expect(result).toMatchObject({ kind: "success", action: "publish" });
         expect(harness.frontmatter.openartifacts).toBe(DOC_URL);
       });
 
@@ -180,7 +245,7 @@ describe("OpenArtifactsPublisher", () => {
           kind: "failure",
           action: "publish",
           message:
-            "This note's openartifacts property (or its legacy symposium property) holds a value that is not this note's OpenArtifacts link. Recover the public link from .openartifacts/publish-history.md, then repair or remove the property before publishing.",
+            "This note's openartifacts property (or its legacy symposium property) holds a value that is not this note's OpenArtifacts link. Recover the link from .openartifacts/publish-history.md, then repair or remove the property before publishing.",
           accessNotice: false,
           retryable: false,
         });
@@ -220,6 +285,7 @@ describe("OpenArtifactsPublisher", () => {
         const result = await openAndConfirm(harness, "publish");
 
         expect(harness.modalOptions[0].docId).toBe(DOC_ID);
+        expect(harness.modalOptions[0].docUrl).toBe(DOC_URL);
         expect(result).toEqual({
           kind: "success",
           action: "update",
@@ -430,6 +496,81 @@ describe("OpenArtifactsPublisher", () => {
         });
       });
 
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/707 publishes privately only for a confirmed invited publish and never changes access on an update", async () => {
+        const created = createHarness();
+        await created.publisher.open(created.file);
+        await created.modalOptions[0].onConfirm("publish", activeDocument, "invited");
+        expect(created.client.publish).toHaveBeenCalledWith(
+          DOCUMENT,
+          "decrypted-license",
+          "invited",
+          false
+        );
+
+        const published = createHarness({ openartifacts: DOC_URL });
+        await published.publisher.open(published.file);
+        await published.modalOptions[0].onConfirm("update", activeDocument, "invited");
+        expect(published.client.update).toHaveBeenCalledWith(DOC_ID, DOCUMENT, "decrypted-license");
+        expect(published.client.publish).not.toHaveBeenCalled();
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/707 carries the upgrade link of a privateSharing refusal into the failure result", async () => {
+        const harness = createHarness();
+        harness.client.publish.mockRejectedValue(
+          new OpenArtifactsClientError(
+            "Your Copilot plan does not include private sharing.",
+            "limit_reached",
+            402,
+            false,
+            "https://www.obsidiancopilot.com/pricing?utm_medium=openartifacts_private_sharing"
+          )
+        );
+
+        await harness.publisher.open(harness.file);
+        const result = await harness.modalOptions[0].onConfirm(
+          "publish",
+          activeDocument,
+          "invited"
+        );
+
+        expect(result).toEqual({
+          kind: "failure",
+          action: "publish",
+          message: "Your Copilot plan does not include private sharing.",
+          accessNotice: false,
+          retryable: false,
+          upgradeUrl:
+            "https://www.obsidiancopilot.com/pricing?utm_medium=openartifacts_private_sharing",
+        });
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/707 rejects a stale setLinkAccess after the note identity changes during license loading", async () => {
+        const harness = createHarness({ openartifacts: DOC_URL });
+        await harness.publisher.open(harness.file);
+        harness.loadLicenseKey.mockImplementation(async () => {
+          harness.frontmatter.openartifacts = NEW_DOC_URL;
+          return "decrypted-license";
+        });
+
+        await expect(
+          harness.modalOptions[0].access!.setLinkAccess(DOC_ID, "anyone")
+        ).rejects.toMatchObject({ code: "identity_changed" });
+        expect(harness.client.setLinkAccess).not.toHaveBeenCalled();
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/707 allows setLinkAccess for the note's current document", async () => {
+        const harness = createHarness({ openartifacts: DOC_URL });
+        await harness.publisher.open(harness.file);
+
+        await harness.modalOptions[0].access!.setLinkAccess(DOC_ID, "anyone");
+
+        expect(harness.client.setLinkAccess).toHaveBeenCalledWith(
+          DOC_ID,
+          "anyone",
+          "decrypted-license"
+        );
+      });
+
       it("blocks another POST after a publish response is lost", async () => {
         const message =
           "OpenArtifacts may have published this note, but Copilot did not receive a valid receipt. To avoid creating a duplicate page, this publish cannot be retried until the plugin reloads.";
@@ -518,6 +659,10 @@ describe("OpenArtifactsPublisher", () => {
           kind: "persistence",
           action: "publish",
           receipt: RECEIPT,
+          // A private publish reaches this message too, so it must not call the page public.
+          // https://github.com/Brevilabs/obsidian-copilot-private/issues/707
+          message:
+            "The page is already published. Retry saving its link to this note; this will not publish again.",
         });
         expect(harness.client.publish).toHaveBeenCalledTimes(1);
 
@@ -658,7 +803,13 @@ describe("OpenArtifactsPublisher", () => {
         expect(harness.recordLedger.mock.invocationCallOrder[0]).toBeLessThan(
           harness.processFrontMatter.mock.invocationCallOrder[0]
         );
-        expect(partial).toMatchObject({ kind: "persistence", action: "delete" });
+        expect(partial).toMatchObject({
+          kind: "persistence",
+          action: "delete",
+          // https://github.com/Brevilabs/obsidian-copilot-private/issues/707
+          message:
+            "The page is already deleted. Retry removing its link from this note; this will not contact OpenArtifacts again.",
+        });
 
         harness.modalOptions[0].onClosed?.();
         await harness.publisher.open(harness.file);

@@ -1,3 +1,4 @@
+import { isMiyoSearchSkillActive } from "@/builtinSkills/builtinSkills";
 import { Button } from "@/components/ui/button";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SettingSection } from "@/components/ui/setting-section";
@@ -20,6 +21,8 @@ import {
   MIYO_CONNECT_DEEPLINK_URL,
 } from "@/miyo/miyoUtils";
 import { getMiyoConnectionMode } from "@/miyo/miyoRuntimePolicy";
+import { CapabilityRow } from "@/settings/v2/components/CapabilityRow";
+import { MiyoDocumentProcessingRow } from "@/settings/v2/components/MiyoDocumentProcessingRow";
 import { MiyoConnectionPanel } from "@/settings/v2/components/ui/MiyoConnectionPanel";
 import { MiyoSearchFoldersPicker } from "@/settings/v2/components/ui/MiyoSearchFoldersPicker";
 import { useMiyoStatus } from "@/miyo/useMiyoStatus";
@@ -77,26 +80,6 @@ function chatSyncStatusText(status: CapabilityStatus): string {
       return "Checking…";
   }
 }
-
-interface CapabilityRowProps {
-  title: React.ReactNode;
-  description: React.ReactNode;
-  control: React.ReactNode;
-}
-
-const CapabilityRow: React.FC<CapabilityRowProps> = ({ title, description, control }) => (
-  <div className="tw-flex tw-flex-col tw-items-start tw-justify-between tw-gap-4 tw-py-4 sm:tw-flex-row sm:tw-items-center">
-    <div className="tw-w-full tw-space-y-1.5 sm:tw-w-[300px]">
-      <div className="tw-flex tw-items-center tw-gap-2 tw-text-sm tw-font-medium tw-leading-none">
-        {title}
-      </div>
-      <div className="tw-text-xs tw-text-muted">{description}</div>
-    </div>
-    <div className="tw-flex tw-w-full tw-flex-1 tw-items-center tw-gap-2 sm:tw-justify-end">
-      {control}
-    </div>
-  </div>
-);
 
 export const MiyoSettings: React.FC = () => {
   const app = useApp();
@@ -469,11 +452,12 @@ export const MiyoSettings: React.FC = () => {
   };
 
   const capabilitiesEnabled = status.backend === "available" || status.backend === "stale";
-  const skillToggleUsable = settings.enableMiyoSearchSkill || capabilitiesEnabled;
+  const skillActive = isMiyoSearchSkillActive(settings);
+  const skillToggleUsable = skillActive || capabilitiesEnabled;
   const connectedRemote = activeMode === "remote";
   const hasPendingConnection =
     mode !== activeMode || (mode === "remote" && urlDraft.trim() !== activeUrl);
-  const searchSkillShown = pendingSkillEnabled ?? settings.enableMiyoSearchSkill;
+  const searchSkillShown = pendingSkillEnabled ?? skillActive;
   const showSearchFolders = searchSkillShown && capabilitiesEnabled && !settings.miyoSearchAll;
   const searchFoldersKey = showSearchFolders ? settingsKey : null;
   const vaultFolderName = getMiyoFolderName(app);
@@ -636,26 +620,11 @@ export const MiyoSettings: React.FC = () => {
               />
             </div>
 
-            {/* Not connection-gated: a user must be able to switch back to Plus to recover from a fail-closed parse error: https://github.com/Brevilabs/obsidian-copilot-private/issues/466 */}
+            {/* Not connection-gated: a user must be able to turn Miyo parsing off to recover from a parse error: https://github.com/Brevilabs/obsidian-copilot-private/issues/466 */}
             <div className="tw-px-4">
-              <CapabilityRow
-                title="Document Processor"
-                description={
-                  settings.docProcessorBackend === "plus"
-                    ? "Use Copilot Cloud to process PDF, EPUB, and other formats."
-                    : "Miyo processes PDF and EPUB. Other formats use Copilot Cloud."
-                }
-                control={
-                  <SegmentedControl
-                    aria-label="Document Processor backend"
-                    options={[
-                      { label: "Plus", value: "plus" },
-                      { label: "Miyo", value: "miyo" },
-                    ]}
-                    value={settings.docProcessorBackend}
-                    onChange={(value) => updateSetting("docProcessorBackend", value)}
-                  />
-                }
+              <MiyoDocumentProcessingRow
+                enabled={settings.enableMiyoDocumentProcessing}
+                onEnabledChange={(next) => updateSetting("enableMiyoDocumentProcessing", next)}
               />
             </div>
           </div>

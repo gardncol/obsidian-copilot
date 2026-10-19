@@ -86,6 +86,14 @@ describe("chatHistoryMerge", () => {
       expect(merged[0]?.createdAt.getTime()).toBe(1_500);
     });
 
+    it("keeps the pin time of a saved chat that also exists natively", () => {
+      const [merged] = mergeChatHistoryItems(
+        [{ item: mdItem({ pinnedAt: 7_000 }), backendId: "opencode", sessionId: "s1" }],
+        [nativeEntry({ sessionId: "s1", lastAccessedAtMs: 9_000 })]
+      );
+      expect(merged?.pinnedAt).toBe(7_000);
+    });
+
     it("fills missing markdown project ownership from its native twin", () => {
       const [merged] = mergeChatHistoryItems(
         [{ item: mdItem(), backendId: "opencode", sessionId: "s1" }],
@@ -132,6 +140,16 @@ describe("chatHistoryMerge", () => {
         deriveChatTitleFromMessages([{ ...imageMessage, content: [null, {}, { type: "text" }] }])
       ).toBeNull();
     });
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/634 skips /compact messages so the chat is titled from the first real message", () => {
+      expect(deriveChatTitleFromMessages([msg(USER_SENDER, "/compact")])).toBeNull();
+      expect(
+        deriveChatTitleFromMessages([
+          msg(USER_SENDER, "/compact keep the API"),
+          msg(USER_SENDER, "Plan the migration"),
+        ])
+      ).toBe("Plan the migration");
+    });
+
     it("uses the first user message", () => {
       const title = deriveChatTitleFromMessages([
         msg(USER_SENDER, "Summarize today's meeting notes"),

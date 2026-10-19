@@ -1,38 +1,28 @@
-import type { BackendState } from "@/agentMode/session/types";
+import { isCompactCommand } from "@/commands/compactCommand";
+import type { AgentMcpServer, BackendState } from "@/agentMode/session/types";
+import type {
+  FeedbackMcpServer,
+  FeedbackOfferHandler,
+} from "@/agentMode/session/feedback/feedbackMcpServer";
 import { resolveEffort } from "@/lib/model-effort";
 import { logError, logInfo, logWarn } from "@/logger";
 import type CopilotPlugin from "@/main";
 import { AgentChatUIState } from "@/agentMode/session/AgentChatUIState";
 import { AgentInputDraftStore } from "@/agentMode/session/AgentInputDraftStore";
 import {
-  agentProjectContextLoadAtom,
-  type AgentInFlightSource,
-  type AgentProjectContextLoadState,
-  type ContextLoadStepCount,
-  type FailedItem,
-} from "@/aiParams";
-import {
   getSettings,
   setSettings,
-  settingsStore,
   subscribeToSettingsChange,
   type CopilotSettings,
 } from "@/settings/model";
-import {
-  ensureProjectContextMaterialized,
-  EMPTY_CONTEXT_MATERIALIZATION_RESULT,
-  materializeProjectContextSource,
-  type ContextMaterializationResult,
-  type ContextMaterializeProgress,
-} from "@/context/projectContextMaterializer";
-import type {
-  MaterializedSourceType,
-  MaterializeSourceIdentity,
-  SourceFailure,
-} from "@/context/contextCacheStore";
+import { buildProjectContext } from "@/context/manifestBuilder";
 import { err2String } from "@/utils";
 import type { ChatHistoryItem } from "@/components/chat-components/ChatHistoryPopover";
-import { fileToHistoryItem, readChatPathProjectId } from "@/utils/chatHistoryUtils";
+import {
+  fileToHistoryItem,
+  parseChatPinnedAt,
+  readChatPathProjectId,
+} from "@/utils/chatHistoryUtils";
 import { readFrontmatterViaAdapter } from "@/utils/vaultAdapterUtils";
 import { App, FileSystemAdapter, Notice, Platform, TFile } from "obsidian";
 import { v4 as uuidv4 } from "uuid";
@@ -42,7 +32,7 @@ import type { AgentModelPreloader } from "./AgentModelPreloader";
 import { buildNativeChatId, parseNativeChatId } from "@/utils/nativeChatId";
 import { CHAT_AGENT_VIEWTYPE, USER_SENDER } from "@/constants";
 import { playNotificationSound } from "@/utils/notificationSound";
-import type { AgentSessionIndex } from "./AgentSessionIndex";
+import type { AgentSessionIndex, AgentSessionIndexEntry } from "./AgentSessionIndex";
 import {
   deriveChatTitleFromMessages,
   mergeChatHistoryItems,
@@ -72,11 +62,8 @@ import {
 } from "@/projects/state";
 import type { ProjectFileRecord } from "@/projects/type";
 import {
-  composeContextDirtyKey,
-  contextDirtyKeyMatchesConfig,
   getProjectContextSignature,
   getProjectLandingCaptureSignature,
-  landingCaptureIsVerifiable,
 } from "@/projects/projectContextSignature";
 import { ProjectContentTracker } from "@/context/projectContentTracker";
 import { buildProjectContextUpdatesBlock } from "@/context/contextUpdatesBlockBuilder";
@@ -120,6 +107,15 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
   });
 }
 
+function sessionRefFromFrontmatter(
+  frontmatter: Record<string, unknown> | undefined
+): { backendId: BackendId; sessionId: string } | null {
+  const backendId = typeof frontmatter?.backendId === "string" ? frontmatter.backendId.trim() : "";
+  const sessionId = typeof frontmatter?.sessionId === "string" ? frontmatter.sessionId.trim() : "";
+  if (!backendId || !sessionId) return null;
+  return { backendId, sessionId };
+}
+
 function isSameCwd(a: string, b: string): boolean {
   const norm = (p: string) => p.replace(/[/\\]+$/, "");
   return norm(a) === norm(b);
@@ -129,47 +125,20 @@ const EMPTY_SESSIONS = Object.freeze([]) as unknown as AgentSession[];
 const EMPTY_HISTORY_ITEMS = Object.freeze([]) as unknown as ChatHistoryItem[];
 const EMPTY_RECENT_CHAT_IDS: ReadonlySet<string> = new Set();
 const EMPTY_CHAT_INPUT_IDS: readonly string[] = Object.freeze([]);
+const EMPTY_MCP_SERVERS: ReadonlyArray<AgentMcpServer> = Object.freeze([]);
 
 const RESUMED_SESSION_BEHIND_EPOCH = -1;
-
-function toFailedItem(failure: SourceFailure): FailedItem {
-  return {
-    path: failure.source,
-    type: failure.kind === "file" ? "nonMd" : failure.kind,
-    error: failure.error,
-    usedStaleSnapshot: failure.usedStaleSnapshot,
-  };
-}
-
-function failedItemIsSource(failed: FailedItem, item: MaterializeSourceIdentity): boolean {
-  if (failed.path !== item.source) return false;
-  return item.kind === "file" ? failed.type === "nonMd" : failed.type === item.kind;
-}
-
-function addProcessingSource(
-  list: AgentInFlightSource[],
-  item: MaterializeSourceIdentity
-): AgentInFlightSource[] {
-  if (list.some((s) => s.kind === item.kind && s.source === item.source)) return list;
-  return [...list, { kind: item.kind, source: item.source }];
-}
-
-function removeProcessingSource(
-  list: AgentInFlightSource[],
-  item: MaterializeSourceIdentity
-): AgentInFlightSource[] {
-  return list.filter((s) => !(s.kind === item.kind && s.source === item.source));
-}
-
-function upsertFailedItem(list: FailedItem[], failure: FailedItem): FailedItem[] {
-  return [...list.filter((f) => !(f.path === failure.path && f.type === failure.type)), failure];
-}
 
 export type PermissionPrompter = (req: PermissionPrompt) => Promise<PermissionDecision>;
 
 export type AskUserQuestionPrompter = (req: AskUserQuestionPrompt) => Promise<AgentQuestionAnswers>;
 
 export type DescriptorResolver = (id: BackendId) => BackendDescriptor | undefined;
+
+export interface PinnedChat {
+  id: string;
+  pinnedAt?: number;
+}
 
 export interface ReplaceSessionOptions {
   preserveChatInput?: boolean;
@@ -184,6 +153,7 @@ export interface AgentSessionManagerOptions {
   beforeBackendStart?: (id: BackendId) => Promise<void>;
   persistenceManager?: AgentChatPersistenceManager;
   sessionIndex?: AgentSessionIndex;
+  feedbackServer?: FeedbackMcpServer;
 }
 
 export class AgentSessionManager {
@@ -196,10 +166,8 @@ export class AgentSessionManager {
   private scopeSeq = 0;
   private readonly lastActiveByScope = new Map<ProjectScopeId, string>();
   private readonly detachedFromTabIds = new Set<string>();
-  private readonly contextDirtySignatures = new Map<ProjectScopeId, string>();
   private readonly landingCaptureSignatures = new Map<string, string>();
   private readonly contentTracker: ProjectContentTracker;
-  private contentTrackerUnsubscribe?: () => void;
   private readonly lastSeenProjectContentEpochBySession = new Map<string, number>();
   private previousProjectRecords: ProjectFileRecord[] = [];
   private projectRecordsUnsubscriber?: () => void;
@@ -244,6 +212,7 @@ export class AgentSessionManager {
     {
       source?: { path: string };
       timer?: number;
+      saving?: Promise<unknown>;
       indexTimer?: number;
       unsub?: () => void;
       signature?: string;
@@ -282,9 +251,6 @@ export class AgentSessionManager {
       this.onDefaultSelectionsChanged(prev, next)
     );
     this.contentTracker = new ProjectContentTracker(this.app);
-    this.contentTrackerUnsubscribe = this.contentTracker.onContentChanged((projectId) =>
-      this.markProjectContextDirty(projectId)
-    );
     this.setupProjectRecordChangeMonitor();
   }
 
@@ -374,77 +340,23 @@ export class AgentSessionManager {
     const prevRecords = this.previousProjectRecords;
     this.previousProjectRecords = nextRecords;
 
-    const nextIds = new Set(nextRecords.map((r) => r.project.id));
-    for (const id of this.contextDirtySignatures.keys()) {
-      if (!nextIds.has(id)) this.contextDirtySignatures.delete(id);
-    }
-
     for (const nextRecord of nextRecords) {
       const prevRecord = prevRecords.find((r) => r.project.id === nextRecord.project.id);
       if (!prevRecord) continue;
       const nextSignature = getProjectContextSignature(nextRecord);
       if (getProjectContextSignature(prevRecord) === nextSignature) continue;
 
-      const projectId = nextRecord.project.id;
-      this.contentTracker.bumpEpoch(projectId);
-      this.markProjectContextDirty(projectId, nextRecord);
-      if (projectId === this.activeProjectId) this.warmProjectContext(projectId);
+      this.contentTracker.bumpEpoch(nextRecord.project.id);
     }
   }
 
-  private markProjectContextDirty(
-    projectId: ProjectScopeId,
-    record = getCachedProjectRecordById(projectId)
-  ): void {
-    if (this.disposed || projectId === GLOBAL_SCOPE || !record) return;
-    const key = composeContextDirtyKey(
-      getProjectContextSignature(record),
+  private buildFirstProjectContextBlock(internalId: string, projectId: ProjectScopeId): string {
+    this.contentTracker.flushNow();
+    this.lastSeenProjectContentEpochBySession.set(
+      internalId,
       this.contentTracker.getEpoch(projectId)
     );
-    this.contextDirtySignatures.set(projectId, key);
-  }
-
-  private warmProjectContext(projectId: ProjectScopeId): void {
-    if (this.disposed || projectId === GLOBAL_SCOPE) return;
-    let cwd: string;
-    try {
-      cwd = this.resolveSessionCwd(projectId);
-    } catch {
-      return;
-    }
-    void ensureProjectContextMaterialized(
-      this.app,
-      projectId,
-      cwd,
-      undefined,
-      undefined,
-      this.currentContextRevisionKey(projectId)
-    ).catch((err) => logWarn(`[AgentMode] background context warm failed for ${projectId}`, err));
-  }
-
-  private currentContextRevisionKey(projectId: ProjectScopeId): string | undefined {
-    const record = getCachedProjectRecordById(projectId);
-    if (!record) return undefined;
-    return composeContextDirtyKey(
-      getProjectContextSignature(record),
-      this.contentTracker.getEpoch(projectId)
-    );
-  }
-
-  private isProjectContextDirty(projectId: ProjectScopeId): boolean {
-    return this.contextDirtySignatures.has(projectId);
-  }
-
-  private clearContextDirtyIfCaptured(
-    projectId: ProjectScopeId,
-    capturedKey: string | undefined,
-    resultContextSignature: string | undefined
-  ): void {
-    if (capturedKey === undefined || resultContextSignature === undefined) return;
-    if (this.contextDirtySignatures.get(projectId) !== capturedKey) return;
-    if (contextDirtyKeyMatchesConfig(capturedKey, resultContextSignature)) {
-      this.contextDirtySignatures.delete(projectId);
-    }
+    return buildProjectContext(this.app, projectId);
   }
 
   private getProjectContextUpdates(
@@ -478,10 +390,15 @@ export class AgentSessionManager {
       const tracker = this.plugin.getChatHistoryLastAccessedAtManager();
       markdownEntries = await Promise.all(
         files.map(async (file) => {
-          const ref = await this.readSessionRefFromFile(file.path);
+          const frontmatter = await this.readChatFrontmatter(file.path);
+          const ref = sessionRefFromFrontmatter(frontmatter);
           const item = fileToHistoryItem(this.app, file, tracker);
           return {
-            item: liveAttentionPaths.has(item.id) ? { ...item, needsAttention: true } : item,
+            item: {
+              ...item,
+              pinnedAt: parseChatPinnedAt(frontmatter?.pinnedAt),
+              ...(liveAttentionPaths.has(item.id) ? { needsAttention: true } : {}),
+            },
             backendId: ref?.backendId,
             sessionId: ref?.sessionId,
           };
@@ -617,25 +534,79 @@ export class AgentSessionManager {
     await persistence.updateTopic(fileId, newTitle);
   }
 
-  async deleteChatHistory(fileId: string): Promise<void> {
-    const index = this.opts.sessionIndex;
-    const native = parseNativeChatId(fileId);
-    if (native) {
-      if (!index) throw new Error("Agent session index is not configured.");
-      this.cancelPendingIndexTouch(native.backendId, native.sessionId);
-      await index.deleteSession(native.backendId, native.sessionId);
-      return;
-    }
+  async setChatPinned(id: string, pinned: boolean): Promise<PinnedChat> {
     const persistence = this.opts.persistenceManager;
     if (!persistence) throw new Error("Agent chat persistence is not configured.");
-    if (index) {
-      const ref = await this.readSessionRefFromFile(fileId);
-      if (ref) {
-        this.cancelPendingIndexTouch(ref.backendId, ref.sessionId);
-        await index.deleteSession(ref.backendId, ref.sessionId);
-      }
+    // The pin lives in the chat's note, so a chat that has none is saved as one first.
+    // https://github.com/logancyang/obsidian-copilot/issues/3195
+    const path = await this.ensureChatNote(id);
+    const pinnedAt = pinned ? Date.now() : null;
+    await persistence.setPinnedAt(path, pinnedAt);
+    return { id: path, pinnedAt: pinnedAt ?? undefined };
+  }
+
+  async ensureChatNote(id: string): Promise<string> {
+    const native = parseNativeChatId(id);
+    return native ? this.saveNativeChatAsNote(native.backendId, native.sessionId) : id;
+  }
+
+  private async saveNativeChatAsNote(backendId: BackendId, sessionId: string): Promise<string> {
+    const live = this.findLiveSession(backendId, sessionId);
+    if (live) return this.saveAsNote(live, sessionId);
+    // Pinning or bookmarking a closed chat must not open it, so it is resumed off-screen and closed
+    // once saved, unless the user opened it meanwhile. https://github.com/logancyang/obsidian-copilot/issues/3195
+    const { entry, projectId } = await this.readNativeChatEntry(backendId, sessionId);
+    const session = await this.resumeNativeChat(backendId, sessionId, entry, projectId);
+    try {
+      return await this.saveAsNote(session, sessionId);
+    } finally {
+      if (this.activeSessionId !== session.internalId) await this.closeSession(session.internalId);
     }
-    await persistence.deleteFile(fileId);
+  }
+
+  private async saveAsNote(session: AgentSession, sessionId: string): Promise<string> {
+    const saved = await this.saveSessionNow(session);
+    if (!saved) throw new Error(`Could not save chat ${sessionId} as a note.`);
+    return saved.path;
+  }
+
+  async deleteChatHistory(fileId: string): Promise<void> {
+    const index = this.opts.sessionIndex;
+    const persistence = this.opts.persistenceManager;
+    const native = parseNativeChatId(fileId);
+    if (native && !index) throw new Error("Agent session index is not configured.");
+    if (!native && !persistence) throw new Error("Agent chat persistence is not configured.");
+
+    const ref = native ?? (await this.readSessionRefFromFile(fileId));
+
+    const savedPaths = await this.closeOpenChatForDelete(fileId);
+
+    // Keep the note recoverable when the history write fails. https://github.com/logancyang/obsidian-copilot/issues/2888
+    if (ref && index) {
+      this.cancelPendingIndexTouch(ref.backendId, ref.sessionId);
+      await index.deleteSession(ref.backendId, ref.sessionId);
+      await index.flushOrThrow();
+    }
+    const notePaths = new Set(native ? savedPaths : [fileId, ...savedPaths]);
+    if (persistence) {
+      for (const path of notePaths) await persistence.deleteFile(path);
+    }
+  }
+
+  // An open chat must be gone before its files are, or autosave writes the note again. Delete never
+  // saves: it stops new autosaves first, and only waits for a save that is already writing, so this
+  // returns the notes the closed chats already have. State stays so that running save is awaited.
+  // https://github.com/logancyang/obsidian-copilot/issues/2888
+  private async closeOpenChatForDelete(historyId: string): Promise<string[]> {
+    const savedPaths: string[] = [];
+    for (const [internalId, session] of Array.from(this.sessions)) {
+      if (!this.recentChatIdsForSession(internalId, session).includes(historyId)) continue;
+      const state = this.sessionState.get(internalId);
+      if (state) this.stopAutoSave(state);
+      await this.closeSession(internalId);
+      if (state?.source?.path) savedPaths.push(state.source.path);
+    }
+    return savedPaths;
   }
 
   private cancelPendingIndexTouch(backendId: BackendId, sessionId: string): void {
@@ -653,22 +624,19 @@ export class AgentSessionManager {
   private async readSessionRefFromFile(
     fileId: string
   ): Promise<{ backendId: BackendId; sessionId: string } | null> {
-    let fm: Record<string, unknown> | undefined;
+    return sessionRefFromFrontmatter(await this.readChatFrontmatter(fileId));
+  }
+
+  private async readChatFrontmatter(fileId: string): Promise<Record<string, unknown> | undefined> {
     const file = this.app.vault.getAbstractFileByPath(fileId);
-    if (file instanceof TFile) {
-      fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    const cached =
+      file instanceof TFile ? this.app.metadataCache.getFileCache(file)?.frontmatter : undefined;
+    if (cached) return cached;
+    try {
+      return (await readFrontmatterViaAdapter(this.app, fileId)) ?? undefined;
+    } catch {
+      return undefined;
     }
-    if (!fm) {
-      try {
-        fm = (await readFrontmatterViaAdapter(this.app, fileId)) ?? undefined;
-      } catch {
-        return null;
-      }
-    }
-    const backendId = typeof fm?.backendId === "string" ? fm.backendId.trim() : "";
-    const sessionId = typeof fm?.sessionId === "string" ? fm.sessionId.trim() : "";
-    if (!backendId || !sessionId) return null;
-    return { backendId, sessionId };
   }
 
   private async refreshNativeSessionsFromBackends(): Promise<void> {
@@ -836,21 +804,6 @@ export class AgentSessionManager {
 
     const cwd = this.resolveSessionCwd(projectId);
 
-    if (projectId !== GLOBAL_SCOPE) this.contentTracker.flushNow();
-    const capturedContentEpoch =
-      projectId === GLOBAL_SCOPE ? 0 : this.contentTracker.getEpoch(projectId);
-    const capturedDirtyKey =
-      projectId === GLOBAL_SCOPE ? undefined : this.contextDirtySignatures.get(projectId);
-    const contextReady =
-      projectId === GLOBAL_SCOPE
-        ? undefined
-        : this.beginContextMaterialization(
-            projectId,
-            cwd,
-            undefined,
-            this.currentContextRevisionKey(projectId)
-          );
-
     this.pendingCreates++;
     this.startingBackendId = resolvedId;
     this.notify();
@@ -864,12 +817,14 @@ export class AgentSessionManager {
       throw err;
     }
 
+    const internalId = uuidv4();
+    const mcpServers = await this.connectFeedbackServer(internalId, descriptor, cwd);
+
     if (this.disposed) {
       this.finishPendingCreate();
       throw new Error("AgentSessionManager was shut down during session creation");
     }
 
-    const internalId = uuidv4();
     const resolvedChatInputId = chatInputId ?? uuidv4();
     const session = AgentSession.start({
       backend,
@@ -884,9 +839,10 @@ export class AgentSessionManager {
       runFanoutTurn: (input) => this.runFanoutTurn(input),
       getDisplayName: (backendId) => this.resolveDescriptor(backendId).displayName,
       getApp: () => this.app,
-      contextReady,
+      mcpServers,
       ...(projectId !== GLOBAL_SCOPE
         ? {
+            getProjectContextBlock: () => this.buildFirstProjectContextBlock(internalId, projectId),
             getProjectContextUpdates: () => this.getProjectContextUpdates(internalId, projectId),
             markProjectContextUpdatesDelivered: (epoch: number) =>
               this.markProjectContextUpdatesDelivered(internalId, epoch),
@@ -909,31 +865,8 @@ export class AgentSessionManager {
     this.attachAttentionTracking(session);
     this.notify();
 
-    if (contextReady) {
-      void contextReady
-        .then((result) => {
-          if (this.disposed || this.sessions.get(internalId) !== session) return;
-          if (result.contextSignature === undefined) return;
-          const seen = this.lastSeenProjectContentEpochBySession.get(internalId);
-          if (seen === undefined || capturedContentEpoch > seen) {
-            this.lastSeenProjectContentEpochBySession.set(internalId, capturedContentEpoch);
-          }
-        })
-        .catch(() => {});
-    }
-
     void session.ready
       .then(async () => {
-        if (contextReady) {
-          const result = await contextReady;
-          if (
-            !this.disposed &&
-            this.sessions.get(internalId) === session &&
-            result.contextSignature !== undefined
-          ) {
-            this.clearContextDirtyIfCaptured(projectId, capturedDirtyKey, result.contextSignature);
-          }
-        }
         if (descriptor.applyInitialSessionConfig) {
           try {
             await descriptor.applyInitialSessionConfig(session, getSettings(), resolvedSeed);
@@ -1008,174 +941,6 @@ export class AgentSessionManager {
     return resolveScopeCwd(adapter.getBasePath(), projectId);
   }
 
-  private beginContextMaterialization(
-    projectId: ProjectScopeId,
-    cwd: string,
-    forceRetryFailed?: boolean,
-    revisionKey?: string
-  ): Promise<ContextMaterializationResult> {
-    const counts: {
-      resolved?: number;
-      prefetch?: ContextLoadStepCount;
-      parsed?: ContextLoadStepCount;
-    } = {};
-    let failedSources: FailedItem[] = [];
-    let processingSources: AgentInFlightSource[] = [];
-    let stepPhase: "resolve" | "prefetch" | "parse" = "resolve";
-
-    const prior = settingsStore.get(agentProjectContextLoadAtom)[projectId];
-    const ownsPublish = !prior?.blocking;
-
-    if (ownsPublish) {
-      this.setContextLoadState(projectId, { phase: "resolve", blocking: true });
-    }
-
-    const publishProgress = () => {
-      this.setContextLoadState(projectId, {
-        phase: stepPhase,
-        blocking: true,
-        ...counts,
-        failedSources,
-        processingSources: processingSources.length > 0 ? processingSources : undefined,
-      });
-    };
-
-    const onProgress = ownsPublish
-      ? (progress: ContextMaterializeProgress) => {
-          switch (progress.phase) {
-            case "failures":
-              failedSources = progress.failures.map(toFailedItem);
-              return;
-            case "itemStart":
-              processingSources = addProcessingSource(processingSources, progress.item);
-              failedSources = failedSources.filter((f) => !failedItemIsSource(f, progress.item));
-              publishProgress();
-              return;
-            case "itemFailed":
-              processingSources = removeProcessingSource(processingSources, progress.item);
-              failedSources = upsertFailedItem(failedSources, toFailedItem(progress.failure));
-              publishProgress();
-              return;
-            case "itemSettled":
-              processingSources = removeProcessingSource(processingSources, progress.item);
-              publishProgress();
-              return;
-            case "resolve":
-              counts.resolved = progress.resolved;
-              stepPhase = "resolve";
-              publishProgress();
-              return;
-            case "prefetch":
-              counts.prefetch = { done: progress.done, total: progress.total };
-              stepPhase = "prefetch";
-              publishProgress();
-              return;
-            case "parse":
-              counts.parsed = { done: progress.done, total: progress.total };
-              stepPhase = "parse";
-              publishProgress();
-              return;
-          }
-        }
-      : undefined;
-
-    return ensureProjectContextMaterialized(
-      this.app,
-      projectId,
-      cwd,
-      onProgress,
-      forceRetryFailed,
-      revisionKey
-    )
-      .then((ctx) => {
-        if (ownsPublish) {
-          this.setContextLoadState(projectId, {
-            phase: "done",
-            blocking: false,
-            ...counts,
-            failedSources,
-          });
-        }
-        return ctx;
-      })
-      .catch((err) => {
-        logWarn(`[AgentMode] project context materialize failed for ${projectId}; continuing`, err);
-        if (ownsPublish) {
-          this.setContextLoadState(projectId, {
-            phase: "done",
-            blocking: false,
-            failedSources: [{ path: "Project context", type: "nonMd", error: err2String(err) }],
-          });
-        }
-        return EMPTY_CONTEXT_MATERIALIZATION_RESULT;
-      });
-  }
-
-  private setContextLoadState(projectId: string, state: AgentProjectContextLoadState): void {
-    settingsStore.set(agentProjectContextLoadAtom, (prev) => ({ ...prev, [projectId]: state }));
-  }
-
-  rematerializeContext(projectId: ProjectScopeId): boolean {
-    if (projectId === GLOBAL_SCOPE) return false;
-    if (settingsStore.get(agentProjectContextLoadAtom)[projectId]?.blocking) return false;
-    let cwd: string;
-    try {
-      cwd = this.resolveSessionCwd(projectId);
-    } catch (err) {
-      this.setContextLoadState(projectId, {
-        phase: "done",
-        blocking: false,
-        failedSources: [{ path: "Project context", type: "nonMd", error: err2String(err) }],
-      });
-      return false;
-    }
-    void this.beginContextMaterialization(
-      projectId,
-      cwd,
-      true,
-      this.currentContextRevisionKey(projectId)
-    );
-    return true;
-  }
-
-  async rematerializeSource(
-    projectId: ProjectScopeId,
-    item: { kind: MaterializedSourceType; source: string }
-  ): Promise<boolean> {
-    if (projectId === GLOBAL_SCOPE) return false;
-    const before = settingsStore.get(agentProjectContextLoadAtom)[projectId];
-    if (before?.blocking) return false;
-
-    const matchesItem = (f: FailedItem) =>
-      f.path === item.source && (item.kind === "file" ? f.type === "nonMd" : f.type === item.kind);
-    const sameSource = (r: { kind: MaterializedSourceType; source: string }) =>
-      r.kind === item.kind && r.source === item.source;
-
-    const beforeRetrying = before?.retryingSources ?? [];
-    if (beforeRetrying.some(sameSource)) return false;
-
-    this.setContextLoadState(projectId, {
-      ...(before ?? { phase: "done" as const }),
-      blocking: false,
-      failedSources: (before?.failedSources ?? []).filter((f) => !matchesItem(f)),
-      retryingSources: [...beforeRetrying, item],
-    });
-
-    const failures = await materializeProjectContextSource(this.app, projectId, item);
-
-    const prev = settingsStore.get(agentProjectContextLoadAtom)[projectId];
-    if (prev?.blocking) return false;
-    const others = (prev?.failedSources ?? []).filter((f) => !matchesItem(f));
-    const remainingRetrying = (prev?.retryingSources ?? []).filter((r) => !sameSource(r));
-    this.setContextLoadState(projectId, {
-      ...(prev ?? { phase: "done" as const }),
-      blocking: false,
-      retryingSources: remainingRetrying.length > 0 ? remainingRetrying : undefined,
-      failedSources: [...others, ...failures.map(toFailedItem)],
-    });
-    return true;
-  }
-
   getActiveProjectId(): ProjectScopeId {
     return this.activeProjectId;
   }
@@ -1221,9 +986,7 @@ export class AgentSessionManager {
     const scopeSeq = this.setActiveScope(projectId);
 
     if (projectId !== GLOBAL_SCOPE) {
-      this.contentTracker.flushNow();
-      const dirty = this.isProjectContextDirty(projectId);
-      const reusable = dirty ? null : this.pickReusableLandingSession(projectId);
+      const reusable = this.pickReusableLandingSession(projectId);
       this.detachSessionsForProjectEntry(projectId, { includeEmpty: !reusable });
       if (reusable) {
         this.detachedFromTabIds.delete(reusable.internalId);
@@ -1275,7 +1038,7 @@ export class AgentSessionManager {
 
   private pickReusableLandingSession(projectId: ProjectScopeId): AgentSession | null {
     const expected = this.currentLandingCaptureSignature(projectId);
-    if (!expected || !landingCaptureIsVerifiable(expected)) return null;
+    if (!expected) return null;
     const isReusable = (session: AgentSession): boolean =>
       this.isReusableLandingShell(session, projectId) &&
       !this.detachedFromTabIds.has(session.internalId) &&
@@ -1736,6 +1499,15 @@ export class AgentSessionManager {
       } catch (e) {
         logWarn(`[AgentMode] cancel during closeSession failed`, e);
       }
+      // Codex keeps a dropped chat's session and its MCP connection, so reopening it from history would call send_feedback with the revoked token.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/672
+      if (session.getBackendSessionId() && !this.restartingBackends.has(session.backendId)) {
+        try {
+          await session.releaseBackendSession();
+        } catch (e) {
+          logWarn(`[AgentMode] releasing the backend session during closeSession failed`, e);
+        }
+      }
     }
     await this.drainAutoSave(session);
     try {
@@ -1744,6 +1516,7 @@ export class AgentSessionManager {
       logWarn(`[AgentMode] dispose during closeSession failed`, e);
     }
     this.detachAutoSave(id);
+    this.opts.feedbackServer?.disconnect(id);
     this.sessions.delete(id);
     this.chatUIStates.delete(id);
     this.landingCaptureSignatures.delete(id);
@@ -1924,14 +1697,55 @@ export class AgentSessionManager {
     }
   }
 
+  // Feedback cards are optional, so a server that cannot start leaves the chat running without them.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/672
+  private async connectFeedbackServer(
+    internalId: string,
+    descriptor: BackendDescriptor,
+    cwd: string
+  ): Promise<ReadonlyArray<AgentMcpServer>> {
+    const server = this.opts.feedbackServer;
+    if (!server || !getSettings().agentMode.offerFeedbackCards) return EMPTY_MCP_SERVERS;
+    // A folder's chats share one connection, so its token names only the folder and the agent stamps the calling session on each call.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/672
+    const shared = descriptor.sharesMcpServersAcrossSessions === true;
+    const offer: FeedbackOfferHandler = shared
+      ? (draft, callerSessionId) =>
+          this.findFolderSession(descriptor.id, cwd, callerSessionId)?.offerFeedback(draft) ??
+          "unattributed"
+      : (draft) => this.sessions.get(internalId)?.offerFeedback(draft) ?? "turned_off";
+    try {
+      return [
+        await server.connect(shared ? `${descriptor.id}:${cwd}` : internalId, (draft, caller) =>
+          getSettings().agentMode.offerFeedbackCards ? offer(draft, caller) : "turned_off"
+        ),
+      ];
+    } catch (err) {
+      logWarn("[AgentMode] feedback MCP server unavailable; continuing without it", err);
+      return EMPTY_MCP_SERVERS;
+    }
+  }
+
+  private findFolderSession(
+    backendId: BackendId,
+    cwd: string,
+    backendSessionId: string | null
+  ): AgentSession | undefined {
+    if (!backendSessionId) return undefined;
+    return Array.from(this.sessions.values()).find(
+      (session) =>
+        session.backendId === backendId &&
+        session.cwd === cwd &&
+        session.getBackendSessionId() === backendSessionId
+    );
+  }
+
   async shutdown(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
     this.settingsUnsub();
     this.projectRecordsUnsubscriber?.();
     this.projectRecordsUnsubscriber = undefined;
-    this.contentTrackerUnsubscribe?.();
-    this.contentTrackerUnsubscribe = undefined;
     this.contentTracker.dispose();
     logInfo(
       `[AgentMode] shutdown (pool size=${this.sessions.size}, backends=${this.backends.size})`
@@ -1957,6 +1771,7 @@ export class AgentSessionManager {
         }
       })
     );
+    this.opts.feedbackServer?.dispose();
     this.sessions.clear();
     this.chatUIStates.clear();
     this.landingCaptureSignatures.clear();
@@ -1966,7 +1781,6 @@ export class AgentSessionManager {
     this.scopeSeq++;
     this.lastActiveByScope.clear();
     this.detachedFromTabIds.clear();
-    this.contextDirtySignatures.clear();
     this.firstSessionPromiseByScope.clear();
 
     const allBackends = Array.from(this.backends.values());
@@ -2019,8 +1833,9 @@ export class AgentSessionManager {
     const scopeSeq = this.setActiveScope(projectId);
 
     let session: AgentSession;
+    let resumed: AgentSession | null;
     try {
-      const resumed = loaded.sessionId
+      resumed = loaded.sessionId
         ? await this.tryResumeSessionFromHistory(loaded.backendId, loaded.sessionId, projectId)
         : null;
       session = resumed ?? (await this.createSession(loaded.backendId, projectId));
@@ -2033,13 +1848,18 @@ export class AgentSessionManager {
     const replayedUserTurns = session.store
       .getDisplayMessages()
       .filter((m) => m.sender === USER_SENDER).length;
+    // Claude's transcript keeps /compact only as command bookkeeping, which its replay drops.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/635
     const savedUserTurns = loaded.messages.filter(
-      (m) => m.isVisible && m.sender === USER_SENDER
+      (m) => m.isVisible && m.sender === USER_SENDER && !isCompactCommand(m.message)
     ).length;
     if (replayedUserTurns > 0 && replayedUserTurns >= savedUserTurns) {
       session.store.fillMissingTimestamps(loaded.messages);
     } else {
       session.loadDisplayMessages(loaded.messages);
+      // The agent never saw this note's turns when its saved session is gone from this device.
+      // https://github.com/logancyang/obsidian-copilot/issues/3643
+      if (!resumed) session.resendSavedHistoryOnNextTurn();
     }
     session.seedSessionUsage(loaded.usage);
     if (loaded.label) session.setLabel(loaded.label);
@@ -2083,6 +1903,29 @@ export class AgentSessionManager {
       return existing;
     }
     const previousActiveId = this.activeSessionId;
+    const { entry, projectId } = await this.readNativeChatEntry(backendId, sessionId);
+    const previousActiveProjectId = this.activeProjectId;
+    const scopeSeq = this.setActiveScope(projectId);
+    let session: AgentSession;
+    try {
+      session = await this.resumeNativeChat(backendId, sessionId, entry, projectId);
+    } catch (err) {
+      this.rollbackOptimisticScopeSwitch(previousActiveProjectId, scopeSeq);
+      throw err;
+    }
+    await this.opts.sessionIndex?.touch(backendId, sessionId);
+    if (requestId === this.latestHistoryLoadRequestId) {
+      this.setActiveSession(session.internalId);
+      this.absorbIntoEmptyActiveTab(session, previousActiveId);
+      this.notify();
+    }
+    return session;
+  }
+
+  private async readNativeChatEntry(
+    backendId: BackendId,
+    sessionId: SessionId
+  ): Promise<{ entry: AgentSessionIndexEntry | null; projectId: ProjectScopeId }> {
     const index = this.opts.sessionIndex;
     const entry = index ? await index.getEntry(backendId, sessionId) : null;
     const projectId: ProjectScopeId = entry?.projectId ?? GLOBAL_SCOPE;
@@ -2090,29 +1933,21 @@ export class AgentSessionManager {
       new Notice("This chat belongs to a project that no longer exists.");
       throw new OrphanedProjectError(projectId);
     }
-    const previousActiveProjectId = this.activeProjectId;
-    const scopeSeq = this.setActiveScope(projectId);
-    let session: AgentSession;
-    try {
-      const resumed = await this.tryResumeSessionFromHistory(backendId, sessionId, projectId);
-      if (!resumed) {
-        throw new Error(
-          `Could not resume session ${sessionId} from the ${backendId} session store.`
-        );
-      }
-      session = resumed;
-    } catch (err) {
-      this.rollbackOptimisticScopeSwitch(previousActiveProjectId, scopeSeq);
-      throw err;
+    return { entry, projectId };
+  }
+
+  private async resumeNativeChat(
+    backendId: BackendId,
+    sessionId: SessionId,
+    entry: AgentSessionIndexEntry | null,
+    projectId: ProjectScopeId
+  ): Promise<AgentSession> {
+    const session = await this.tryResumeSessionFromHistory(backendId, sessionId, projectId);
+    if (!session) {
+      throw new Error(`Could not resume session ${sessionId} from the ${backendId} session store.`);
     }
     if (entry?.title) {
       session.restoreLabel(entry.title, entry.titleSource === "user" ? "user" : "agent");
-    }
-    if (index) await index.touch(backendId, sessionId);
-    if (requestId === this.latestHistoryLoadRequestId) {
-      this.setActiveSession(session.internalId);
-      this.absorbIntoEmptyActiveTab(session, previousActiveId);
-      this.notify();
     }
     return session;
   }
@@ -2158,16 +1993,6 @@ export class AgentSessionManager {
       projectId === GLOBAL_SCOPE ? undefined : getCachedProjectRecordById(projectId)
     );
     const cwd = this.resolveSessionCwd(projectId);
-    if (projectId !== GLOBAL_SCOPE) this.contentTracker.flushNow();
-    const contextReady =
-      projectId === GLOBAL_SCOPE
-        ? undefined
-        : this.beginContextMaterialization(
-            projectId,
-            cwd,
-            undefined,
-            this.currentContextRevisionKey(projectId)
-          );
     const descriptor = this.resolveDescriptor(backendId);
 
     this.pendingCreates++;
@@ -2188,14 +2013,12 @@ export class AgentSessionManager {
       return null;
     }
 
-    const additionalDirectories = contextReady
-      ? (await contextReady).additionalDirectories
-      : undefined;
+    const internalId = uuidv4();
+    const mcpServers = await this.connectFeedbackServer(internalId, descriptor, cwd);
     if (this.disposed) {
       this.finishPendingCreate();
       return null;
     }
-    const internalId = uuidv4();
     // The chat attaches before the backend replays its history, so replayed frames are never in flight without a handler.
     // https://github.com/Brevilabs/obsidian-copilot-private/issues/602
     const session = new AgentSession({
@@ -2221,7 +2044,7 @@ export class AgentSessionManager {
         : {}),
     });
 
-    const openInput = { sessionId, cwd, projectId, additionalDirectories };
+    const openInput = { sessionId, cwd, projectId, mcpServers };
     let resumeResult: LoadSessionOutput | null = null;
     try {
       resumeResult = await backend.loadSession(openInput);
@@ -2229,6 +2052,7 @@ export class AgentSessionManager {
       if (!(err instanceof MethodUnsupportedError)) {
         logWarn(`[AgentMode] loadSession failed for ${sessionId}`, err);
         await session.dispose();
+        this.opts.feedbackServer?.disconnect(internalId);
         this.finishPendingCreate();
         return null;
       }
@@ -2246,6 +2070,7 @@ export class AgentSessionManager {
           logWarn(`[AgentMode] resumeSession failed for ${sessionId}`, err);
         }
         await session.dispose();
+        this.opts.feedbackServer?.disconnect(internalId);
         this.finishPendingCreate();
         return null;
       }
@@ -2365,9 +2190,12 @@ export class AgentSessionManager {
     });
   }
 
-  async saveActiveSession(): Promise<{ path: string } | null> {
+  saveActiveSession(): Promise<{ path: string } | null> {
     const session = this.getActiveSession();
-    if (!session) return null;
+    return session ? this.saveSessionNow(session) : Promise.resolve(null);
+  }
+
+  private async saveSessionNow(session: AgentSession): Promise<{ path: string } | null> {
     const state = this.sessionState.get(session.internalId);
     if (state?.timer) {
       window.clearTimeout(state.timer);
@@ -2383,7 +2211,20 @@ export class AgentSessionManager {
     return state?.source?.path ?? "";
   }
 
-  private async flushAutoSave(session: AgentSession): Promise<{ path: string } | null> {
+  // One save chain per chat: each save runs after the previous one, and state.saving holds the
+  // tail so close and delete wait for every save that already started.
+  // https://github.com/logancyang/obsidian-copilot/issues/2888
+  private flushAutoSave(session: AgentSession): Promise<{ path: string } | null> {
+    const state = this.getSessionState(session.internalId);
+    const previous = state.saving;
+    const run = previous
+      ? previous.then(() => this.writeSession(session))
+      : this.writeSession(session);
+    state.saving = run.catch(() => {});
+    return run;
+  }
+
+  private async writeSession(session: AgentSession): Promise<{ path: string } | null> {
     const persistence = this.opts.persistenceManager;
     if (!persistence) return null;
     if (!this.sessions.has(session.internalId)) return null;
@@ -2437,6 +2278,9 @@ export class AgentSessionManager {
         logWarn(`[AgentMode] drain session-index update failed for ${session.internalId}`, e);
       }
     }
+    // A save that already started is in neither timer; closing must still wait for it.
+    // https://github.com/logancyang/obsidian-copilot/issues/2888
+    await state?.saving;
     if (!state?.timer) return;
     window.clearTimeout(state.timer);
     state.timer = undefined;
@@ -2450,11 +2294,18 @@ export class AgentSessionManager {
   private detachAutoSave(internalId: string): void {
     const state = this.sessionState.get(internalId);
     if (!state) return;
-    if (state.timer) window.clearTimeout(state.timer);
-    if (state.indexTimer) window.clearTimeout(state.indexTimer);
-    state.unsub?.();
+    this.stopAutoSave(state);
     state.attentionUnsub?.();
     this.sessionState.delete(internalId);
+  }
+
+  private stopAutoSave(state: { timer?: number; indexTimer?: number; unsub?: () => void }): void {
+    window.clearTimeout(state.timer);
+    state.timer = undefined;
+    window.clearTimeout(state.indexTimer);
+    state.indexTimer = undefined;
+    state.unsub?.();
+    state.unsub = undefined;
   }
 
   private attachAttentionTracking(session: AgentSession): void {
@@ -2587,6 +2438,7 @@ export class AgentSessionManager {
       if (dead.length === 0) return;
       for (const s of dead) {
         this.detachAutoSave(s.internalId);
+        this.opts.feedbackServer?.disconnect(s.internalId);
         this.sessions.delete(s.internalId);
         this.chatUIStates.delete(s.internalId);
         this.landingCaptureSignatures.delete(s.internalId);

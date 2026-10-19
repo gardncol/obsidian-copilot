@@ -31,12 +31,6 @@ function makeApp() {
     }),
     adapter: {
       exists: jest.fn(async (path: string) => files.has(path) || folders.has(path)),
-      mkdir: jest.fn(async (path: string) => {
-        folders.add(path);
-      }),
-      writeBinary: jest.fn(async (path: string, bytes: ArrayBuffer) => {
-        files.set(path, bytes);
-      }),
       list: jest.fn(async (folder: string) => ({
         files: [...files.keys()].filter(
           (path) => path.slice(0, Math.max(0, path.lastIndexOf("/"))) === folder
@@ -457,74 +451,23 @@ describe("chatImagePersistence", () => {
       expect(vault.createFolder).not.toHaveBeenCalled();
     });
 
-    it(`writes and reuses attachments under a hidden Copilot root through the adapter (${ISSUE})`, async () => {
-      const { app, files, vault } = makeApp();
-      vault.createBinary.mockRejectedValue(new Error("not in vault cache"));
-      const messages = [{ message: "", content: [IMAGE] }];
-      const hiddenChats = ".copilot/copilot-conversations";
-      const first = await prepareChatImagesForSave(app, messages, hiddenChats);
-      expect(visibleMessage(first[0].message)).toBe(
-        `![](/${hiddenChats}/attachments/copilot-image-${sha256(DATA)}.png)`
-      );
-      expect(await prepareChatImagesForSave(app, messages, hiddenChats)).toEqual(first);
-      expect(files.size).toBe(1);
-      expect(arrayBufferToBase64([...files.values()][0])).toBe(DATA);
-      expect(vault.adapter.writeBinary).toHaveBeenCalledTimes(1);
-      expect(vault.createBinary).not.toHaveBeenCalled();
-    });
-
-    it.each([DATA, "AQID"])(
-      `preserves a hidden attachment created after allocation with bytes %s (${ISSUE})`,
-      async (winner) => {
-        const { app, files, vault } = makeApp();
-        vault.adapter.list.mockImplementation(async () => {
-          files.set(
-            `.copilot/copilot-conversations/attachments/copilot-image-${sha256(DATA)}.png`,
-            base64ToArrayBuffer(winner)
-          );
-          return { files: [], folders: [] };
-        });
-        const saving = prepareChatImagesForSave(
-          app,
-          [{ message: "", content: [IMAGE] }],
-          ".copilot/copilot-conversations"
-        );
-        if (winner === DATA) await expect(saving).resolves.toHaveLength(1);
-        else await expect(saving).rejects.toThrow("File already exists.");
-        expect(arrayBufferToBase64([...files.values()][0])).toBe(winner);
-        expect(vault.adapter.writeBinary).not.toHaveBeenCalled();
-      }
-    );
-
     it.each(["Folder already exists.", "permission denied"])(
       `handles attachment folder creation failure %s (${ISSUE})`,
       async (error) => {
         const { app, vault } = makeApp();
-        vault.adapter.mkdir.mockRejectedValueOnce(new Error(error));
+        vault.createFolder.mockRejectedValueOnce(new Error(error));
         const saving = prepareChatImagesForSave(
           app,
           [{ message: "", content: [IMAGE] }],
-          ".copilot/copilot-conversations"
+          "copilot/copilot-conversations"
         );
         if (error === "Folder already exists.") await expect(saving).resolves.toHaveLength(1);
         else {
           await expect(saving).rejects.toThrow(error);
-          expect(vault.adapter.writeBinary).not.toHaveBeenCalled();
+          expect(vault.createBinary).not.toHaveBeenCalled();
         }
       }
     );
-
-    it(`propagates hidden attachment write failures (${ISSUE})`, async () => {
-      const { app, vault } = makeApp();
-      vault.adapter.writeBinary.mockRejectedValueOnce(new Error("disk full"));
-      await expect(
-        prepareChatImagesForSave(
-          app,
-          [{ message: "", content: [IMAGE] }],
-          ".copilot/copilot-conversations"
-        )
-      ).rejects.toThrow("disk full");
-    });
 
     it.each([
       ["x-icon", "ico"],
@@ -760,12 +703,12 @@ describe("chatImagePersistence", () => {
           disk = text;
         }),
       });
-      const baseline = await updateChatTranscript(app, "chat.md", next, loaded);
+      const baseline = await updateChatTranscript(app, "chat.md", () => next, loaded);
       expect(disk).toContain("![[moved.png]]");
       expect(disk).toContain("**user**: edited");
       expect(baseline).toContain("![[old.png]]");
       expect(baseline).toContain(`copilot-image:${sha256(DATA)}`);
-      await updateChatTranscript(app, "chat.md", next, baseline);
+      await updateChatTranscript(app, "chat.md", () => next, baseline);
       expect(disk).toContain("![[moved.png]]");
     });
 
@@ -787,9 +730,40 @@ describe("chatImagePersistence", () => {
         });
         Object.assign(vault, { process });
         Object.assign(vault.adapter, { read: jest.fn(async () => disk), write });
-        await updateChatTranscript(app, file.path, next);
+        await updateChatTranscript(app, file.path, () => next);
         expect(disk).toBe(next.replace("old.png", "moved.png"));
         expect(indexed ? process : write).toHaveBeenCalledTimes(1);
+      }
+    );
+
+    it.each([true, false])(
+      "https://github.com/Brevilabs/obsidian-copilot-private/issues/698 renders an indexed=%s transcript from the note's text at write time",
+      async (indexed) => {
+        const { app, vault } = makeApp();
+        const file = mockTFile({ path: "chat.md" });
+        vault.getAbstractFileByPath.mockReturnValue(indexed ? file : null);
+        let disk = "---\npinnedAt: 5\n---\n\n**user**: hi";
+        Object.assign(vault, {
+          process: jest.fn(async (_file: TFile, update: (content: string) => string) => {
+            disk = update(disk);
+            return disk;
+          }),
+        });
+        Object.assign(vault.adapter, {
+          read: jest.fn(async () => disk),
+          write: jest.fn(async (_path: string, value: string) => {
+            disk = value;
+          }),
+        });
+
+        const baseline = await updateChatTranscript(
+          app,
+          file.path,
+          (current) => `${current.split("\n\n")[0]}\n\n**user**: hi again`
+        );
+
+        expect(disk).toBe("---\npinnedAt: 5\n---\n\n**user**: hi again");
+        expect(baseline).toBe(disk);
       }
     );
   });

@@ -44,16 +44,7 @@ export async function readChatPathProjectId(
   filePath: string
 ): Promise<string | undefined> {
   const existingFile = app.vault.getAbstractFileByPath(filePath);
-  if (existingFile instanceof TFile) {
-    return readChatFileProjectId(app, existingFile);
-  }
-
-  try {
-    const adapterFm = await readFrontmatterViaAdapter(app, filePath);
-    return coerceProjectId(adapterFm?.projectId);
-  } catch {
-    return undefined;
-  }
+  return existingFile instanceof TFile ? readChatFileProjectId(app, existingFile) : undefined;
 }
 
 export async function filterChatHistoryFiles(app: App, files: TFile[]): Promise<TFile[]> {
@@ -136,6 +127,11 @@ export function extractChatLastAccessedAtMs(app: App, file: TFile): number | nul
   }
 
   return null;
+}
+
+export function parseChatPinnedAt(raw: unknown): number | undefined {
+  const value = typeof raw === "string" ? Number(raw) : raw;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 export function fileToHistoryItem(

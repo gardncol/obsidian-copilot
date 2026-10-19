@@ -73,20 +73,21 @@ export function preserveChatImageReferences(next: string, existing: string, load
 export async function updateChatTranscript(
   app: App,
   path: string,
-  next: string,
+  render: (current: string) => string,
   loaded = ""
 ): Promise<string> {
-  const baseline = restoreChatImageReceipts(next, loaded);
+  let next = "";
+  const update = (current: string) => {
+    next = render(current);
+    return preserveChatImageReferences(next, current, loaded);
+  };
   const file = app.vault.getAbstractFileByPath(path);
   if (file instanceof TFile) {
-    await app.vault.process(file, (current) => preserveChatImageReferences(next, current, loaded));
+    await app.vault.process(file, update);
   } else {
-    await app.vault.adapter.write(
-      path,
-      preserveChatImageReferences(next, await app.vault.adapter.read(path), loaded)
-    );
+    await app.vault.adapter.write(path, update(await app.vault.adapter.read(path)));
   }
-  return baseline;
+  return restoreChatImageReceipts(next, loaded);
 }
 
 export async function prepareChatImagesForSave<T extends MessageWithImages>(
@@ -98,9 +99,6 @@ export async function prepareChatImagesForSave<T extends MessageWithImages>(
 ): Promise<T[]> {
   const prepared: T[] = [];
   const folder = deriveConversationAttachmentsFolder(conversationsFolder);
-  // Copilot roots may be hidden (e.g. `.copilot`) and hidden folders are absent from the vault cache, so go through the adapter.
-  // https://github.com/logancyang/obsidian-copilot/issues/2900
-  const hidden = folder.split("/").some((part) => part.startsWith("."));
   const prefix = `${folder}/`;
 
   const receipts = new Map([...existingContent.matchAll(RECEIPT)].map((m) => [m[1], m[2]]));
@@ -214,8 +212,7 @@ export async function prepareChatImagesForSave<T extends MessageWithImages>(
           current = current ? `${current}/${part}` : part;
           if (!(await app.vault.adapter.exists(current))) {
             try {
-              if (hidden) await app.vault.adapter.mkdir(current);
-              else await app.vault.createFolder(current);
+              await app.vault.createFolder(current);
             } catch (error) {
               if (!isFileAlreadyExistsError(error)) throw error;
             }
@@ -242,14 +239,7 @@ export async function prepareChatImagesForSave<T extends MessageWithImages>(
         }
         if (!reused) {
           try {
-            // Hidden folders are absent from the vault cache; adapter writes must not overwrite an existing attachment.
-            // https://github.com/logancyang/obsidian-copilot/issues/2900
-            if (hidden) {
-              if (await app.vault.adapter.exists(path)) throw new Error("File already exists.");
-              await app.vault.adapter.writeBinary(path, bytes);
-            } else {
-              await app.vault.createBinary(path, bytes);
-            }
+            await app.vault.createBinary(path, bytes);
           } catch (error) {
             // Concurrent saves can allocate the same path; reuse the winner only when its bytes match.
             // https://github.com/logancyang/obsidian-copilot/issues/2900
@@ -272,7 +262,7 @@ export async function prepareChatImagesForSave<T extends MessageWithImages>(
           .replace(/\(/g, "%28")
           .replace(/\)/g, "%29");
         const file = app.vault.getAbstractFileByPath(path);
-        if (!hidden && !/[[\]#^|\\\r\n]/.test(path) && file instanceof TFile) {
+        if (!/[[\]#^|\\\r\n]/.test(path) && file instanceof TFile) {
           const link = app.metadataCache.fileToLinktext(file, sourcePath, false);
           return `![[${link}]]`;
         }

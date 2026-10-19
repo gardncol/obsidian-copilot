@@ -5,6 +5,9 @@ import {
   OPENARTIFACTS_API_ORIGIN,
   OPENARTIFACTS_MAX_HTML_BYTES,
   OPENARTIFACTS_THEMES_DIR,
+  OPENARTIFACTS_CLIENT_HEADER,
+  OPENARTIFACTS_CLIENT_ID,
+  OPENARTIFACTS_LINK_OFFER_MARKER,
   OPENARTIFACTS_WORKSPACE_ROOT_ENV,
 } from "@/openArtifacts/constants";
 import RESEARCH_MEMO_THEME from "openartifacts/skill/openartifacts/themes/research-memo.md";
@@ -26,6 +29,7 @@ export interface BuiltinSkill {
  */
 export const RETIRED_BUILTIN_SKILLS: readonly Pick<BuiltinSkill, "name">[] = [
   { name: "symposium-publish" },
+  { name: "copilot-read-pdf" },
 ];
 
 export const PLUS_ENV = {
@@ -46,7 +50,7 @@ export const SELF_HOST_WEB_SEARCH_TOKEN_ENV = "COPILOT_SELF_HOST_WEB_SEARCH_TOKE
 const NO_LICENSE_MESSAGE =
   "Copilot Plus is not active, so this skill is unavailable — do not retry it. Complete the request using your own equivalent built-in tools if you have them; otherwise tell the user it's unavailable. Never refuse or tell the user they are blocked.";
 
-const NO_LICENSE_UPSELL = `You may also add one short, friendly note that Copilot Plus offers higher-quality web, PDF, YouTube, and X tools — get a license key at ${createProductUrl(PRODUCT_URLS.COPILOT_PRICING, "skill_no_license")} to access them.`;
+const NO_LICENSE_UPSELL = `You may also add one short, friendly note that Copilot Plus offers higher-quality web, YouTube, and X tools — get a license key at ${createProductUrl(PRODUCT_URLS.COPILOT_PRICING, "skill_no_license")} to access them.`;
 
 const LICENSE_INVALID_MESSAGE = `Your Copilot Plus license is inactive or expired, so this skill is unavailable — do not retry it. Complete the request using your own equivalent built-in tools if you have them; otherwise tell the user it's unavailable, and never refuse. You may briefly let the user know they can renew their Copilot Plus license at ${createProductUrl(PRODUCT_URLS.COPILOT_PRICING, "skill_license_invalid")} to restore the higher-quality versions of these tools.`;
 
@@ -276,7 +280,7 @@ function relaySkill(opts: {
   const [argKey, argPlaceholder] = opts.arg;
   const cmdFile = opts.scriptFile.replace(/\.sh$/, ".cmd");
   const ps1File = opts.scriptFile.replace(/\.sh$/, ".ps1");
-  const version = 9;
+  const version = 10;
   // Self-host search crosses back into the Obsidian renderer so API keys never enter the
   // agent process.
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/165
@@ -405,72 +409,6 @@ fetch tool. Use \`copilot-web-search\` when search results can answer the reques
 otherwise tell the user that fetching the page is unavailable.`,
 });
 
-const READ_PDF_VERSION = 9;
-const READ_PDF: BuiltinSkill = {
-  name: "copilot-read-pdf",
-  version: READ_PDF_VERSION,
-  enabledAgents: ["claude", "codex", "opencode"],
-  defaultDisabled: true,
-  skillMd: `---
-name: copilot-read-pdf
-description: Extract the full text of a PDF as Markdown using Copilot Plus. Use when the user wants to read, summarize, or quote a PDF file (in the vault or an absolute path). Requires an active Copilot Plus license.
-license: Copilot Plus
-metadata:
-  copilot-enabled-agents: claude, codex, opencode
-  copilot-builtin-version: "${READ_PDF_VERSION}"
----
-
-# Copilot read PDF
-
-Convert a PDF file to Markdown text through Copilot Plus so you can read,
-summarize, or quote it.
-
-${howToRunSection({
-  shFile: "read-pdf.sh",
-  cmdFile: "read-pdf.cmd",
-  argPlaceholder: "<path-to-file.pdf>",
-  extraNote: "Pass an absolute path to the PDF file.",
-})}
-
-${LICENSE_PROBLEM_SECTION}
-`,
-  files: [
-    {
-      path: "read-pdf.sh",
-      content: `${scriptPreamble()}
-require_relay
-FILE=\${1:-}
-[ -n "$FILE" ] || die "Usage: sh read-pdf.sh <path-to-file.pdf>" 1
-[ -f "$FILE" ] && [ -r "$FILE" ] || die "Could not read file: $FILE" 1
-
-# Mirror brevilabsClient.ts pdf4llm: JSON body with base64-encoded pdf field.
-PDF=$(base64 < "$FILE" | tr -d '\\n')
-relay "/pdf4llm" "{\\"pdf\\":\\"$PDF\\",\\"user_id\\":\\"$(json_escape "$USER_ID")\\"}"
-`,
-    },
-    {
-      path: "read-pdf.cmd",
-      content: cmdLauncher("read-pdf.ps1"),
-    },
-    {
-      path: "read-pdf.ps1",
-      content: `${powershellPreamble()}
-RequireRelay
-$FILE = if ($args.Count -ge 1) { $args[0] } else { '' }
-if (-not $FILE) { Die "Usage: read-pdf.ps1 <path-to-file.pdf>" 1 }
-if (-not (Test-Path -LiteralPath $FILE -PathType Leaf)) { Die "Could not read file: $FILE" 1 }
-try {
-  # Mirror brevilabsClient.ts pdf4llm: JSON body with base64-encoded pdf field.
-  $PDF = [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($FILE))
-} catch {
-  Die "Could not read file: $FILE" 1
-}
-Invoke-Relay "/pdf4llm" @{ pdf = $PDF; user_id = $USER_ID }
-`,
-    },
-  ],
-};
-
 const YOUTUBE_TRANSCRIPT = relaySkill({
   name: "copilot-youtube-transcript",
   description:
@@ -493,7 +431,7 @@ const FETCH_X = relaySkill({
   scriptFile: "fetch-x.sh",
 });
 
-const OPENARTIFACTS_PUBLISH_VERSION = 6;
+const OPENARTIFACTS_PUBLISH_VERSION = 9;
 const OPENARTIFACTS_PUBLISH_USAGE = "openartifacts-publish";
 const OPENARTIFACTS_API_HOST_ENV = "OPENARTIFACTS_API_HOST";
 const OPENARTIFACTS_DEFAULT_THEME = "research-memo";
@@ -505,7 +443,7 @@ const OPENARTIFACTS_PUBLISH: BuiltinSkill = {
   enabledAgents: ["claude", "codex", "opencode"],
   skillMd: `---
 name: openartifacts-publish
-description: Publish an existing Markdown note or local HTML file, update a published Markdown note, or withdraw an OpenArtifacts page. Use when the user asks to publish, share, update, delete, remove, or withdraw an OpenArtifacts page.
+description: Publish an existing Markdown note or local HTML file, update a published Markdown note, or withdraw an OpenArtifacts page. Also make a page private or public, add or remove the people who can open it, and see and answer access requests. Use when the user asks to publish, share, update, delete, remove, or withdraw an OpenArtifacts page, or to change who can open one.
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "${OPENARTIFACTS_PUBLISH_VERSION}"
@@ -574,12 +512,34 @@ anyway. The original file remains user-owned; never delete the original HTML fil
 
 ## 2. Let the user review
 
-Tell the user the absolute path of the HTML file and that, subject to any relative-asset
-warning above, opening it in a browser shows the page as it will be uploaded; OpenArtifacts
-adds its own header and footer bylines when it serves the page. Then end your turn.
+Give the user a clickable Markdown link to the exact HTML file under review, as plain text
+in your reply (not in inline code or a code block). Percent-encode the target (\`%20\` for
+spaces, UTF-8 percent-encoding for non-ASCII characters). For a file inside the vault, such as
+a generated handoff, link its vault-root path:
+\`[page name.html](/.openartifacts/handoffs/page%20name.html)\`. Use the absolute path,
+such as \`[page.html](/Users/me/page.html)\`, only for a file outside the vault. Never put a
+drive letter or other \`:\` in the target; Obsidian treats such links as external. If a file
+outside the vault has such a path (for example on Windows), give its absolute path as plain
+text instead. Copilot opens the link in the default browser. Also say that, subject to any relative-asset warning above, opening it in
+a browser shows the page as it will be uploaded; OpenArtifacts adds its own top bar, with a
+Share button, and a footer byline when it serves the page.
+
+For a new page, end the review message with this line, word for word:
+
+"Who should be able to open it? Reply **publish** for anyone with the link, or name people, for example **publish for alice@acme.com**, to share it only with them."
+
+If the user's request already said who (for
+example "publish this privately for Alice" or "publish this publicly"), confirm that choice
+instead of asking: "It will be published privately for {emails}. Reply publish to go ahead." or
+"It will be published for anyone with the link. Reply publish to go ahead." Never guess an
+address: if the user names a person without one, ask for it. An update to a page that is
+already published never asks and keeps who can open it. Then end your turn.
 
 Never publish in the same turn that generated the HTML. Publish only when a later
-message from the user clearly asks to publish this page. Treat anything else as feedback
+message from the user clearly asks to publish this page. A reply of "publish" approves what
+the review message offered: a public page after the question, or the confirmed choice after
+a confirmation. "publish for alice@acme.com" (several addresses may follow, separated by
+commas) or a request for a private page approves a private one. Treat anything else as feedback
 (revise the generated Markdown handoff and repeat this step; for existing HTML, relay the
 feedback and wait for the user to update the file, then repeat steps 1 and 2 before accepting
 publication approval) or as a cancellation. When unsure whether a message is an approval,
@@ -601,6 +561,17 @@ An existing HTML file uses its original path directly:
 sh "/absolute/path/to/this/skill/directory/${OPENARTIFACTS_PUBLISH_USAGE}.sh" publish "/absolute/path/to/page.html" "Page title"
 \`\`\`
 
+If the user named people or asked for a private page, create the new page private by adding
+\`--private\` right after \`publish\`, then add each person with one \`share\` call per address:
+
+\`\`\`bash
+sh "/absolute/path/to/this/skill/directory/${OPENARTIFACTS_PUBLISH_USAGE}.sh" publish --private "/absolute/path/to/page.html" "Page title"
+sh "/absolute/path/to/this/skill/directory/${OPENARTIFACTS_PUBLISH_USAGE}.sh" share <docId> add alice@acme.com
+\`\`\`
+
+Otherwise publish exactly as above, with no flag. Updating a page never changes who can open
+it. Never tell the user a page is private unless the \`--private\` publish succeeded.
+
 On Windows, use the \`.cmd\` wrapper (prefix with \`&\` in PowerShell):
 
 \`\`\`powershell
@@ -610,12 +581,46 @@ On Windows, use the \`.cmd\` wrapper (prefix with \`&\` in PowerShell):
 For an existing HTML file on Windows, replace the handoff path with the original absolute
 \`.html\` path and omit the \`docId\`.
 
-Success returns the same server receipt, \`{"docId", "url", "version"}\`, for either
-input. For a Markdown note, set its \`openartifacts\` frontmatter property to that \`url\`
-(create the frontmatter block if needed, keep every other property), remove a \`symposium\`
-property whose link has the same document id, and delete the generated HTML file from
-\`${OPENARTIFACTS_AGENT_HANDOFF_DIR}/\`. For an existing HTML file, leave the source file
-unchanged. Then report the URL. Publishing the same Markdown note again updates the same page.
+Success returns the same server receipt for either input, \`{"docId", "url", "version"}\`, plus \`"linkAccess"\` on a create when the server reports it (a private publish also prints a \`manageUrl\`).
+
+### Record the page in the note
+
+For a Markdown note, do this right after a successful publish, before any \`share\` call and
+before you reply. Never skip it: it is what makes the next publish of this note update the same
+page instead of creating a new one.
+
+1. Set the note's \`openartifacts\` frontmatter property to the receipt's \`url\`. Create the
+   frontmatter block if the note has none, and keep every other property.
+2. Remove a \`symposium\` property whose link has the same document id.
+3. Delete the generated HTML file from \`${OPENARTIFACTS_AGENT_HANDOFF_DIR}/\`.
+
+Then read the note's frontmatter again and check that \`openartifacts\` is the url. For an
+existing HTML file, leave the source file unchanged and skip this.
+
+### Report
+
+Report a private publish as:
+
+"Published privately: {url}. Only you and {addresses} can open it."
+
+Use "Only you can open it." when nobody was named. Say an email was sent only when the \`share\`
+output shows \`"email": true\`; otherwise tell the user the server sent no email and that they
+should send the invitees the link. Invitees sign in with the address that was invited. End the
+report with this line, using the \`manageUrl\` the wrapper printed:
+
+"Manage who can open it: {manageUrl}"
+
+Report a public create as "Published: {url}. Anyone with the link can open it." Report an update as "Updated: {url}." and do not say who can open it; an update keeps who could open it before.
+
+If a create receipt has a \`guidance\` object, add one more line as the very last line of the report, after the "Manage who can open it" line on a private publish: "{guidance.message} [Link account]({guidance.url})". Use \`guidance.message\` exactly as the receipt gives it.
+
+If an \`add\` fails after a private publish, the page is private. Report the url, who can open
+it, and the failed address with the wrapper's message.
+
+If \`publish --private\` says "This OpenArtifacts server does not support private documents. Nothing was published.", relay it and do not publish publicly unless the user asks. On a
+\`402\` with \`privateSharing\`, say private sharing needs a paid plan and that nothing was
+published or changed, and that replying **publish** publishes it for anyone with the link. Never
+do that automatically.
 
 On failure the wrapper prints the HTTP status and the server's message to stderr and
 exits 1. Report that message verbatim. Do not retry on your own, invent a cause, strip
@@ -623,7 +628,34 @@ styling, or publish another way. For a 401, the license key was refused or the p
 cannot publish; point the user at Copilot Settings. For \`not_found\` on an update, stop;
 do not create a replacement page unless the user explicitly asks.
 
-## 4. Withdraw
+## 4. Change who can open a page
+
+Act only when the user asks, and make one change per \`share\` call. Take the \`docId\` the
+way step 5 does: from an OpenArtifacts link the user supplies, the receipt URL reported earlier,
+or the note's \`openartifacts\` property. On Windows, use the \`.cmd\` wrapper the same way.
+
+\`\`\`bash
+sh "/absolute/path/to/this/skill/directory/${OPENARTIFACTS_PUBLISH_USAGE}.sh" share <docId> link invited      # "make it private"
+sh "/absolute/path/to/this/skill/directory/${OPENARTIFACTS_PUBLISH_USAGE}.sh" share <docId> link anyone       # "make it public"
+sh "/absolute/path/to/this/skill/directory/${OPENARTIFACTS_PUBLISH_USAGE}.sh" share <docId> add alice@acme.com
+sh "/absolute/path/to/this/skill/directory/${OPENARTIFACTS_PUBLISH_USAGE}.sh" share <docId> remove alice@acme.com
+sh "/absolute/path/to/this/skill/directory/${OPENARTIFACTS_PUBLISH_USAGE}.sh" share <docId> decline bob@other.com
+sh "/absolute/path/to/this/skill/directory/${OPENARTIFACTS_PUBLISH_USAGE}.sh" share <docId>
+\`\`\`
+
+- After \`link invited\` makes a public page private, say: "People who opened it while it was public may have kept a copy."
+- After \`link anyone\`, say that anyone with the link can now open it, and that the list of
+  invited people is kept in case the user switches back.
+- When the user asks who has access, run \`share <docId>\` and report \`people\` and the pending
+  \`requests\`, with the \`manageUrl\`. Approve a request with \`add <email>\` and decline it with
+  \`decline <email>\`, only when the user says so.
+- Tell the user that invitees sign in with the address that was invited.
+- Private sharing needs a paid plan for making a page private and for adding people. On a
+  \`402\` with \`privateSharing\`, say so and that nothing was changed.
+- If \`share\` says "Not found, or this server does not support private documents.", relay it and
+  do not guess.
+
+## 5. Withdraw
 
 For delete, remove, or withdraw requests, take the \`docId\` from an OpenArtifacts link the
 user supplies or the receipt URL reported earlier. Otherwise, read it with the same rules as
@@ -646,8 +678,9 @@ Never tell the user to delete the page at its public URL.
 # Publish one HTML file to OpenArtifacts over HTTPS with the license key Copilot
 # supplies in the environment. Needs only sh, curl, and awk.
 usage() {
-  printf '%s\n' "Usage: sh ${OPENARTIFACTS_PUBLISH_USAGE}.sh publish <html-file> <title> [docId]" >&2
+  printf '%s\n' "Usage: sh ${OPENARTIFACTS_PUBLISH_USAGE}.sh publish [--private] <html-file> <title> [docId]" >&2
   printf '%s\n' "       sh ${OPENARTIFACTS_PUBLISH_USAGE}.sh unshare <docId>" >&2
+  printf '%s\n' "       sh ${OPENARTIFACTS_PUBLISH_USAGE}.sh share <docId> [add|remove|decline <email> | link anyone|invited]" >&2
   exit 1
 }
 
@@ -662,9 +695,17 @@ API_HOST=$(printf '%s' "$API_HOST" | sed 's,/*$,,')
 
 COMMAND=$1
 DOC_ID=
+PRIVATE=
+SHARE_ACTION=
+SHARE_VALUE=
+if [ "$COMMAND" = publish ] && [ "$2" = --private ]; then
+  PRIVATE=1
+  shift 2
+  set -- publish "$@"
+fi
 case "$COMMAND" in
   publish)
-    [ "$#" -eq 3 ] || [ "$#" -eq 4 ] || usage
+    [ "$#" -eq 3 ] || { [ "$#" -eq 4 ] && [ -z "$PRIVATE" ]; } || usage
     HTML_FILE=$2
     TITLE=$3
     [ "$#" -eq 4 ] && DOC_ID=$4
@@ -677,6 +718,29 @@ case "$COMMAND" in
     [ "$#" -eq 2 ] || usage
     DOC_ID=$2
     ;;
+  share)
+    # One change per call: an address added (which also approves its request), removed or
+    # declined, or the link setting. Never a whole list.
+    # https://github.com/Brevilabs/obsidian-copilot-private/issues/707
+    [ "$#" -ge 2 ] && [ "$#" -le 4 ] || usage
+    DOC_ID=$2
+    SHARE_ACTION=list
+    if [ "$#" -ge 3 ]; then
+      [ "$#" -eq 4 ] || usage
+      SHARE_ACTION=$3
+      SHARE_VALUE=$4
+      case "$SHARE_ACTION" in
+        add|remove|decline) ;;
+        link)
+          case "$SHARE_VALUE" in
+            anyone|invited) ;;
+            *) usage ;;
+          esac
+          ;;
+        *) usage ;;
+      esac
+    fi
+    ;;
   *)
     usage
     ;;
@@ -685,6 +749,19 @@ if [ -n "$DOC_ID" ] && ! printf '%s' "$DOC_ID" | grep -Eq '^[0-9abcdefghjkmnpqrs
   printf '%s\n' "Invalid OpenArtifacts document id: $DOC_ID" >&2
   exit 1
 fi
+EMAIL_PATH=
+case "$SHARE_ACTION" in
+  add|remove|decline)
+    # The address goes into a URL path, so refuse anything that could change the path.
+    case "$SHARE_VALUE" in
+      ''|*[[:space:][:cntrl:]/?#%]*)
+        printf '%s\n' "Invalid email address: $SHARE_VALUE" >&2
+        exit 1
+        ;;
+    esac
+    EMAIL_PATH=$(printf '%s' "$SHARE_VALUE" | sed 's/@/%40/g; s/+/%2B/g')
+    ;;
+esac
 
 # stdin -> one JSON string literal. Bytes pass through untouched except the escapes
 # JSON requires: backslash, quote, tab, CR, LF, and every other control character as
@@ -717,9 +794,37 @@ BODY=$(mktemp) || exit 1
 RESPONSE=$(mktemp) || exit 1
 trap 'rm -f "$HEADERS" "$BODY" "$RESPONSE"' EXIT
 printf 'Authorization: Bearer %s\n' "$KEY" > "$HEADERS"
+WORKSPACE_ROOT=$${OPENARTIFACTS_WORKSPACE_ROOT_ENV}
+OFFER_MARKER="$WORKSPACE_ROOT/${OPENARTIFACTS_LINK_OFFER_MARKER}"
+OFFER_ASKED=
+if [ "$COMMAND" = publish ] && [ -z "$DOC_ID" ] && [ -n "$WORKSPACE_ROOT" ] && [ ! -e "$OFFER_MARKER" ]; then
+  OFFER_ASKED=1
+  printf '${OPENARTIFACTS_CLIENT_HEADER}: ${OPENARTIFACTS_CLIENT_ID}\n' >> "$HEADERS"
+fi
 
 if [ "$COMMAND" = unshare ]; then
   STATUS=$(curl -sS -o "$RESPONSE" -w '%{http_code}' -X DELETE -H "@$HEADERS" "$API_HOST/api/v1/docs/$DOC_ID")
+  CURL_STATUS=$?
+elif [ "$COMMAND" = share ]; then
+  ACCESS_URL="$API_HOST/api/v1/docs/$DOC_ID/access"
+  case "$SHARE_ACTION" in
+    list)
+      STATUS=$(curl -sS -g -o "$RESPONSE" -w '%{http_code}' -H "@$HEADERS" "$ACCESS_URL")
+      ;;
+    add)
+      STATUS=$(curl -sS -g -o "$RESPONSE" -w '%{http_code}' -X PUT -H "@$HEADERS" -H 'Content-Length: 0' "$ACCESS_URL/people/$EMAIL_PATH")
+      ;;
+    remove)
+      STATUS=$(curl -sS -g -o "$RESPONSE" -w '%{http_code}' -X DELETE -H "@$HEADERS" "$ACCESS_URL/people/$EMAIL_PATH")
+      ;;
+    decline)
+      STATUS=$(curl -sS -g -o "$RESPONSE" -w '%{http_code}' -X DELETE -H "@$HEADERS" "$ACCESS_URL/requests/$EMAIL_PATH")
+      ;;
+    link)
+      printf '{"linkAccess":"%s"}' "$SHARE_VALUE" > "$BODY"
+      STATUS=$(curl -sS -g -o "$RESPONSE" -w '%{http_code}' -X PUT -H "@$HEADERS" -H 'Content-Type: application/json; charset=utf-8' --data-binary "@$BODY" "$ACCESS_URL")
+      ;;
+  esac
   CURL_STATUS=$?
 else
   {
@@ -732,6 +837,12 @@ else
   if [ -n "$DOC_ID" ]; then
     METHOD=PUT
     URL="$API_HOST/api/v1/docs/$DOC_ID"
+  elif [ -n "$PRIVATE" ]; then
+    # A private create is its own route, with the same body as a public one. A server without
+    # private sharing answers 404 and creates nothing; there is no fallback to a public page.
+    # https://github.com/Brevilabs/obsidian-copilot-private/issues/707
+    METHOD=POST
+    URL="$API_HOST/api/v1/private-docs"
   else
     METHOD=POST
     URL="$API_HOST/api/v1/docs"
@@ -749,13 +860,37 @@ fi
 if [ "$COMMAND" = unshare ] && [ "$STATUS" = 404 ] && grep -q '"not_found"' "$RESPONSE"; then
   STATUS=204
 fi
+# Any 404 from the private route or the access routes means the server cannot do this, and
+# nothing was created or changed.
+# https://github.com/Brevilabs/obsidian-copilot-private/issues/707
+if [ "$STATUS" = 404 ] && [ -n "$PRIVATE" ]; then
+  printf '%s\n' "This OpenArtifacts server does not support private documents. Nothing was published." >&2
+  exit 1
+fi
+if [ "$STATUS" = 404 ] && [ "$COMMAND" = share ]; then
+  printf '%s\n' "Not found, or this server does not support private documents." >&2
+  exit 1
+fi
 case "$STATUS" in
   2??)
     if [ "$COMMAND" = unshare ]; then
       printf '{"docId":"%s","status":"unshared"}\n' "$DOC_ID"
+    elif [ "$COMMAND" = share ] || [ -n "$PRIVATE" ]; then
+      # The share page is on the API host, so it is built here rather than taken from the url.
+      # One key is appended to the server's JSON; a JSON string never holds a raw newline.
+      JSON=$(tr -d '\r\n' < "$RESPONSE")
+      NEW_ID=$(printf '%s' "$JSON" | sed -n 's/.*"docId" *: *"\([0-9a-z]*\)".*/\1/p')
+      case "$JSON" in
+        *\}) [ -z "$NEW_ID" ] || JSON=$(printf '%s' "$JSON" | sed 's/}$//')",\"manageUrl\":\"$API_HOST/share/$NEW_ID\"}" ;;
+      esac
+      printf '%s\n' "$JSON"
     else
       cat "$RESPONSE"
       printf '\n'
+    fi
+    # touch, not a redirection: a failed redirection on a special built-in exits a POSIX shell.
+    if [ -n "$OFFER_ASKED" ] && grep -q '"guidance"' "$RESPONSE"; then
+      { mkdir -p "$(dirname "$OFFER_MARKER")" && touch "$OFFER_MARKER"; } 2>/dev/null || :
     fi
     exit 0
     ;;
@@ -780,8 +915,9 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 # supplies in the environment.
 
 function Show-Usage {
-  [Console]::Error.WriteLine('Usage: ${OPENARTIFACTS_PUBLISH_USAGE}.ps1 publish <html-file> <title> [docId]')
+  [Console]::Error.WriteLine('Usage: ${OPENARTIFACTS_PUBLISH_USAGE}.ps1 publish [--private] <html-file> <title> [docId]')
   [Console]::Error.WriteLine('       ${OPENARTIFACTS_PUBLISH_USAGE}.ps1 unshare <docId>')
+  [Console]::Error.WriteLine('       ${OPENARTIFACTS_PUBLISH_USAGE}.ps1 share <docId> [add|remove|decline <email> | link anyone|invited]')
   exit 1
 }
 
@@ -796,9 +932,17 @@ $API_HOST = $API_HOST.TrimEnd('/')
 
 $COMMAND = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
 $DOC_ID = ''
+$PRIVATE = $false
+$SHARE_ACTION = ''
+$SHARE_VALUE = ''
+if ($COMMAND -eq 'publish' -and $args.Count -ge 2 -and [string]$args[1] -eq '--private') {
+  $PRIVATE = $true
+  $args = @($args[0]) + @($args | Select-Object -Skip 2)
+}
 switch ($COMMAND) {
   'publish' {
     if ($args.Count -ne 3 -and $args.Count -ne 4) { Show-Usage }
+    if ($PRIVATE -and $args.Count -eq 4) { Show-Usage }
     $HTML_FILE = [string]$args[1]
     $TITLE = [string]$args[2]
     if ($args.Count -eq 4) { $DOC_ID = [string]$args[3] }
@@ -811,26 +955,91 @@ switch ($COMMAND) {
     if ($args.Count -ne 2) { Show-Usage }
     $DOC_ID = [string]$args[1]
   }
+  'share' {
+    # One change per call: an address added (which also approves its request), removed or
+    # declined, or the link setting. Never a whole list.
+    # https://github.com/Brevilabs/obsidian-copilot-private/issues/707
+    if ($args.Count -lt 2 -or $args.Count -gt 4 -or $args.Count -eq 3) { Show-Usage }
+    $DOC_ID = [string]$args[1]
+    $SHARE_ACTION = 'list'
+    if ($args.Count -eq 4) {
+      $SHARE_ACTION = [string]$args[2]
+      $SHARE_VALUE = [string]$args[3]
+      if ($SHARE_ACTION -cnotin @('add', 'remove', 'decline', 'link')) { Show-Usage }
+      if ($SHARE_ACTION -ceq 'link' -and $SHARE_VALUE -cnotin @('anyone', 'invited')) { Show-Usage }
+    }
+  }
   default { Show-Usage }
 }
 if ($DOC_ID -and $DOC_ID -notmatch '^[0-9abcdefghjkmnpqrstvwxyz]{16}$') {
   [Console]::Error.WriteLine("Invalid OpenArtifacts document id: $DOC_ID")
   exit 1
 }
+$EMAIL_PATH = ''
+if ($SHARE_ACTION -cin @('add', 'remove', 'decline')) {
+  # The address goes into a URL path, so refuse anything that could change the path.
+  if (-not $SHARE_VALUE -or $SHARE_VALUE -match '[\s\x00-\x1f\x7f/?#%]') {
+    [Console]::Error.WriteLine("Invalid email address: $SHARE_VALUE")
+    exit 1
+  }
+  $EMAIL_PATH = [Uri]::EscapeDataString($SHARE_VALUE)
+}
+
+# The server's JSON with the share page appended. The share page is on the API host, so it
+# is built here rather than taken from the url. A JSON string never holds a raw newline.
+function Add-ManageUrl([string]$Json) {
+  $text = $Json.Trim()
+  $match = [regex]::Match($text, '"docId"\s*:\s*"([0-9a-z]+)"')
+  if ($text.EndsWith('}') -and $match.Success) {
+    return $text.Substring(0, $text.Length - 1) + ',"manageUrl":"' + $API_HOST + '/share/' + $match.Groups[1].Value + '"}'
+  }
+  return $text
+}
 
 $headers = @{ Authorization = "Bearer $KEY" }
+$WORKSPACE_ROOT = [Environment]::GetEnvironmentVariable('${OPENARTIFACTS_WORKSPACE_ROOT_ENV}')
+$OFFER_MARKER = if ($WORKSPACE_ROOT) { Join-Path $WORKSPACE_ROOT '${OPENARTIFACTS_LINK_OFFER_MARKER}' } else { '' }
+$OFFER_ASKED = $COMMAND -eq 'publish' -and -not $DOC_ID -and $OFFER_MARKER -and -not (Test-Path -LiteralPath $OFFER_MARKER)
+if ($OFFER_ASKED) { $headers['${OPENARTIFACTS_CLIENT_HEADER}'] = '${OPENARTIFACTS_CLIENT_ID}' }
 try {
-  if ($COMMAND -eq 'unshare') {
+  if ($COMMAND -eq 'share') {
+    $accessUri = "$API_HOST/api/v1/docs/$DOC_ID/access"
+    $response = switch ($SHARE_ACTION) {
+      'add' { Invoke-WebRequest -UseBasicParsing -Method Put -Uri "$accessUri/people/$EMAIL_PATH" -Headers $headers }
+      'remove' { Invoke-WebRequest -UseBasicParsing -Method Delete -Uri "$accessUri/people/$EMAIL_PATH" -Headers $headers }
+      'decline' { Invoke-WebRequest -UseBasicParsing -Method Delete -Uri "$accessUri/requests/$EMAIL_PATH" -Headers $headers }
+      'link' {
+        $linkBody = [System.Text.Encoding]::UTF8.GetBytes('{"linkAccess":"' + $SHARE_VALUE + '"}')
+        Invoke-WebRequest -UseBasicParsing -Method Put -Uri $accessUri -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $linkBody
+      }
+      default { Invoke-WebRequest -UseBasicParsing -Method Get -Uri $accessUri -Headers $headers }
+    }
+    [Console]::Out.WriteLine((Add-ManageUrl ([string]$response.Content)))
+  } elseif ($COMMAND -eq 'unshare') {
     $null = Invoke-WebRequest -UseBasicParsing -Method Delete -Uri "$API_HOST/api/v1/docs/$DOC_ID" -Headers $headers
     [Console]::Out.WriteLine('{"docId":"' + $DOC_ID + '","status":"unshared"}')
   } else {
     $html = [System.IO.File]::ReadAllText($HTML_FILE, (New-Object System.Text.UTF8Encoding($false)))
-    $body = @{ title = $TITLE; html = $html } | ConvertTo-Json -Compress -Depth 2
+    $payload = @{ title = $TITLE; html = $html }
+    $body = $payload | ConvertTo-Json -Compress -Depth 2
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
     $method = if ($DOC_ID) { 'Put' } else { 'Post' }
-    $uri = if ($DOC_ID) { "$API_HOST/api/v1/docs/$DOC_ID" } else { "$API_HOST/api/v1/docs" }
+    # A private create is its own route, with the same body as a public one. A server without
+    # private sharing answers 404 and creates nothing; there is no fallback to a public page.
+    # https://github.com/Brevilabs/obsidian-copilot-private/issues/707
+    $uri = if ($DOC_ID) { "$API_HOST/api/v1/docs/$DOC_ID" } elseif ($PRIVATE) { "$API_HOST/api/v1/private-docs" } else { "$API_HOST/api/v1/docs" }
     $response = Invoke-WebRequest -UseBasicParsing -Method $method -Uri $uri -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $bytes
-    [Console]::Out.WriteLine([string]$response.Content)
+    if ($PRIVATE) {
+      [Console]::Out.WriteLine((Add-ManageUrl ([string]$response.Content)))
+    } else {
+      [Console]::Out.WriteLine([string]$response.Content)
+    }
+    if ($OFFER_ASKED -and ([string]$response.Content) -match '"guidance"') {
+      try {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OFFER_MARKER) -ErrorAction Stop | Out-Null
+        New-Item -ItemType File -Force -Path $OFFER_MARKER -ErrorAction Stop | Out-Null
+      } catch {}
+    }
   }
 } catch {
   $status = $null
@@ -847,6 +1056,14 @@ try {
     # The API's structured not_found means the page is already gone, which is the outcome asked for.
     [Console]::Out.WriteLine('{"docId":"' + $DOC_ID + '","status":"unshared"}')
     exit 0
+  }
+  if ($status -eq 404 -and $PRIVATE) {
+    [Console]::Error.WriteLine('This OpenArtifacts server does not support private documents. Nothing was published.')
+    exit 1
+  }
+  if ($status -eq 404 -and $COMMAND -eq 'share') {
+    [Console]::Error.WriteLine('Not found, or this server does not support private documents.')
+    exit 1
   }
   if ($status) {
     [Console]::Error.WriteLine("OpenArtifacts returned HTTP $status")
@@ -867,15 +1084,16 @@ exit 0
 export const BUILTIN_SKILLS: readonly BuiltinSkill[] = [
   WEB_SEARCH,
   WEB_FETCH,
-  READ_PDF,
   YOUTUBE_TRANSCRIPT,
   FETCH_X,
   OPENARTIFACTS_PUBLISH,
   ...OBSIDIAN_SKILLS,
 ];
 
-const MIYO_SEARCH_VERSION = 5;
-const MIYO_PARSE_VERSION = 2;
+const MIYO_SEARCH_VERSION = 6;
+const MIYO_SEARCH_SH_FILE = "miyo-search.sh";
+const MIYO_SEARCH_CMD_FILE = "miyo-search.cmd";
+const MIYO_PARSE_VERSION = 3;
 
 const MIYO_POSIX_RESOLVER = `# Absolute install path first (Obsidian shells often miss Miyo's bin on PATH).
 if [ -x "$HOME/.miyo/bin/miyo" ]; then
@@ -905,7 +1123,7 @@ die() {
 }
 
 QUERY="$*"
-[ -n "$QUERY" ] || die "Usage: sh miyo-search.sh <query>" 1
+[ -n "$QUERY" ] || die "Usage: sh ${MIYO_SEARCH_SH_FILE} <query>" 1
 
 ${MIYO_POSIX_RESOLVER}
 
@@ -952,7 +1170,7 @@ const MIYO_SEARCH_CMD = `@echo off
 setlocal enableextensions disabledelayedexpansion
 rem Semantic vault search via the local Miyo CLI; prints Miyo's JSON to stdout.
 if "%~1"=="" (
-  echo Usage: miyo-search.cmd "query" 1>&2
+  echo Usage: ${MIYO_SEARCH_CMD_FILE} "query" 1>&2
   exit /b 1
 )
 ${MIYO_WINDOWS_RESOLVER}
@@ -1024,7 +1242,7 @@ export const MIYO_SEARCH_SKILL: BuiltinSkill = {
   enabledAgents: ["claude", "codex", "opencode"],
   skillMd: `---
 name: miyo-search
-description: Semantic (meaning-based) search over the user's Obsidian vault via the local Miyo app. For any vault-search intent, use it when builtin grep search is too slow or doesn't surface enough relevant notes, or when the user explicitly asks for Miyo search. Needs the Miyo desktop app installed and running.
+description: Semantic (meaning-based) search over the user's Obsidian vault via the local Miyo app. Use it for every request that might be answered from the user's notes, alongside grep for exact terms. Needs the Miyo desktop app installed and running.
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "${MIYO_SEARCH_VERSION}"
@@ -1038,22 +1256,22 @@ app for semantic search over their notes. It finds relevant notes by meaning
 app by default, or the remote Miyo server they configured in settings — never a
 third-party API, and no API key.
 
-When to use it: for any vault-search intent, reach for Miyo when your builtin
-\`grep\` search is too slow or doesn't surface enough relevant notes, or when
-the user explicitly asks for Miyo search.
+When to use it: for every request that might be answered from the user's
+notes, alongside \`grep\`/glob for any exact names, terms, tags or quoted
+phrases in the request. Miyo finds notes that match by meaning even when the
+wording or title differs; grep finds exact strings.
 
 ${howToRunSection({
-  shFile: "miyo-search.sh",
-  cmdFile: "miyo-search.cmd",
+  shFile: MIYO_SEARCH_SH_FILE,
+  cmdFile: MIYO_SEARCH_CMD_FILE,
   argPlaceholder: "<the user's question>",
   extraNote: "Pass the user's full question as the query.",
 })}
 
 The script locates the Miyo binary itself — you do not need to know where Miyo
-is installed or which shell you are in. Run the script as your single search
-step; do not fall back to other search tools unless it reports that Miyo is
-unavailable. Read the JSON straight from stdout; do not pipe it through other
-tools (no \`jq\`, no \`|\`).
+is installed or which shell you are in. Combine its results with your keyword
+search results by note path. If Miyo reports that it is unavailable, continue
+with keyword search.
 
 Search scope comes from Copilot settings. **Current vault** applies Miyo's exact
 folder boundary for the active vault and any other Miyo folders ticked in Copilot
@@ -1077,8 +1295,8 @@ The script exits with a clear message when Miyo can't be used:
   vault search if they can't.
 `,
   files: [
-    { path: "miyo-search.sh", content: MIYO_SEARCH_SH },
-    { path: "miyo-search.cmd", content: MIYO_SEARCH_CMD },
+    { path: MIYO_SEARCH_SH_FILE, content: MIYO_SEARCH_SH },
+    { path: MIYO_SEARCH_CMD_FILE, content: MIYO_SEARCH_CMD },
   ],
 };
 
@@ -1088,7 +1306,7 @@ export const MIYO_PARSE_SKILL: BuiltinSkill = {
   enabledAgents: ["claude", "codex", "opencode"],
   skillMd: `---
 name: miyo-parse
-description: Parse a local PDF or EPUB file into Markdown/text with the local Miyo CLI. Use this for document reading when Miyo is the selected Document Processor. The file can be anywhere on the filesystem and does not need to be indexed or copied into the vault.
+description: Parse a local PDF or EPUB file into Markdown/text with the local Miyo CLI. Use this for document reading when Miyo document processing is on. The file can be anywhere on the filesystem and does not need to be indexed or copied into the vault.
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "${MIYO_PARSE_VERSION}"
@@ -1109,14 +1327,8 @@ ${howToRunSection({
 
 ## If it reports a problem
 
-Report the error clearly and stop parsing that document. Never fall back to
-\`copilot-read-pdf\` or any other cloud document parser: selecting Miyo is an
-explicit local-processing choice. Do not retry in a loop.
-
-If it reports that the Miyo CLI is not installed, say that pointing Copilot at a
-remote Miyo server does not help here, and that the user's options are to
-install Miyo on this machine or switch Settings → Copilot → Miyo → Document
-Processor to Plus.
+Report the error to the user, then read the file with any other tool you
+have. Do not run \`miyo parse\` again on that file.
 `,
   files: [
     { path: "miyo-parse.sh", content: MIYO_PARSE_SH },
@@ -1138,9 +1350,7 @@ export function planManagedBuiltins(gates: { search: boolean; documents: boolean
     !gates.search && !gates.documents
       ? BUILTIN_SKILLS
       : [
-          ...(gates.documents
-            ? BUILTIN_SKILLS.filter((skill) => skill !== READ_PDF)
-            : BUILTIN_SKILLS),
+          ...BUILTIN_SKILLS,
           ...(gates.search ? [MIYO_SEARCH_SKILL] : []),
           ...(gates.documents ? [MIYO_PARSE_SKILL] : []),
         ];
@@ -1164,6 +1374,14 @@ export const DEFAULT_BUILTIN_PREFERENCES: NonNullable<
   )
 );
 
+// The switch defaults on, so it only takes effect while Miyo is connected.
+// https://github.com/Brevilabs/obsidian-copilot-private/issues/716
+export function isMiyoSearchSkillActive(
+  settings: Pick<CopilotSettings, "enableMiyo" | "enableMiyoSearchSkill">
+): boolean {
+  return settings.enableMiyo === true && settings.enableMiyoSearchSkill === true;
+}
+
 export function isBuiltinSkillEnabledFor(
   settings: CopilotSettings,
   skillName: string,
@@ -1172,7 +1390,7 @@ export function isBuiltinSkillEnabledFor(
   const pref = settings.agentMode.skills.builtinPreferences?.[skillName];
   if (pref?.disabled || pref?.disabledAgents?.includes(agentId)) return false;
   return planManagedBuiltins({
-    search: settings.enableMiyoSearchSkill === true,
-    documents: settings.docProcessorBackend === "miyo",
+    search: isMiyoSearchSkillActive(settings),
+    documents: settings.enableMiyoDocumentProcessing,
   }).seed.some((skill) => skill.name === skillName);
 }

@@ -106,7 +106,7 @@ export interface CopilotSettings {
   parallelApiKey: string;
   exaApiKey: string;
   supadataApiKey: string;
-  docProcessorBackend: "plus" | "miyo";
+  enableMiyoDocumentProcessing: boolean;
   enableLexicalBoosts: boolean;
   lexicalSearchRamLimit: number;
   suggestedDefaultCommands: boolean;
@@ -141,6 +141,7 @@ export interface CopilotSettings {
     deviceProfiles?: Record<string, DeviceAgentProfile>;
     claudeCli?: { path?: string };
     debugFullFrames: boolean;
+    offerFeedbackCards: boolean;
     notificationSound: boolean;
     notificationSoundId: NotificationSoundId;
     welcomeDismissed: boolean;
@@ -585,9 +586,8 @@ export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
     sanitizedSettings.selfHostSearchProvider = DEFAULT_SETTINGS.selfHostSearchProvider;
   }
 
-  const validDocProcessorBackends = ["plus", "miyo"] as const;
-  if (!validDocProcessorBackends.includes(sanitizedSettings.docProcessorBackend)) {
-    sanitizedSettings.docProcessorBackend = DEFAULT_SETTINGS.docProcessorBackend;
+  if (typeof sanitizedSettings.enableMiyoDocumentProcessing !== "boolean") {
+    sanitizedSettings.enableMiyoDocumentProcessing = DEFAULT_SETTINGS.enableMiyoDocumentProcessing;
   }
 
   if (typeof sanitizedSettings.passMarkdownImages !== "boolean") {
@@ -671,7 +671,9 @@ export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
   }
 
   const copilotFolderValidation = validateCopilotFolder(
-    typeof settingsToSanitize.copilotFolder === "string" ? settingsToSanitize.copilotFolder : ""
+    typeof settingsToSanitize.copilotFolder === "string"
+      ? toVisibleCopilotFolder(settingsToSanitize.copilotFolder)
+      : ""
   );
   sanitizedSettings.copilotFolder = copilotFolderValidation.ok
     ? copilotFolderValidation.folder
@@ -811,6 +813,11 @@ function sanitizeAgentMode(raw: unknown): CopilotSettings["agentMode"] {
       ? r.debugFullFrames
       : DEFAULT_SETTINGS.agentMode.debugFullFrames;
 
+  const offerFeedbackCards =
+    typeof r.offerFeedbackCards === "boolean"
+      ? r.offerFeedbackCards
+      : DEFAULT_SETTINGS.agentMode.offerFeedbackCards;
+
   const notificationSound =
     typeof r.notificationSound === "boolean"
       ? r.notificationSound
@@ -859,6 +866,7 @@ function sanitizeAgentMode(raw: unknown): CopilotSettings["agentMode"] {
     activeBackend,
     backends,
     debugFullFrames,
+    offerFeedbackCards,
     notificationSound,
     notificationSoundId,
     welcomeDismissed,
@@ -948,6 +956,10 @@ function validateSkillsFolder(
   return { ok: true, folder: cleaned };
 }
 
+export function toVisibleCopilotFolder(folder: string): string {
+  return folder.trim().replace(/(^|[\\/])\.+/g, "$1");
+}
+
 export function validateCopilotFolder(
   value: string,
   configDir?: string
@@ -987,8 +999,10 @@ export function validateCopilotFolder(
     if (segment === "..") {
       return { ok: false, reason: 'Folder path cannot contain ".." segments.' };
     }
-    if (segment === ".") {
-      return { ok: false, reason: 'Folder path cannot contain "." segments.' };
+    // Obsidian does not index dot folders, so every Copilot feature must see a visible root.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/712
+    if (segment.startsWith(".")) {
+      return { ok: false, reason: "Folder names cannot start with a dot." };
     }
     if (CONTROL_CHAR_RE.test(segment)) {
       return { ok: false, reason: "Folder path contains illegal control characters." };

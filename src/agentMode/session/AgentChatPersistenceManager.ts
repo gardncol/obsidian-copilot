@@ -18,17 +18,20 @@ import {
 } from "@/utils";
 import {
   isFileAlreadyExistsError,
-  isInVaultCache,
   isNameTooLongError,
   listMarkdownFiles,
   patchFrontmatter,
-  readFrontmatterViaAdapter,
   trashFile,
 } from "@/utils/vaultAdapterUtils";
 import { joinPosix } from "@/utils/pathUtils";
 import { TFile, type App } from "obsidian";
-import { Notice } from "obsidian";
-import { coerceProjectId, escapeYamlString, unescapeYamlString } from "./agentChatYaml";
+import {
+  coerceProjectId,
+  escapeYamlString,
+  type FrontmatterUpdates,
+  mergeFrontmatter,
+  unescapeYamlString,
+} from "./agentChatYaml";
 import { GLOBAL_SCOPE } from "./scope";
 import type { AgentChatMessage, BackendId, SessionUsage } from "./types";
 
@@ -62,26 +65,17 @@ export interface LoadedAgentChat {
   usage?: SessionUsage;
 }
 
-interface ExistingMeta {
-  topic?: string;
-  label?: string;
-  lastAccessedAt?: number;
-  sessionId?: string;
-  projectId?: string;
-  usage?: SessionUsage;
-}
-
 export class AgentChatPersistenceManager {
   private readonly loadedTranscripts = new Map<TAbstractFile | string, string>();
 
   constructor(private readonly app: App) {}
 
-  private async updateTranscript(path: string, content: string): Promise<void> {
+  private async updateTranscript(path: string, render: (current: string) => string): Promise<void> {
     const key = this.app.vault.getAbstractFileByPath(path) ?? path;
     const baseline = await updateChatTranscript(
       this.app,
       path,
-      content,
+      render,
       this.loadedTranscripts.get(key)
     );
     this.loadedTranscripts.set(key, baseline);
@@ -111,16 +105,10 @@ export class AgentChatPersistenceManager {
       const existingFile = options?.existingPath
         ? this.resolveExistingFile(options.existingPath)
         : null;
-      const existingMeta = existingFile ? await this.readExistingMeta(existingFile) : {};
 
       const preferredFileName = existingFile
         ? existingFile.path
-        : this.generateFileName(
-            messages,
-            firstMessageEpoch,
-            conversationsFolder,
-            existingMeta.topic
-          );
+        : this.generateFileName(messages, firstMessageEpoch, conversationsFolder);
 
       const preparedMessages = await prepareChatImagesForSave(
         this.app,
@@ -133,49 +121,46 @@ export class AgentChatPersistenceManager {
       );
       const chatContent = this.formatChatContent(preparedMessages);
 
-      const noteContent = this.generateNoteContent({
-        chatContent,
+      const updates = this.frontmatterUpdates({
         firstMessageEpoch,
         backendId,
-        topic: existingMeta.topic,
-        label: options?.label ?? existingMeta.label,
+        label: options?.label,
         modelKey: options?.modelKey,
-        lastAccessedAt: existingMeta.lastAccessedAt,
-        sessionId: options?.sessionId ?? existingMeta.sessionId,
-        projectId: coerceProjectId(options?.projectId) ?? existingMeta.projectId,
-        usage: options?.usage ?? existingMeta.usage,
+        sessionId: options?.sessionId,
+        projectId: options?.projectId,
+        usage: options?.usage,
       });
+      const renderNote = (current: string) =>
+        `${mergeFrontmatter(current, updates)}\n\n${chatContent}`;
+      // Autosave rewrites only the keys it owns, from the note as it is at write time, so renames, pins, and user properties survive; a new chat colliding with another note's name must not inherit its session.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/698
+      const rewriteNote = (path: string) =>
+        this.updateTranscript(path, (current) =>
+          renderNote(path === options?.existingPath ? current : "")
+        );
 
-      if (existingFile && isInVaultCache(this.app, existingFile.path)) {
-        await this.updateTranscript(existingFile.path, noteContent);
+      if (existingFile) {
+        await rewriteNote(existingFile.path);
         return { path: existingFile.path };
       }
 
-      if (
-        !isInVaultCache(this.app, preferredFileName) &&
-        (await this.app.vault.adapter.exists(preferredFileName))
-      ) {
-        await this.updateTranscript(preferredFileName, noteContent);
-        return { path: preferredFileName };
-      }
-
       try {
-        const created = await this.app.vault.create(preferredFileName, noteContent);
+        const created = await this.app.vault.create(preferredFileName, renderNote(""));
         return { path: created.path };
       } catch (err) {
         if (isFileAlreadyExistsError(err)) {
-          await this.updateTranscript(preferredFileName, noteContent);
+          await rewriteNote(preferredFileName);
           return { path: preferredFileName };
         }
         if (isNameTooLongError(err)) {
           logWarn("[AgentChatPersistenceManager] Filename too long, falling back to minimal name");
           const fallback = `${conversationsFolder}/${AGENT_FILENAME_PREFIX}chat-${firstMessageEpoch}.md`;
           try {
-            const created = await this.app.vault.create(fallback, noteContent);
+            const created = await this.app.vault.create(fallback, renderNote(""));
             return { path: created.path };
           } catch (fallbackErr) {
             if (isFileAlreadyExistsError(fallbackErr)) {
-              await this.updateTranscript(fallback, noteContent);
+              await rewriteNote(fallback);
               return { path: fallback };
             }
             throw fallbackErr;
@@ -190,13 +175,7 @@ export class AgentChatPersistenceManager {
   }
 
   async loadFile(file: TFile): Promise<LoadedAgentChat> {
-    let content: string;
-    try {
-      content = await this.app.vault.read(file);
-    } catch {
-      content = await this.app.vault.adapter.read(file.path);
-    }
-
+    const content = await this.app.vault.read(file);
     const key = this.app.vault.getAbstractFileByPath(file.path) ?? file.path;
     this.loadedTranscripts.set(key, content);
     const { frontmatter, body } = this.splitFrontmatter(content);
@@ -222,7 +201,7 @@ export class AgentChatPersistenceManager {
   }
 
   async getAgentChatHistoryFiles(): Promise<TFile[]> {
-    const files = await listMarkdownFiles(this.app, getEffectiveConversationsFolder());
+    const files = listMarkdownFiles(this.app, getEffectiveConversationsFolder());
     return files.filter((file) => file.basename.startsWith(AGENT_FILENAME_PREFIX));
   }
 
@@ -230,54 +209,24 @@ export class AgentChatPersistenceManager {
     await patchFrontmatter(this.app, fileId, { topic: newTopic.trim() });
   }
 
+  async setPinnedAt(fileId: string, pinnedAt: number | null): Promise<void> {
+    // A row whose note was moved or deleted must fail the pin instead of showing a pin that was never written.
+    // https://github.com/logancyang/obsidian-copilot/issues/3195
+    if (!(this.app.vault.getAbstractFileByPath(fileId) instanceof TFile)) {
+      throw new Error(`Chat note not found: ${fileId}`);
+    }
+    await patchFrontmatter(this.app, fileId, { pinnedAt });
+  }
+
   async deleteFile(fileId: string): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(fileId);
-    if (file) {
-      await trashFile(this.app, file);
-      new Notice("Chat moved to trash.");
-      return;
-    }
-    if (await this.app.vault.adapter.exists(fileId)) {
-      await this.app.vault.adapter.remove(fileId);
-      new Notice("Chat deleted.");
-      return;
-    }
-    throw new Error("Chat file not found.");
+    if (!file) throw new Error("Chat file not found.");
+    await trashFile(this.app, file);
   }
 
   private resolveExistingFile(path: string): TFile | null {
     const file = this.app.vault.getAbstractFileByPath(path);
     return file instanceof TFile ? file : null;
-  }
-
-  private async readExistingMeta(file: TFile): Promise<ExistingMeta> {
-    const cached = this.app.metadataCache.getFileCache(file)?.frontmatter;
-    if (cached) {
-      return {
-        topic: cached.topic,
-        label: cached.agentLabel,
-        lastAccessedAt:
-          typeof cached.lastAccessedAt === "number" ? cached.lastAccessedAt : undefined,
-        sessionId: typeof cached.sessionId === "string" ? cached.sessionId : undefined,
-        projectId: coerceProjectId(cached.projectId),
-        usage: parseUsageJson(cached.usage),
-      };
-    }
-    try {
-      const fm = await readFrontmatterViaAdapter(this.app, file.path);
-      if (!fm) return {};
-      const lastAccessed = fm.lastAccessedAt ? Number(fm.lastAccessedAt) : undefined;
-      return {
-        topic: fm.topic,
-        label: fm.agentLabel,
-        lastAccessedAt: lastAccessed && Number.isFinite(lastAccessed) ? lastAccessed : undefined,
-        sessionId: typeof fm.sessionId === "string" ? fm.sessionId : undefined,
-        projectId: coerceProjectId(fm.projectId),
-        usage: parseUsageJson(fm.usage),
-      };
-    } catch {
-      return {};
-    }
   }
 
   private formatChatContent(messages: AgentChatMessage[]): string {
@@ -374,30 +323,24 @@ export class AgentChatPersistenceManager {
   private generateFileName(
     messages: AgentChatMessage[],
     firstMessageEpoch: number,
-    folder: string,
-    topic?: string
+    folder: string
   ): string {
     const settings = getSettings();
     const formatted = formatDateTime(new Date(firstMessageEpoch));
     const timestampFileName = formatted.fileName;
 
-    let topicForFilename: string;
-    if (topic) {
-      topicForFilename = topic;
-    } else {
-      const firstUser = messages.find((m) => m.sender === USER_SENDER);
-      topicForFilename = firstUser
-        ? firstUser.message
-            .replace(/\[\[([^\]]+)\]\]/g, "$1")
-            .replace(/[{}[\]]/g, "")
-            .split(/\s+/)
-            .slice(0, 10)
-            .join(" ")
-            // eslint-disable-next-line no-control-regex -- serialized frontmatter must reject embedded control bytes
-            .replace(/[\\/:*?"<>|\x00-\x1F]/g, "")
-            .trim() || "Untitled Agent Chat"
-        : "Untitled Agent Chat";
-    }
+    const firstUser = messages.find((m) => m.sender === USER_SENDER);
+    const topicForFilename = firstUser
+      ? firstUser.message
+          .replace(/\[\[([^\]]+)\]\]/g, "$1")
+          .replace(/[{}[\]]/g, "")
+          .split(/\s+/)
+          .slice(0, 10)
+          .join(" ")
+          // eslint-disable-next-line no-control-regex -- serialized frontmatter must reject embedded control bytes
+          .replace(/[\\/:*?"<>|\x00-\x1F]/g, "")
+          .trim() || "Untitled Agent Chat"
+      : "Untitled Agent Chat";
 
     let customFileName = settings.defaultConversationNoteName || "{$date}_{$time}__{$topic}";
     const filePrefix = AGENT_FILENAME_PREFIX;
@@ -440,39 +383,30 @@ export class AgentChatPersistenceManager {
     return joinPosix(folder, baseNameWithPrefix);
   }
 
-  private generateNoteContent(args: {
-    chatContent: string;
+  private frontmatterUpdates(args: {
     firstMessageEpoch: number;
     backendId: BackendId;
-    topic?: string;
     label?: string | null;
     modelKey?: string;
-    lastAccessedAt?: number;
     sessionId?: string | null;
     projectId?: string;
     usage?: SessionUsage;
-  }): string {
-    const lines: string[] = [
-      "---",
-      `epoch: ${args.firstMessageEpoch}`,
-      `mode: ${AGENT_CHAT_MODE}`,
-      `backendId: ${args.backendId}`,
-    ];
+  }): FrontmatterUpdates {
     const projectId = coerceProjectId(args.projectId);
-    if (projectId && projectId !== GLOBAL_SCOPE) {
-      lines.push(`projectId: "${escapeYamlString(projectId)}"`);
-    }
-    if (args.sessionId) lines.push(`sessionId: "${escapeYamlString(args.sessionId)}"`);
-    if (args.topic) lines.push(`topic: "${escapeYamlString(args.topic)}"`);
-    if (args.label) lines.push(`agentLabel: "${escapeYamlString(args.label)}"`);
-    if (args.modelKey) lines.push(`modelKey: "${escapeYamlString(args.modelKey)}"`);
-    if (args.lastAccessedAt) lines.push(`lastAccessedAt: ${args.lastAccessedAt}`);
-    if (args.usage) lines.push(`usage: '${JSON.stringify(args.usage)}'`);
-    lines.push("tags:");
-    lines.push(`  - ${COPILOT_CONVERSATION_TAG}`);
-    lines.push("---");
-    lines.push("");
-    lines.push(args.chatContent);
-    return lines.join("\n");
+    const quoted = (key: string, value: string | null | undefined) =>
+      value ? `${key}: "${escapeYamlString(value)}"` : undefined;
+    // A merged save keeps keys it omits, so leaving global scope must delete the stale projectId explicitly.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/698
+    return [
+      ["epoch", `epoch: ${args.firstMessageEpoch}`],
+      ["mode", `mode: ${AGENT_CHAT_MODE}`],
+      ["backendId", `backendId: ${args.backendId}`],
+      ["projectId", projectId === GLOBAL_SCOPE ? null : quoted("projectId", projectId)],
+      ["sessionId", quoted("sessionId", args.sessionId)],
+      ["agentLabel", quoted("agentLabel", args.label)],
+      ["modelKey", quoted("modelKey", args.modelKey)],
+      ["usage", args.usage ? `usage: '${JSON.stringify(args.usage)}'` : undefined],
+      ["tags", `tags:\n  - ${COPILOT_CONVERSATION_TAG}`],
+    ];
   }
 }

@@ -14,12 +14,14 @@ export const CHAT_AGENT_VIEWTYPE = "copilot-agent-chat-view";
 export const AGENT_CHAT_MODE = "agent";
 export const RELEVANT_NOTES_VIEWTYPE = "copilot-relevant-notes-view";
 export const PLAN_PREVIEW_VIEW_TYPE = "copilot-plan-preview-view";
+export const TURN_DIFF_VIEW_TYPE = "copilot-turn-diff-view";
 export const APPLY_VIEW_TYPE = "obsidian-copilot-apply-view";
 export const SHARED_VIEW_TYPES = [CHAT_VIEWTYPE, APPLY_VIEW_TYPE, RELEVANT_NOTES_VIEWTYPE] as const;
 export const DESKTOP_VIEW_TYPES = [
   ...SHARED_VIEW_TYPES,
   CHAT_AGENT_VIEWTYPE,
   PLAN_PREVIEW_VIEW_TYPE,
+  TURN_DIFF_VIEW_TYPE,
 ] as const;
 
 export const COPILOT_AGENT_ICON_ID = "copilot-agent";
@@ -177,7 +179,6 @@ export enum Verbosity {
 export const DEFAULT_MAX_OUTPUT_TOKENS = 20_000;
 
 export const DEFAULT_MODEL_SETTING = {
-  TEMPERATURE: 0.1,
   REASONING_EFFORT: ReasoningEffort.LOW,
   VERBOSITY: Verbosity.MEDIUM,
 } as const;
@@ -626,6 +627,8 @@ export const COMMAND_IDS = {
   DOWNLOAD_YOUTUBE_SCRIPT: "download-youtube-script",
   PUBLISH_FILE_TO_OPENARTIFACTS: "publish-file-to-symposium",
   TRIGGER_QUICK_ASK: "trigger-quick-ask",
+  NEXT_DIFF_CHANGE: "turn-diff-next-change",
+  PREVIOUS_DIFF_CHANGE: "turn-diff-previous-change",
 } as const;
 
 export const COMMAND_NAMES: Record<CommandId, string> = {
@@ -652,6 +655,8 @@ export const COMMAND_NAMES: Record<CommandId, string> = {
   [COMMAND_IDS.DOWNLOAD_YOUTUBE_SCRIPT]: "Download YouTube Script (plus)",
   [COMMAND_IDS.PUBLISH_FILE_TO_OPENARTIFACTS]: "Publish file to OpenArtifacts",
   [COMMAND_IDS.TRIGGER_QUICK_ASK]: "Quick Ask",
+  [COMMAND_IDS.NEXT_DIFF_CHANGE]: "Go to next change in file diff",
+  [COMMAND_IDS.PREVIOUS_DIFF_CHANGE]: "Go to previous change in file diff",
 };
 
 export type CommandId = (typeof COMMAND_IDS)[keyof typeof COMMAND_IDS];
@@ -752,7 +757,7 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   enableCustomPromptTemplating: true,
   enableSelfHostMode: false,
   enableMiyo: false,
-  enableMiyoSearchSkill: false,
+  enableMiyoSearchSkill: true,
   miyoSearchAll: false,
   miyoExtraSearchFolders: [],
   relevantNotesLiveUpdate: true,
@@ -763,7 +768,7 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   parallelApiKey: "",
   exaApiKey: "",
   supadataApiKey: "",
-  docProcessorBackend: "plus",
+  enableMiyoDocumentProcessing: true,
   enableLexicalBoosts: true,
   suggestedDefaultCommands: false,
   autonomousAgentEnabledToolIds: [
@@ -795,6 +800,7 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
     activeBackend: "opencode",
     backends: {},
     debugFullFrames: true,
+    offerFeedbackCards: true,
     notificationSound: true,
     notificationSoundId: "piano",
     welcomeDismissed: false,

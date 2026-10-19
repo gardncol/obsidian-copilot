@@ -1,25 +1,29 @@
 import type { AgentChatBackend } from "@/agentMode/session/AgentChatBackend";
 import type {
   AgentChatMessage,
+  TurnFileChange,
   AskUserQuestionPrompt,
   CurrentPlan,
   PermissionPrompt,
 } from "@/agentMode/session/types";
 import AgentChatMessages from "@/agentMode/ui/AgentChatMessages";
+import type { FeedbackOffer } from "@/agentMode/session/feedback/feedbackOffer";
 import { AI_SENDER } from "@/constants";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { openTurnDiff } from "@/agentMode/ui/TurnDiffView";
+import { logError } from "@/logger";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 
 type AgentChatMessagesProps = React.ComponentProps<typeof AgentChatMessages>;
 
 const mockSingleMessageRender = jest.fn();
 const mockTrailRender = jest.fn();
-const mockScrollState = { paused: false, onResume: jest.fn() };
+const mockScrollState = { paused: false, onResume: jest.fn(), containerMinHeight: 0 };
 
 jest.mock("@/hooks/useChatScrolling", () => ({
   // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks the real hook; name must match the export
   useChatScrolling: () => ({
-    containerMinHeight: 0,
+    containerMinHeight: mockScrollState.containerMinHeight,
     scrollContainerCallbackRef: jest.fn(),
     contentCallbackRef: jest.fn(),
     onScroll: jest.fn(),
@@ -51,11 +55,38 @@ jest.mock("@/components/chat-components/ChatSingleMessage", () => ({
 }));
 
 jest.mock("@/agentMode/ui/AgentTrailView", () => ({
-  AgentTrail: ({ timestamp, parts }: { timestamp?: string; parts: unknown[] }) => {
+  AgentTrail: ({
+    timestamp,
+    parts,
+    errorText,
+    fileChanges,
+    onOpenFileChange,
+  }: {
+    timestamp?: string;
+    parts: unknown[];
+    errorText?: string;
+    fileChanges?: TurnFileChange[];
+    onOpenFileChange?: (change: TurnFileChange) => void;
+  }) => {
     mockTrailRender(parts);
-    return <div data-testid="agent-trail-timestamp">{timestamp}</div>;
+    return (
+      <div data-testid="agent-trail-timestamp">
+        {timestamp}
+        {errorText ? <span data-testid="agent-trail-error">{errorText}</span> : null}
+        {fileChanges?.map((change) => (
+          <button key={change.path} type="button" onClick={() => onOpenFileChange?.(change)}>
+            {change.path}
+          </button>
+        ))}
+      </div>
+    );
   },
 }));
+
+jest.mock("@/agentMode/ui/TurnDiffView", () => ({
+  openTurnDiff: jest.fn(() => Promise.resolve()),
+}));
+jest.mock("@/logger", () => ({ ...jest.requireActual("@/logger"), logError: jest.fn() }));
 
 jest.mock("@/agentMode/ui/ToolPermissionCard", () => ({
   ToolPermissionCard: ({ request, toolName }: { request: PermissionPrompt; toolName?: string }) => (
@@ -72,9 +103,29 @@ jest.mock("@/agentMode/ui/AskUserQuestionCard", () => ({
   ),
 }));
 
+const mockOpenReportIssueModal = jest.fn();
+jest.mock("@/agentMode/ui/ReportIssueModal", () => ({
+  openReportIssueModal: (...args: unknown[]) => mockOpenReportIssueModal(...args),
+}));
+
+const mockSetSettings = jest.fn();
+jest.mock("@/settings/model", () => ({
+  ...jest.requireActual<Record<string, unknown>>("@/settings/model"),
+  setSettings: (...args: unknown[]) => mockSetSettings(...args),
+}));
+
 jest.mock("@/agentMode/ui/PlanProposalCard", () => ({
   PlanProposalCard: ({ plan }: { plan: CurrentPlan }) => <div>Plan {plan.id}</div>,
 }));
+
+const FILE_CHANGE: TurnFileChange = {
+  path: "notes/diff-demo/alpha.md",
+  status: "modified",
+  before: "The quick brown fox.\n",
+  after: "The quick red fox.\n",
+  additions: 1,
+  deletions: 1,
+};
 
 function assistantMessage(
   id: string,
@@ -94,7 +145,28 @@ function assistantMessage(
 const chatBackend = {
   resolveToolPermission: jest.fn(),
   resolveAskUserQuestion: jest.fn(),
+  dismissFeedbackOffer: jest.fn(),
+  markFeedbackReported: jest.fn(),
 } as unknown as AgentChatBackend;
+
+const FEEDBACK_OFFER: FeedbackOffer = {
+  draft: {
+    title: "Replied in Swedish to an English request",
+    whatHappened: "The agent answered 'hej'.",
+    userSaid: "Why do you switch languages?",
+    repro: "1. Ask in English.",
+  },
+  evidence: { backendId: "codex", model: "gpt-6.1-sol", sessionId: "s-1", raisedAt: "t" },
+  afterUserMessageId: "user-1",
+  status: "open",
+};
+
+const FEEDBACK_TRANSCRIPT = [
+  assistantMessage("user-1", 1, { sender: "user", message: "why?" }),
+  assistantMessage("reply-1", 2, { message: "Sorry about that." }),
+  assistantMessage("user-2", 3, { sender: "user", message: "next question" }),
+  assistantMessage("reply-2", 4, { message: "Next answer." }),
+];
 
 function permission(id: string): PermissionPrompt {
   return {
@@ -130,12 +202,13 @@ function renderMessages(
 ) {
   const props: AgentChatMessagesProps = {
     messages,
-    app: {} as never,
+    plugin: { app: {} as never, manifest: { version: "4.1.0" } as never },
     currentPlan: null,
     pendingToolPermissions: [],
     pendingAskUserQuestions: [],
     chatBackend,
     isLoading,
+    feedbackOffer: null,
     ...overrides,
   };
   return { ...render(<AgentChatMessages {...props} />), props };
@@ -149,6 +222,7 @@ describe("AgentChatMessages", () => {
       mockSingleMessageRender.mockClear();
       mockTrailRender.mockClear();
       mockScrollState.paused = false;
+      mockScrollState.containerMinHeight = 0;
       mockScrollState.onResume.mockClear();
     });
 
@@ -160,6 +234,88 @@ describe("AgentChatMessages", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "Scroll to end" }));
       expect(mockScrollState.onResume).toHaveBeenCalledTimes(1);
+    });
+
+    it("shows the feedback card right after the reply of the turn that raised it", () => {
+      const { container } = renderMessages(FEEDBACK_TRANSCRIPT, false, {
+        feedbackOffer: FEEDBACK_OFFER,
+      });
+
+      const text = container.textContent ?? "";
+      expect(screen.getByTestId("agent-feedback-card")).toBeTruthy();
+      expect(text.indexOf("Sorry about that.")).toBeLessThan(
+        text.indexOf("Report this to the Copilot team?")
+      );
+      expect(text.indexOf("Report this to the Copilot team?")).toBeLessThan(
+        text.indexOf("next question")
+      );
+    });
+
+    it("keeps the streaming reply's viewport height when the feedback card attaches to it", () => {
+      mockScrollState.containerMinHeight = 480;
+      renderMessages(FEEDBACK_TRANSCRIPT.slice(0, 2), true, { feedbackOffer: FEEDBACK_OFFER });
+
+      const row = screen.getByTestId("agent-feedback-card").closest("[data-message-key]");
+      expect(row?.getAttribute("data-message-key")).toBe("reply-1");
+      expect((row as HTMLElement).style.minHeight).toBe("480px");
+    });
+
+    it("hides a dismissed feedback card", () => {
+      renderMessages(FEEDBACK_TRANSCRIPT, false, {
+        feedbackOffer: { ...FEEDBACK_OFFER, status: "dismissed" },
+      });
+
+      expect(screen.queryByTestId("agent-feedback-card")).toBeNull();
+    });
+
+    it("opens the report dialog prefilled from the card with every source checked, and records the sent report", () => {
+      mockOpenReportIssueModal.mockClear();
+      renderMessages(FEEDBACK_TRANSCRIPT, false, { feedbackOffer: FEEDBACK_OFFER });
+      fireEvent.click(screen.getByRole("button", { name: "Review & report" }));
+
+      expect(mockOpenReportIssueModal).toHaveBeenCalledWith(
+        expect.objectContaining({ manifest: { version: "4.1.0" } }),
+        {
+          activeBackend: "codex",
+          initialNote: expect.stringMatching(/^Replied in Swedish to an English request\n/),
+          preselectAllSources: true,
+          onReported: expect.any(Function),
+        }
+      );
+      const { onReported } = mockOpenReportIssueModal.mock.calls[0][1] as {
+        onReported: (report: { reportId: string; issueUrl: string }) => void;
+      };
+      onReported({ reportId: "r1", issueUrl: "https://example.com" });
+      expect(chatBackend.markFeedbackReported).toHaveBeenCalledWith({
+        reportId: "r1",
+        issueUrl: "https://example.com",
+      });
+    });
+
+    it("dismisses the card without opening the report dialog", () => {
+      mockOpenReportIssueModal.mockClear();
+      renderMessages(FEEDBACK_TRANSCRIPT, false, { feedbackOffer: FEEDBACK_OFFER });
+
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+
+      expect(chatBackend.dismissFeedbackOffer).toHaveBeenCalled();
+      expect(mockOpenReportIssueModal).not.toHaveBeenCalled();
+    });
+
+    it("turns feedback cards off and dismisses this one when the user opts out", () => {
+      mockSetSettings.mockClear();
+      renderMessages(FEEDBACK_TRANSCRIPT, false, { feedbackOffer: FEEDBACK_OFFER });
+
+      fireEvent.click(screen.getByRole("button", { name: "Don't offer again" }));
+
+      const update = mockSetSettings.mock.calls[0][0] as (cur: {
+        agentMode: Record<string, unknown>;
+      }) => { agentMode: Record<string, unknown> };
+      expect(update({ agentMode: { debugFullFrames: true } }).agentMode).toEqual({
+        debugFullFrames: true,
+        offerFeedbackCards: false,
+      });
+      expect(chatBackend.dismissFeedbackOffer).toHaveBeenCalled();
     });
 
     it("forwards the active session conversation path to user messages https://github.com/Brevilabs/obsidian-copilot-private/issues/539", () => {
@@ -223,6 +379,34 @@ describe("AgentChatMessages", () => {
       expect(screen.getByTestId("agent-trail-timestamp").textContent).toBe(timestamp);
     });
 
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/633 hands a failed structured turn's error to its trail, which shows no error text for a message without parts", () => {
+      renderMessages(
+        [
+          assistantMessage("failed-1", 62_000, {
+            message: "**Error:** stream error",
+            isErrorMessage: true,
+            parts: [
+              {
+                kind: "compaction",
+                id: "c1",
+                status: "completed",
+                trigger: "manual",
+                startedAtMs: 0,
+              },
+            ],
+          }),
+          assistantMessage("ok-1", 63_000, {
+            parts: [{ kind: "thought", text: "Fine." }],
+          }),
+        ],
+        false
+      );
+
+      expect(screen.getAllByTestId("agent-trail-error").map((el) => el.textContent)).toEqual([
+        "**Error:** stream error",
+      ]);
+    });
+
     it("keeps completed plain and structured turns mounted without rendering them again while the live turn streams https://github.com/logancyang/obsidian-copilot/issues/3343", () => {
       const user = assistantMessage("user-1", 1_000, {
         sender: "user",
@@ -259,6 +443,49 @@ describe("AgentChatMessages", () => {
       expect(mockTrailRender).toHaveBeenCalledTimes(3);
       expect(mockTrailRender.mock.calls[0][0]).toBe(originalCompletedParts);
       expect(screen.getAllByTestId("agent-trail-timestamp")).toHaveLength(2);
+    });
+
+    it("opens the clicked file's diff against the turn that changed it", () => {
+      const app = {} as never;
+      renderMessages(
+        [
+          assistantMessage("answer-1", 62_000, {
+            parts: [{ kind: "thought", text: "Revise the note." }],
+            turnStopReason: "end_turn",
+            fileChanges: [FILE_CHANGE],
+          }),
+        ],
+        false,
+        { plugin: { app, manifest: { version: "4.1.0" } as never } }
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "notes/diff-demo/alpha.md" }));
+
+      expect(openTurnDiff).toHaveBeenCalledWith(app, FILE_CHANGE, "answer-1");
+    });
+
+    it("logs a diff tab that fails to open instead of leaving the rejection unhandled", async () => {
+      const failure = new Error("leaf detached");
+      jest.mocked(openTurnDiff).mockRejectedValueOnce(failure);
+      renderMessages(
+        [
+          assistantMessage("answer-1", 62_000, {
+            parts: [{ kind: "thought", text: "Revise the note." }],
+            turnStopReason: "end_turn",
+            fileChanges: [FILE_CHANGE],
+          }),
+        ],
+        false
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: FILE_CHANGE.path }));
+
+      await waitFor(() =>
+        expect(logError).toHaveBeenCalledWith(
+          "[AgentChatMessages] failed to open the turn diff",
+          failure
+        )
+      );
     });
 
     it("shows questions before permissions and reveals a permission after questions clear for https://github.com/logancyang/obsidian-copilot/issues/2948", () => {
