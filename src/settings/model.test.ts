@@ -135,6 +135,10 @@ describe("model", () => {
           builtinPreferences: {
             "copilot-web-search": { disabled: true },
             "copilot-web-fetch": { disabled: true },
+            "obsidian-markdown": { disabledAgents: ["claude", "codex"] },
+            "obsidian-bases": { disabledAgents: ["claude"] },
+            "json-canvas": { disabledAgents: ["claude", "codex"] },
+            "obsidian-cli": { disabledAgents: ["claude", "codex"] },
           },
         },
       });
@@ -540,6 +544,21 @@ describe("model", () => {
       expect(sanitized.relevantNotesLiveUpdate).toBe(false);
     });
 
+    it("auto-attaches the active note for settings written before the field existed (https://github.com/logancyang/obsidian-copilot/issues/3663)", () => {
+      const withoutField = { ...DEFAULT_SETTINGS } as unknown as Record<string, unknown>;
+      delete withoutField.autoAttachActiveNote;
+
+      const sanitized = sanitizeSettings(withoutField as unknown as CopilotSettings);
+
+      expect(sanitized.autoAttachActiveNote).toBe(true);
+    });
+
+    it("preserves a persisted choice to stop auto-attaching the active note (https://github.com/logancyang/obsidian-copilot/issues/3663)", () => {
+      const sanitized = sanitizeSettings({ ...DEFAULT_SETTINGS, autoAttachActiveNote: false });
+
+      expect(sanitized.autoAttachActiveNote).toBe(false);
+    });
+
     it("drops a persisted global output cap so it cannot truncate answers again (https://github.com/logancyang/obsidian-copilot-preview/issues/312)", () => {
       const withRetiredCap = {
         ...DEFAULT_SETTINGS,
@@ -819,20 +838,19 @@ describe("model", () => {
       }
     );
 
-    it("drops retired names and malformed entries while preserving sparse overrides for known skills and absent agents https://github.com/logancyang/obsidian-copilot/issues/3022", () => {
+    it("drops retired names, including saved miyo-search and miyo-parse opt-outs, and malformed entries while preserving sparse overrides for known skills and absent agents https://github.com/logancyang/obsidian-copilot/issues/3022 https://github.com/Brevilabs/obsidian-copilot-private/issues/736 https://github.com/Brevilabs/obsidian-copilot-private/issues/740", () => {
       expect(
         sanitizeBuiltinPreferences({
           "copilot-web-search": { disabled: true },
           "copilot-web-fetch": { disabled: false, disabledAgents: ["uninstalled-agent", 3] },
-          "miyo-search": { disabled: true, disabledAgents: [] },
+          "miyo-search": { disabled: true, disabledAgents: ["codex"] },
           "copilot-read-pdf": null,
-          "miyo-parse": [],
+          "miyo-parse": { disabledAgents: ["claude"] },
           "retired-skill": { disabled: true },
         })
       ).toEqual({
         "copilot-web-search": { disabled: true },
         "copilot-web-fetch": { disabledAgents: ["uninstalled-agent"] },
-        "miyo-search": { disabled: true },
       });
     });
   });

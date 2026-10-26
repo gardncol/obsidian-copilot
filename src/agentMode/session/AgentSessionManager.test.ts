@@ -2,7 +2,7 @@ import { FileSystemAdapter, App, Notice, TFile } from "obsidian";
 import { mockTFile } from "@/__tests__/mockObsidian";
 import { join } from "node:path";
 import { waitFor } from "@testing-library/react";
-import { AgentSession } from "./AgentSession";
+import { AgentSession, type AgentTask } from "./AgentSession";
 import { buildNativeChatId } from "@/utils/nativeChatId";
 import { AI_SENDER, CHAT_AGENT_VIEWTYPE, USER_SENDER } from "@/constants";
 import { serializeFanoutComposite } from "@/agentMode/session/fanout/fanoutTypes";
@@ -163,6 +163,10 @@ interface MockSessionTestHandle {
   setStatus(status: MockSessionStatus): void;
   setMessages(messages: { message: string }[], notify?: boolean): void;
   setHasUserVisibleMessages(value: boolean): void;
+  setTaskStatuses(statuses: AgentTask["status"][], kinds?: AgentTask["kind"][]): void;
+  setPendingPermissionCount(count: number): void;
+  setQueuedPromptCount(count: number): void;
+  disconnect(): void;
 }
 
 const sessionTestHandles = new Map<string, MockSessionTestHandle>();
@@ -191,10 +195,15 @@ function makeMockSession(overrides: {
   let needsAttention = false;
   let displayMessages: { message: string }[] = [];
   let hasUserVisibleMessages = false;
+  let tasks: AgentTask[] = [];
+  let pendingPermissions: unknown[] = [];
+  let queuedPrompts: unknown[] = [];
   const listeners = new Set<{
     onMessagesChanged?: () => void;
     onStatusChanged?: (s: typeof status) => void;
     onNeedsAttentionChanged?: (v: boolean) => void;
+    onTasksChanged?: () => void;
+    onDisconnected?: () => void;
   }>();
   const session = {
     internalId: overrides.internalId,
@@ -236,6 +245,9 @@ function makeMockSession(overrides: {
     hasUserVisibleMessages: () => hasUserVisibleMessages,
     getState: () => null,
     getRawSnapshot: () => ({ models: null, modes: null, configOptions: null }),
+    getTasks: () => tasks,
+    getPendingToolPermissions: () => pendingPermissions,
+    getQueuedPrompts: () => queuedPrompts,
     getNeedsAttention: () => needsAttention,
     markNeedsAttention: () => {
       if (needsAttention) return;
@@ -260,6 +272,25 @@ function makeMockSession(overrides: {
     },
     setHasUserVisibleMessages: (value) => {
       hasUserVisibleMessages = value;
+    },
+    setTaskStatuses: (statuses, kinds = []) => {
+      tasks = statuses.map((taskStatus, i) => ({
+        taskId: `task-${i}`,
+        toolCallId: `tool-${i}`,
+        kind: kinds[i] ?? "subagent",
+        description: `Task ${i}`,
+        status: taskStatus,
+      }));
+      for (const l of listeners) l.onTasksChanged?.();
+    },
+    setPendingPermissionCount: (count) => {
+      pendingPermissions = Array.from({ length: count }, (_, i) => ({ id: i }));
+    },
+    setQueuedPromptCount: (count) => {
+      queuedPrompts = Array.from({ length: count }, (_, i) => ({ id: `prompt-${i}` }));
+    },
+    disconnect: () => {
+      for (const l of listeners) l.onDisconnected?.();
     },
   });
   return session;
@@ -387,7 +418,7 @@ interface ManagerOptions {
   persistence?: unknown;
   sessionIndex?: AgentSessionIndex;
   beforeBackendStart?: ManagerDeps["beforeBackendStart"];
-  feedbackServer?: ManagerDeps["feedbackServer"];
+  copilotMcpServer?: ManagerDeps["copilotMcpServer"];
 }
 
 const builtManagers: AgentSessionManager[] = [];
@@ -417,7 +448,7 @@ function buildManager(options: ManagerOptions = {}): AgentSessionManager {
       persistenceManager: options.persistence as ManagerDeps["persistenceManager"],
       sessionIndex: options.sessionIndex,
       beforeBackendStart: options.beforeBackendStart,
-      feedbackServer: options.feedbackServer,
+      copilotMcpServer: options.copilotMcpServer,
     }
   );
   builtManagers.push(manager);
@@ -430,15 +461,14 @@ const FEEDBACK_CHANNEL = Object.freeze({
   headers: Object.freeze({ Authorization: "Bearer t0k3n" }),
 });
 
-function buildFeedbackServer(connect: jest.Mock = jest.fn(async () => FEEDBACK_CHANNEL)) {
-  return { connect, disconnect: jest.fn(), dispose: jest.fn() };
-}
-
-function offerFeedbackCards(enabled: boolean): void {
-  getSettingsMock.mockReturnValue({
-    ...mockDefaultSettings(),
-    agentMode: { ...mockDefaultSettings().agentMode, offerFeedbackCards: enabled },
-  });
+function buildCopilotMcpServer({
+  connect = jest.fn(async () => FEEDBACK_CHANNEL),
+}: { connect?: jest.Mock } = {}) {
+  return {
+    connect,
+    disconnect: jest.fn(),
+    dispose: jest.fn(),
+  };
 }
 
 const FEEDBACK_DRAFT = { title: "t", whatHappened: "w", userSaid: "u", repro: "r" };
@@ -475,6 +505,28 @@ async function createActiveAndBackgroundSessions(
   const background = await mgr.createSession();
   mgr.setActiveSession(active.internalId);
   return { active, background };
+}
+
+function untilClosed(mgr: AgentSessionManager, session: AgentSession): Promise<void> {
+  return new Promise((resolve) => {
+    const unsubscribe = mgr.subscribe(() => {
+      if (mgr.getSessions().includes(session)) return;
+      unsubscribe();
+      resolve();
+    });
+  });
+}
+
+function closedSessions(): unknown[] {
+  return mockSessionCancel.mock.contexts;
+}
+
+async function hideChats(mgr: AgentSessionManager, count: number): Promise<AgentSession[]> {
+  const chats: AgentSession[] = [];
+  for (let i = 0; i < count; i++) chats.push(await mgr.createSession());
+  await mgr.createSession();
+  for (const chat of chats) mgr.detachSessionFromTab(chat.internalId);
+  return chats;
 }
 
 async function enterWithConversation(
@@ -580,7 +632,7 @@ function senderAndText(session: AgentSession): [string, string][] {
 function buildManagerWithReplay(
   backendOverrides: Record<string, unknown> = {},
   descriptorOverrides: Partial<BackendDescriptor> = {},
-  feedbackServer?: ManagerDeps["feedbackServer"]
+  copilotMcpServer?: ManagerDeps["copilotMcpServer"]
 ): AgentSessionManager {
   const backend = {
     ...makeMockBackendProcess(),
@@ -592,7 +644,7 @@ function buildManagerWithReplay(
   };
   return buildManager({
     descriptor: buildDescriptor({ createBackendProcess: () => backend, ...descriptorOverrides }),
-    feedbackServer,
+    copilotMcpServer,
   });
 }
 
@@ -911,77 +963,48 @@ describe("AgentSessionManager", () => {
         expect(mgr.getChatUIState(session.internalId)).toBe(mgr.getActiveChatUIState());
       });
 
-      it("attaches the feedback MCP server to a new session and routes its cards to that session", async () => {
-        offerFeedbackCards(true);
-        const feedbackServer = buildFeedbackServer();
-        const mgr = buildManager({ feedbackServer });
+      it("attaches the Copilot MCP server to a new session and routes its cards to that session", async () => {
+        const copilotMcpServer = buildCopilotMcpServer();
+        const mgr = buildManager({ copilotMcpServer });
 
         const session = await mgr.createSession();
 
-        expect(feedbackServer.connect).toHaveBeenCalledWith(
+        expect(copilotMcpServer.connect).toHaveBeenCalledWith(
           session.internalId,
           expect.any(Function)
         );
         expect(sessionCreateSpy).toHaveBeenLastCalledWith(
           expect.objectContaining({ mcpServers: [FEEDBACK_CHANNEL] })
         );
-        const onOffer = feedbackServer.connect.mock.calls[0][1] as (draft: unknown) => string;
+        const onOffer = copilotMcpServer.connect.mock.calls[0][1] as (draft: unknown) => string;
         expect(onOffer(FEEDBACK_DRAFT)).toBe("shown");
         expect(session.offerFeedback).toHaveBeenCalledWith(FEEDBACK_DRAFT);
       });
 
-      it("starts a session without the feedback server while feedback cards are turned off", async () => {
-        offerFeedbackCards(false);
-        const feedbackServer = buildFeedbackServer();
-        const mgr = buildManager({ feedbackServer });
-
-        await mgr.createSession();
-
-        expect(feedbackServer.connect).not.toHaveBeenCalled();
-        expect(sessionCreateSpy).toHaveBeenLastCalledWith(
-          expect.objectContaining({ mcpServers: [] })
-        );
-      });
-
-      it("tells the agent feedback is turned off when the user opts out after the session started", async () => {
-        offerFeedbackCards(true);
-        const feedbackServer = buildFeedbackServer();
-        const mgr = buildManager({ feedbackServer });
-        const session = await mgr.createSession();
-        const onOffer = feedbackServer.connect.mock.calls[0][1] as (draft: unknown) => string;
-
-        offerFeedbackCards(false);
-
-        expect(onOffer(FEEDBACK_DRAFT)).toBe("turned_off");
-        expect(session.offerFeedback).not.toHaveBeenCalled();
-      });
-
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/672 gives a folder's chats one feedback key when the agent shares MCP servers across sessions", async () => {
-        offerFeedbackCards(true);
-        const feedbackServer = buildFeedbackServer();
+        const copilotMcpServer = buildCopilotMcpServer();
         const mgr = buildManager({
-          feedbackServer,
+          copilotMcpServer,
           descriptor: buildDescriptor({ sharesMcpServersAcrossSessions: true }),
         });
 
         const a = await mgr.createSession();
         const b = await mgr.createSession();
 
-        const keys = feedbackServer.connect.mock.calls.map(([key]) => key);
+        const keys = copilotMcpServer.connect.mock.calls.map(([key]) => key);
         expect(keys).toEqual([`opencode:${a.cwd}`, `opencode:${b.cwd}`]);
         expect(keys[0]).toBe(keys[1]);
       });
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/672 shows a shared connection's card in the chat whose backend session the agent stamped on the call", async () => {
-        offerFeedbackCards(true);
-        const feedbackServer = buildFeedbackServer();
+        const copilotMcpServer = buildCopilotMcpServer();
         const mgr = buildManager({
-          feedbackServer,
+          copilotMcpServer,
           descriptor: buildDescriptor({ sharesMcpServersAcrossSessions: true }),
         });
         const caller = await mgr.createSession();
         const newest = await mgr.createSession();
-        const onOffer = feedbackServer.connect.mock.calls[1][1] as (
+        const onOffer = copilotMcpServer.connect.mock.calls[1][1] as (
           draft: unknown,
           callerSessionId: string | null
         ) => string;
@@ -997,14 +1020,13 @@ describe("AgentSessionManager", () => {
       ])(
         "https://github.com/Brevilabs/obsidian-copilot-private/issues/672 shows no card when a shared connection's call %s",
         async (_label, callerSessionId) => {
-          offerFeedbackCards(true);
-          const feedbackServer = buildFeedbackServer();
+          const copilotMcpServer = buildCopilotMcpServer();
           const mgr = buildManager({
-            feedbackServer,
+            copilotMcpServer,
             descriptor: buildDescriptor({ sharesMcpServersAcrossSessions: true }),
           });
           const session = await mgr.createSession();
-          const onOffer = feedbackServer.connect.mock.calls[0][1] as (
+          const onOffer = copilotMcpServer.connect.mock.calls[0][1] as (
             draft: unknown,
             callerSessionId: string | null
           ) => string;
@@ -1015,13 +1037,12 @@ describe("AgentSessionManager", () => {
       );
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/672 still starts the chat when the feedback server cannot start", async () => {
-        offerFeedbackCards(true);
-        const feedbackServer = buildFeedbackServer(
-          jest.fn(async () => {
+        const copilotMcpServer = buildCopilotMcpServer({
+          connect: jest.fn(async () => {
             throw new Error("EADDRINUSE");
-          })
-        );
-        const mgr = buildManager({ feedbackServer });
+          }),
+        });
+        const mgr = buildManager({ copilotMcpServer });
 
         const session = await mgr.createSession();
 
@@ -1123,7 +1144,7 @@ describe("AgentSessionManager", () => {
         await mgr.createSession();
         (descriptor.getInstallState as jest.Mock).mockReturnValue({
           kind: "incompatible",
-          message: "Upgrade required",
+          message: "Update required",
         });
         await expect(mgr.createSession()).resolves.toBeDefined();
         expect(mockBackendStart).toHaveBeenCalledTimes(1);
@@ -1132,10 +1153,10 @@ describe("AgentSessionManager", () => {
       it("rejects an unsupported installation before starting its process (https://github.com/Brevilabs/obsidian-copilot-private/issues/531)", async () => {
         const mgr = buildManager({
           descriptor: buildDescriptor({
-            getInstallState: jest.fn(() => ({ kind: "incompatible", message: "Upgrade required" })),
+            getInstallState: jest.fn(() => ({ kind: "incompatible", message: "Update required" })),
           }),
         });
-        await expect(mgr.createSession()).rejects.toThrow("Upgrade required");
+        await expect(mgr.createSession()).rejects.toThrow("Update required");
         expect(mockBackendStart).not.toHaveBeenCalled();
       });
 
@@ -1573,14 +1594,13 @@ describe("AgentSessionManager", () => {
       });
 
       it("revokes the closed session's feedback server token", async () => {
-        offerFeedbackCards(true);
-        const feedbackServer = buildFeedbackServer();
-        const mgr = buildManager({ feedbackServer });
+        const copilotMcpServer = buildCopilotMcpServer();
+        const mgr = buildManager({ copilotMcpServer });
         const a = await mgr.createSession();
 
         await mgr.closeSession(a.internalId);
 
-        expect(feedbackServer.disconnect).toHaveBeenCalledWith(a.internalId);
+        expect(copilotMcpServer.disconnect).toHaveBeenCalledWith(a.internalId);
       });
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/672 releases the dropped chat's backend session, so reopening it from history starts one with a live feedback token", async () => {
@@ -1591,6 +1611,27 @@ describe("AgentSessionManager", () => {
         await mgr.closeSession(a.internalId);
 
         expect(proc.closeSession).toHaveBeenCalledWith({ sessionId: a.getBackendSessionId() });
+      });
+
+      it("runs a held Reload once the idle chat whose subagent held it is closed, since nothing on that chat can change status again (https://github.com/Brevilabs/obsidian-copilot-private/issues/175)", async () => {
+        const mgr = buildManager();
+        const a = await mgr.createSession();
+        getSessionTestHandle(a).setTaskStatuses(["running"]);
+        await mgr.noteSpawnConfigChanged("opencode", "skills changed");
+        await mgr.applyHeldConfigChange("opencode");
+        expect(mockBackendShutdown).not.toHaveBeenCalled();
+
+        const shutDown = new Promise<void>((resolve) =>
+          mockBackendShutdown.mockImplementationOnce(async () => {
+            resolve();
+            return undefined;
+          })
+        );
+        await mgr.closeSession(a.internalId, { releaseBackend: true });
+        await shutDown;
+
+        expect(mgr.hasHeldConfigChange("opencode")).toBe(false);
+        expect(mockBackendShutdown).toHaveBeenCalledTimes(1);
       });
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/672 still closes the chat when the backend cannot release its session", async () => {
@@ -1606,10 +1647,9 @@ describe("AgentSessionManager", () => {
       });
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/672 keeps a folder's shared feedback key when one of its chats closes", async () => {
-        offerFeedbackCards(true);
-        const feedbackServer = buildFeedbackServer();
+        const copilotMcpServer = buildCopilotMcpServer();
         const mgr = buildManager({
-          feedbackServer,
+          copilotMcpServer,
           descriptor: buildDescriptor({ sharesMcpServersAcrossSessions: true }),
         });
         await mgr.createSession();
@@ -1617,8 +1657,8 @@ describe("AgentSessionManager", () => {
 
         await mgr.closeSession(newest.internalId);
 
-        expect(feedbackServer.disconnect).not.toHaveBeenCalledWith(
-          feedbackServer.connect.mock.calls[0][0]
+        expect(copilotMcpServer.disconnect).not.toHaveBeenCalledWith(
+          copilotMcpServer.connect.mock.calls[0][0]
         );
       });
 
@@ -1797,7 +1837,7 @@ describe("AgentSessionManager", () => {
         expect(mgr.getSessions()).toEqual([thirdReplacement]);
       });
 
-      it("updates the manually saved file and drains later turns on New Chat with autosave off for https://github.com/logancyang/obsidian-copilot/issues/3225", async () => {
+      it("updates the manually saved file and drains later turns on New chat with autosave off for https://github.com/logancyang/obsidian-copilot/issues/3225", async () => {
         const { mgr, saveSession } = savedNoteFixture();
         const session = await mgr.createSession();
         const handle = getSessionTestHandle(session);
@@ -1861,12 +1901,12 @@ describe("AgentSessionManager", () => {
       });
 
       it("closes the feedback server", async () => {
-        const feedbackServer = buildFeedbackServer();
-        const mgr = buildManager({ feedbackServer });
+        const copilotMcpServer = buildCopilotMcpServer();
+        const mgr = buildManager({ copilotMcpServer });
 
         await mgr.shutdown();
 
-        expect(feedbackServer.dispose).toHaveBeenCalledTimes(1);
+        expect(copilotMcpServer.dispose).toHaveBeenCalledTimes(1);
       });
     });
 
@@ -1882,7 +1922,7 @@ describe("AgentSessionManager", () => {
 
         expect(mgr.getSessions()).toEqual([]);
         expect(mgr.getActiveSession()).toBeNull();
-        expect(mgr.getLastError()).toMatch(/exited unexpectedly/);
+        expect(mgr.getLastError()).toMatch(/stopped unexpectedly/);
         expect(listener).toHaveBeenCalled();
       });
     });
@@ -1917,6 +1957,87 @@ describe("AgentSessionManager", () => {
         expect(proc.closeSession).not.toHaveBeenCalled();
         expect(mockSessionCancel).not.toHaveBeenCalled();
         expect(mockSessionDispose).not.toHaveBeenCalled();
+      });
+
+      it("closes the least recently hidden idle chat once a fourth chat of a process-per-chat backend is hidden, keeping the other three for https://github.com/Brevilabs/obsidian-copilot-private/issues/175", async () => {
+        const mgr = buildManager({ descriptor: buildDescriptor({ processPerChat: true }) });
+        const chats = await hideChats(mgr, 3);
+        expect(closedSessions()).toEqual([]);
+        const fourth = await mgr.createSession();
+        const closed = untilClosed(mgr, chats[0]);
+
+        mgr.detachSessionFromTab(fourth.internalId);
+        await closed;
+
+        expect(closedSessions()).toEqual([chats[0]]);
+        expect(mgr.getBackendProcess(chats[0].backendId)!.closeSession).toHaveBeenCalledWith({
+          sessionId: chats[0].getBackendSessionId(),
+        });
+        expect(mgr.getSessions()).toEqual(expect.arrayContaining([...chats.slice(1), fourth]));
+      });
+
+      it.each([
+        ["runs its main turn", (s: AgentSession) => getSessionTestHandle(s).setStatus("running")],
+        [
+          "waits on the user's answer",
+          (s: AgentSession) => getSessionTestHandle(s).setStatus("awaiting_permission"),
+        ],
+        [
+          "runs a background task",
+          (s: AgentSession) => getSessionTestHandle(s).setTaskStatuses(["completed", "running"]),
+        ],
+        [
+          "holds a task's permission request",
+          (s: AgentSession) => getSessionTestHandle(s).setPendingPermissionCount(1),
+        ],
+        [
+          "holds a sent message the agent has not taken yet",
+          (s: AgentSession) => getSessionTestHandle(s).setQueuedPromptCount(1),
+        ],
+        ["has a result the user has not seen", (s: AgentSession) => s.markNeedsAttention()],
+        [
+          "holds unsent text in its composer",
+          (s: AgentSession, mgr: AgentSessionManager) =>
+            mgr.drafts.update(s.chatInputId, (draft) => ({ ...draft, input: "half-written" })),
+        ],
+      ])(
+        "keeps the oldest hidden chat while it %s and closes the next idle one for https://github.com/Brevilabs/obsidian-copilot-private/issues/175",
+        async (_label, occupy) => {
+          const mgr = buildManager({ descriptor: buildDescriptor({ processPerChat: true }) });
+          const first = await mgr.createSession();
+          occupy(first, mgr);
+          mgr.detachSessionFromTab(first.internalId);
+
+          const rest = await hideChats(mgr, 3);
+
+          expect(closedSessions()).toEqual([rest[0]]);
+          expect(mgr.getSessions()).toContain(first);
+        }
+      );
+
+      it("lets hidden chats exceed the cap while every one of them is busy for https://github.com/Brevilabs/obsidian-copilot-private/issues/175", async () => {
+        const mgr = buildManager({ descriptor: buildDescriptor({ processPerChat: true }) });
+        const chats = [];
+        for (let i = 0; i < 4; i++) {
+          const chat = await mgr.createSession();
+          getSessionTestHandle(chat).setStatus("running");
+          chats.push(chat);
+        }
+        await mgr.createSession();
+
+        for (const chat of chats) mgr.detachSessionFromTab(chat.internalId);
+
+        expect(closedSessions()).toEqual([]);
+        expect(mgr.getSessions()).toEqual(expect.arrayContaining(chats));
+      });
+
+      it("never closes hidden chats of a backend that shares one process across its chats for https://github.com/Brevilabs/obsidian-copilot-private/issues/175", async () => {
+        const mgr = buildManager();
+
+        const chats = await hideChats(mgr, 5);
+
+        expect(closedSessions()).toEqual([]);
+        expect(mgr.getSessions()).toEqual(expect.arrayContaining(chats));
       });
     });
 
@@ -1959,6 +2080,19 @@ describe("AgentSessionManager", () => {
         expect(mgr.getSessions()).toEqual([sibling]);
         expect(mgr.getActiveSession()).toBe(sibling);
         expect(proc.shutdown).not.toHaveBeenCalled();
+      });
+
+      it("releases a hidden chat's backend session while its task runs, so its query and tasks end, for https://github.com/Brevilabs/obsidian-copilot-private/issues/175", async () => {
+        const mgr = buildManager();
+        const [hidden] = await hideChats(mgr, 1);
+        getSessionTestHandle(hidden).setTaskStatuses(["running"]);
+        const proc = mgr.getBackendProcess(hidden.backendId)!;
+
+        await mgr.closeChatSession(nativeIdOf(hidden));
+
+        expect(proc.closeSession).toHaveBeenCalledWith({ sessionId: hidden.getBackendSessionId() });
+        expect(mgr.getSessions()).not.toContain(hidden);
+        expect(mgr.getRunningChatIds().size).toBe(0);
       });
     });
 
@@ -2029,6 +2163,32 @@ describe("AgentSessionManager", () => {
         listener.mockClear();
         getSessionTestHandle(a).setStatus("idle");
         expect(listener).toHaveBeenCalledTimes(1);
+      });
+
+      it("lists a chat whose main turn is idle while one of its tasks runs, until the task ends, for https://github.com/Brevilabs/obsidian-copilot-private/issues/175", async () => {
+        const mgr = buildManager();
+        const chats = await hideChats(mgr, 1);
+        const nativeId = nativeIdOf(chats[0]);
+
+        getSessionTestHandle(chats[0]).setTaskStatuses(["running", "completed"]);
+        expect(mgr.getRunningChatIds().has(nativeId)).toBe(true);
+
+        getSessionTestHandle(chats[0]).setTaskStatuses(["completed", "stopped"]);
+        expect(mgr.getRunningChatIds().has(nativeId)).toBe(false);
+      });
+
+      it("notifies subscribers when a chat's first task starts and its last running task ends, not on other task updates, for https://github.com/Brevilabs/obsidian-copilot-private/issues/175", async () => {
+        const mgr = buildManager();
+        const a = await mgr.createSession();
+        const listener = jest.fn();
+        mgr.subscribe(listener);
+
+        getSessionTestHandle(a).setTaskStatuses(["running"]);
+        getSessionTestHandle(a).setTaskStatuses(["running", "running"]);
+        expect(listener).toHaveBeenCalledTimes(1);
+        getSessionTestHandle(a).setTaskStatuses(["completed", "running"]);
+        getSessionTestHandle(a).setTaskStatuses(["completed", "completed"]);
+        expect(listener).toHaveBeenCalledTimes(2);
       });
 
       it("keeps a session detached from its tab listed as running so history shows its spinner", async () => {
@@ -2638,13 +2798,12 @@ describe("AgentSessionManager", () => {
         expect(mgr.getSessions()).toHaveLength(1);
       });
 
-      it("re-attaches the feedback MCP server when it reloads the replaced tab", async () => {
-        offerFeedbackCards(true);
+      it("re-attaches the Copilot MCP server when it reloads the replaced tab", async () => {
         const loadSession = jest.fn(async ({ sessionId }: { sessionId: string }) => ({
           sessionId,
           state: { model: null, mode: null },
         }));
-        const mgr = buildManagerWithReplay({ loadSession }, {}, buildFeedbackServer());
+        const mgr = buildManagerWithReplay({ loadSession }, {}, buildCopilotMcpServer());
         await mgr.createSession();
 
         await mgr.restartBackend("opencode", "managed skills changed");
@@ -2655,8 +2814,7 @@ describe("AgentSessionManager", () => {
       });
 
       it("revokes the feedback token it handed a replaced tab that fails to reload", async () => {
-        offerFeedbackCards(true);
-        const feedbackServer = buildFeedbackServer();
+        const copilotMcpServer = buildCopilotMcpServer();
         const mgr = buildManagerWithReplay(
           {
             loadSession: jest.fn(async () => {
@@ -2664,14 +2822,14 @@ describe("AgentSessionManager", () => {
             }),
           },
           {},
-          feedbackServer
+          copilotMcpServer
         );
         await mgr.createSession();
 
         await mgr.restartBackend("opencode", "managed skills changed");
 
-        const reloadKey = feedbackServer.connect.mock.calls[1][0];
-        expect(feedbackServer.disconnect).toHaveBeenCalledWith(reloadKey);
+        const reloadKey = copilotMcpServer.connect.mock.calls[1][0];
+        expect(copilotMcpServer.disconnect).toHaveBeenCalledWith(reloadKey);
       });
 
       it("rebuilds the replaced tab with the tool calls its backend replays during load (https://github.com/Brevilabs/obsidian-copilot-private/issues/643)", async () => {
@@ -2702,6 +2860,200 @@ describe("AgentSessionManager", () => {
         expect(mgr.getActiveSession()!.store.getDisplayMessages()[1].parts).toMatchObject([
           { kind: "tool_call", id: "tool-ls", status: "completed" },
         ]);
+      });
+
+      describe("with a saved note", () => {
+        const asked = { epoch: 1791866733161, display: "2026/10/12 21:45:33", fileName: "" };
+        const answered = { epoch: 1791866740000, display: "2026/10/12 21:45:40", fileName: "" };
+        const noteTurns = [
+          { sender: USER_SENDER, message: "list the notes", isVisible: true, timestamp: asked },
+          { sender: AI_SENDER, message: "Two notes.", isVisible: true, timestamp: answered },
+        ] as AgentChatMessage[];
+
+        async function restartSavedChat(
+          replay: ReturnType<typeof buildReplayingBackend>,
+          opts: { onScreen?: AgentChatMessage[]; failed?: boolean; saveFirst?: boolean } = {}
+        ) {
+          jest.useFakeTimers();
+          getSettingsMock.mockReturnValue({ ...getSettingsMock(), autosaveChat: true });
+          const note = mockTFile({ path: "chats/agent__list_the_notes@20261012_214533.md" });
+          const app = buildApp();
+          jest
+            .mocked(app.vault.getAbstractFileByPath)
+            .mockImplementation((path) => (path === note.path ? note : null));
+          const saveSession = jest.fn(async () => ({ path: note.path }));
+          const mgr = buildManager({
+            app,
+            persistence: {
+              saveSession,
+              loadFile: jest.fn(async () => ({
+                backendId: "opencode",
+                sessionId: first.getBackendSessionId(),
+                projectId: GLOBAL_SCOPE,
+                messages: noteTurns,
+              })),
+            },
+            descriptor: buildDescriptor({ createBackendProcess: () => replay.backend }),
+          });
+          const first = await mgr.createSession();
+          getSessionTestHandle(first).setMessages(opts.onScreen ?? noteTurns, true);
+          if (opts.failed) getSessionTestHandle(first).setStatus("error");
+          if (opts.saveFirst ?? true) await jest.advanceTimersByTimeAsync(2000);
+
+          await mgr.restartBackend("opencode", "managed skills changed");
+          return { mgr, first, note, saveSession, rebuilt: mgr.getActiveSession()! };
+        }
+
+        it("reopens the chat from its note, so the next autosave rewrites that note with the note's timestamps instead of writing a duplicate (https://github.com/Brevilabs/obsidian-copilot-private/issues/742)", async () => {
+          const replay = buildReplayingBackend({
+            onLoad: (emit) => {
+              emit(replayChunk("user_message_chunk", "list the notes", "u1"));
+              emit(replayChunk("agent_message_chunk", "Two notes.", "a1"));
+            },
+          });
+          const { mgr, first, note, saveSession } = await restartSavedChat(replay);
+
+          replay.emit(
+            first.getBackendSessionId()!,
+            replayChunk("agent_message_chunk", " Both are drafts.", "a1")
+          );
+          await jest.advanceTimersByTimeAsync(2000);
+
+          const [messages, , options] = saveSession.mock.calls.at(-1)! as unknown as [
+            AgentChatMessage[],
+            string,
+            { existingPath?: string },
+          ];
+          expect(options.existingPath).toBe(note.path);
+          expect(messages.map((m) => m.timestamp)).toEqual([asked, answered]);
+          await mgr.shutdown();
+        });
+
+        it("keeps saving to the note that a pending autosave creates when the restart runs right after the chat's first reply (https://github.com/Brevilabs/obsidian-copilot-private/issues/742)", async () => {
+          const { mgr, note, rebuilt, saveSession } = await restartSavedChat(
+            buildReplayingBackend(),
+            { saveFirst: false }
+          );
+
+          expect(saveSession).toHaveBeenCalledTimes(1);
+          expect(mgr.getSessionSourcePath(rebuilt.internalId)).toBe(note.path);
+          await mgr.shutdown();
+        });
+
+        it("still shows a failed turn and its error after the restart while keeping the note (https://github.com/Brevilabs/obsidian-copilot-private/issues/742)", async () => {
+          const failedTurn = [
+            {
+              sender: USER_SENDER,
+              message: "Summarize this note",
+              isVisible: true,
+              timestamp: asked,
+            },
+            {
+              sender: AI_SENDER,
+              message: "OpenCode's internal service stopped. Please try again.",
+              isVisible: true,
+              isErrorMessage: true,
+              timestamp: answered,
+            },
+          ] as AgentChatMessage[];
+          const replay = buildReplayingBackend({
+            onLoad: (emit) => {
+              emit(replayChunk("user_message_chunk", "list the notes", "u1"));
+              emit(replayChunk("agent_message_chunk", "Two notes.", "a1"));
+            },
+          });
+          const { mgr, note, rebuilt } = await restartSavedChat(replay, {
+            onScreen: [...noteTurns, ...failedTurn],
+            failed: true,
+          });
+
+          expect(rebuilt.store.getDisplayMessages().map((m) => m.message)).toEqual([
+            "list the notes",
+            "Two notes.",
+            "Summarize this note",
+            "OpenCode's internal service stopped. Please try again.",
+          ]);
+          expect(mgr.getSessionSourcePath(rebuilt.internalId)).toBe(note.path);
+          await mgr.shutdown();
+        });
+
+        it("shows the note's turns when the agent replays fewer turns than the note holds (https://github.com/Brevilabs/obsidian-copilot-private/issues/742)", async () => {
+          const replay = buildReplayingBackend();
+          const { mgr, rebuilt } = await restartSavedChat(replay);
+
+          expect(senderAndText(rebuilt)).toEqual([
+            [USER_SENDER, "list the notes"],
+            [AI_SENDER, "Two notes."],
+          ]);
+          await mgr.shutdown();
+        });
+
+        it("keeps the note and sends its turns to a fresh session when the agent cannot resume the chat (https://github.com/Brevilabs/obsidian-copilot-private/issues/742)", async () => {
+          const replay = buildReplayingBackend({
+            loadSession: jest.fn(async () => {
+              throw new MethodUnsupportedError("session/load");
+            }),
+            resumeSession: jest.fn(async () => {
+              throw new MethodUnsupportedError("session/resume");
+            }),
+          });
+          const { mgr, first, note, rebuilt } = await restartSavedChat(replay);
+
+          expect(rebuilt.getBackendSessionId()).not.toBe(first.getBackendSessionId());
+          expect(rebuilt.loadDisplayMessages).toHaveBeenCalledWith(noteTurns);
+          expect(rebuilt.resendSavedHistoryOnNextTurn).toHaveBeenCalled();
+          expect(mgr.getSessionSourcePath(rebuilt.internalId)).toBe(note.path);
+          await mgr.shutdown();
+        });
+
+        it("rebuilds every tab when one chat's note cannot be read, leaving that chat unbound from its note (https://github.com/Brevilabs/obsidian-copilot-private/issues/742)", async () => {
+          jest.useFakeTimers();
+          getSettingsMock.mockReturnValue({ ...getSettingsMock(), autosaveChat: true });
+          const broken = mockTFile({ path: "chats/agent__broken@20261012_214533.md" });
+          const healthy = mockTFile({ path: "chats/agent__healthy@20261012_214540.md" });
+          const app = buildApp();
+          jest
+            .mocked(app.vault.getAbstractFileByPath)
+            .mockImplementation((path) => [broken, healthy].find((f) => f.path === path) ?? null);
+          const mgr = buildManager({
+            app,
+            persistence: {
+              saveSession: jest.fn(async (messages: AgentChatMessage[]) => ({
+                path: messages[0].message === "broken" ? broken.path : healthy.path,
+              })),
+              loadFile: jest.fn(async (file: TFile) => {
+                if (file === broken) throw new Error("Missing backendId in agent chat frontmatter");
+                return {
+                  backendId: "opencode",
+                  sessionId: undefined,
+                  projectId: GLOBAL_SCOPE,
+                  messages: noteTurns,
+                };
+              }),
+            },
+            descriptor: buildDescriptor({
+              createBackendProcess: () => buildReplayingBackend().backend,
+            }),
+          });
+          for (const text of ["broken", "healthy"]) {
+            const chat = await mgr.createSession();
+            getSessionTestHandle(chat).setMessages(
+              [
+                { sender: USER_SENDER, message: text, isVisible: true, timestamp: asked },
+              ] as AgentChatMessage[],
+              true
+            );
+          }
+          await jest.advanceTimersByTimeAsync(2000);
+
+          await mgr.restartBackend("opencode", "managed skills changed");
+
+          const [first, second] = mgr.getSessions();
+          expect(mgr.getSessions()).toHaveLength(2);
+          expect(mgr.getSessionSourcePath(first.internalId)).toBe("");
+          expect(mgr.getSessionSourcePath(second.internalId)).toBe(healthy.path);
+          await mgr.shutdown();
+        });
       });
 
       it("keeps the replaced tab's title across the restart (https://github.com/Brevilabs/obsidian-copilot-private/issues/475)", async () => {
@@ -2749,6 +3101,64 @@ describe("AgentSessionManager", () => {
         expect(mockBackendShutdown).toHaveBeenCalledTimes(1);
         expect(mgr.getActiveSession()).not.toBe(first);
         expect(mgr.getActiveSession()?.backendId).toBe("opencode");
+      });
+
+      it("restarts at once while only a background command runs, since a command may never end (https://github.com/Brevilabs/obsidian-copilot-private/issues/175)", async () => {
+        const mgr = buildManager();
+        const first = await mgr.createSession();
+        getSessionTestHandle(first).setTaskStatuses(["running"], ["command"]);
+
+        await mgr.restartBackend("opencode", "skills changed");
+
+        expect(mockBackendShutdown).toHaveBeenCalledTimes(1);
+      });
+
+      it("holds a Reload while a background subagent runs and restarts after the reply the agent starts once it ends, even with a background command still running (https://github.com/Brevilabs/obsidian-copilot-private/issues/175)", async () => {
+        const mgr = buildManager();
+        const first = await mgr.createSession();
+        const handle = getSessionTestHandle(first);
+        handle.setTaskStatuses(["running", "running"], ["subagent", "command"]);
+        await mgr.noteSpawnConfigChanged("opencode", "skills changed");
+
+        await mgr.applyHeldConfigChange("opencode");
+        handle.setTaskStatuses(["completed", "running"], ["subagent", "command"]);
+        handle.setStatus("running");
+        expect(mgr.hasHeldConfigChange("opencode")).toBe(true);
+
+        const shutDown = new Promise<void>((resolve) =>
+          mockBackendShutdown.mockImplementationOnce(async () => {
+            resolve();
+            return undefined;
+          })
+        );
+        handle.setStatus("idle");
+        await shutDown;
+
+        expect(mgr.hasHeldConfigChange("opencode")).toBe(false);
+        expect(mockBackendShutdown).toHaveBeenCalledTimes(1);
+      });
+
+      it("runs a held Reload once an idle chat's connection drops while its subagent runs, since no reply about the subagent can follow (https://github.com/Brevilabs/obsidian-copilot-private/issues/175)", async () => {
+        const mgr = buildManager();
+        const first = await mgr.createSession();
+        const handle = getSessionTestHandle(first);
+        handle.setTaskStatuses(["running"]);
+        await mgr.noteSpawnConfigChanged("opencode", "skills changed");
+        await mgr.applyHeldConfigChange("opencode");
+        expect(mockBackendShutdown).not.toHaveBeenCalled();
+
+        const shutDown = new Promise<void>((resolve) =>
+          mockBackendShutdown.mockImplementationOnce(async () => {
+            resolve();
+            return undefined;
+          })
+        );
+        handle.setTaskStatuses(["stopped"]);
+        handle.disconnect();
+        await shutDown;
+
+        expect(mgr.hasHeldConfigChange("opencode")).toBe(false);
+        expect(mockBackendShutdown).toHaveBeenCalledTimes(1);
       });
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/121 interrupts a busy turn when a privacy-boundary restart cannot be deferred", async () => {
@@ -4774,7 +5184,7 @@ describe("AgentSessionManager", () => {
             source: "custom",
             currentVersion: "1",
             minVersion: "2",
-            message: "Upgrade required",
+            message: "Update required",
           },
           createBackendProcess,
         });
@@ -4783,7 +5193,7 @@ describe("AgentSessionManager", () => {
         ).rejects.toThrow("Could not resume");
         expect(createBackendProcess).not.toHaveBeenCalled();
         expect(manager.getActiveSession()).toBeNull();
-        expect(manager.getLastError()).toContain("Upgrade required");
+        expect(manager.getLastError()).toContain("Update required");
       });
 
       it("applies persisted backend config and mode before returning a resumed session", async () => {
@@ -4962,6 +5372,17 @@ describe("AgentSessionManager", () => {
       }
 
       beforeEach(() => seedProjects(PROJECT_ID));
+
+      it("closes the project's least recently hidden idle chat once entering it hides a fourth chat of a process-per-chat backend for https://github.com/Brevilabs/obsidian-copilot-private/issues/175", async () => {
+        const mgr = buildManager({ descriptor: buildDescriptor({ processPerChat: true }) });
+        const chats = [];
+        for (let i = 0; i < 4; i++) chats.push(await enterWithConversation(mgr, PROJECT_ID));
+        expect(closedSessions()).toEqual([]);
+
+        await mgr.enterProject(PROJECT_ID);
+
+        expect(closedSessions()).toEqual([chats[0]]);
+      });
 
       it("touches last-used after a successful enter that spawns a session", async () => {
         const mgr = buildManager();

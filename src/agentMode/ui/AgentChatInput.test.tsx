@@ -3,6 +3,7 @@ import { EMPTY_AGENT_MENTION_BRANDS } from "@/components/chat-components/hooks/u
 import { AgentChatInput } from "@/agentMode/ui/AgentChatInput";
 import type { AgentChatBackend } from "@/agentMode/session/AgentChatBackend";
 import { AgentInputDraftStore } from "@/agentMode/session/AgentInputDraftStore";
+import type { QueuedPrompt } from "@/agentMode/session/types";
 import type { AgentInputDraftControls } from "@/agentMode/ui/hooks/useAgentInputDrafts";
 import { useAgentInputDrafts } from "@/agentMode/ui/hooks/useAgentInputDrafts";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -40,9 +41,10 @@ jest.mock("@/components/chat-components/ChatInput", () => ({
       props: {
         setInputMessage: React.Dispatch<React.SetStateAction<string>>;
         agentBrands?: ReadonlyArray<unknown>;
-        handleSendMessage?: () => void;
+        handleSendMessage?: (meta?: { interrupt?: boolean }) => void;
         onStopGenerating?: () => void;
         isGenerating?: boolean;
+        canInterruptAndSend?: boolean;
       },
       ref: React.ForwardedRef<import("@/components/chat-components/ChatInput").ChatInputHandle>
     ) => {
@@ -62,6 +64,11 @@ jest.mock("@/components/chat-components/ChatInput", () => ({
           <button type="button" onClick={() => props.handleSendMessage?.()}>
             send
           </button>
+          {props.canInterruptAndSend && (
+            <button type="button" onClick={() => props.handleSendMessage?.({ interrupt: true })}>
+              send now
+            </button>
+          )}
           <button type="button" onClick={() => props.onStopGenerating?.()}>
             stop
           </button>
@@ -155,6 +162,8 @@ function inputNode(
       updateUserMessageHistory={jest.fn()}
       isStarting={false}
       isLoading={draft.loading}
+      queuedPrompts={[]}
+      acceptsMidTurnMessages={false}
       hasPendingPlanPermission={false}
       modelPickerOverride={undefined}
       modePickerOverride={undefined}
@@ -186,6 +195,7 @@ function setupCancellation() {
       settleTurn();
       return cancellation;
     }),
+    takeWithdrawnPrompts: () => [],
   } as unknown as AgentChatBackend;
   let draft!: AgentInputDraftControls;
   const store = new AgentInputDraftStore(
@@ -242,6 +252,7 @@ describe("AgentChatInput", () => {
         mockSelectedTextContexts = includeSelection ? [selection] : [];
         const backend = {
           sendMessage: jest.fn(() => ({ turn: Promise.resolve() })),
+          takeWithdrawnPrompts: () => [],
         } as unknown as AgentChatBackend;
         const app = {
           workspace: { getActiveFile: () => note },
@@ -279,6 +290,7 @@ describe("AgentChatInput", () => {
       );
       const backend = {
         sendMessage: jest.fn(() => ({ turn: Promise.resolve() })),
+        takeWithdrawnPrompts: () => [],
       } as unknown as AgentChatBackend;
       renderInput(backend, makeDraft({ includeActiveWebTab: true }));
 
@@ -298,6 +310,7 @@ describe("AgentChatInput", () => {
       jest.mocked(Notice).mockClear();
       const backend = {
         sendMessage: jest.fn(() => ({ turn: Promise.resolve() })),
+        takeWithdrawnPrompts: () => [],
       } as unknown as AgentChatBackend;
       renderInput(backend, makeDraft({ input: "/empty" }));
       fireEvent.click(screen.getByText("send"));
@@ -311,6 +324,7 @@ describe("AgentChatInput", () => {
         const backend = {
           sendMessage: jest.fn(() => ({ turn: Promise.resolve() })),
           cancel: jest.fn(),
+          takeWithdrawnPrompts: () => [],
         } as unknown as AgentChatBackend;
         const draft = makeDraft({ input, images: [image] });
         renderInput(backend, draft);
@@ -331,6 +345,7 @@ describe("AgentChatInput", () => {
         const backend = {
           sendMessage: jest.fn(),
           cancel: jest.fn(),
+          takeWithdrawnPrompts: () => [],
         } as unknown as AgentChatBackend;
         const draft = makeDraft({ input });
         renderInput(backend, draft);
@@ -354,6 +369,7 @@ describe("AgentChatInput", () => {
         const backend = {
           sendMessage: jest.fn(),
           cancel: jest.fn(),
+          takeWithdrawnPrompts: () => [],
         } as unknown as AgentChatBackend;
         const draft = makeDraft({ input: "", images: [brokenImage], loading: true });
         renderInput(backend, draft);
@@ -368,7 +384,11 @@ describe("AgentChatInput", () => {
     );
 
     it("keeps an image-only draft when the selected model lacks vision https://github.com/logancyang/obsidian-copilot/issues/2850", async () => {
-      const backend = { sendMessage: jest.fn(), cancel: jest.fn() } as unknown as AgentChatBackend;
+      const backend = {
+        sendMessage: jest.fn(),
+        cancel: jest.fn(),
+        takeWithdrawnPrompts: () => [],
+      } as unknown as AgentChatBackend;
       const draft = makeDraft({ input: "", images: [image] });
       renderInput(backend, draft, {
         modelPickerOverride: {
@@ -386,6 +406,7 @@ describe("AgentChatInput", () => {
       const backend = {
         sendMessage: jest.fn(() => ({ turn: Promise.resolve() })),
         cancel: jest.fn(),
+        takeWithdrawnPrompts: () => [],
       } as unknown as AgentChatBackend;
       const draft = makeDraft({ input: "/compact", images: [image] });
       renderInput(backend, draft, {
@@ -507,6 +528,46 @@ describe("AgentChatInput", () => {
       expect(getDraft().images).toHaveLength(1);
       expect(getDraft().images[0]).toMatchObject({ type: "image/png", size: 3 });
       await act(async () => settleCancel());
+    });
+
+    it("returns messages the agent never read to the composer ahead of the draft, combined in send order with their notes and images (https://github.com/Brevilabs/obsidian-copilot-private/issues/747)", () => {
+      const note = makeFile("Steer.md");
+      const queued: QueuedPrompt[] = [
+        { id: "a", text: "first", context: { notes: [note], urls: [] } },
+        {
+          id: "b",
+          text: "second",
+          promptContent: [{ type: "image", mimeType: "image/png", data: "AQID" }],
+        },
+      ];
+      let withdrawn: readonly QueuedPrompt[] = [];
+      const backend = {
+        sendMessage: jest.fn(),
+        cancel: jest.fn(),
+        takeWithdrawnPrompts: jest.fn(() => {
+          const taken = withdrawn;
+          withdrawn = [];
+          return taken;
+        }),
+      } as unknown as AgentChatBackend;
+      const store = new AgentInputDraftStore(
+        { workspace: { getActiveFile: () => null } } as unknown as App,
+        () => true
+      );
+      let draft!: AgentInputDraftControls;
+      function Composer({ queuedPrompts }: { queuedPrompts: readonly QueuedPrompt[] }) {
+        draft = useAgentInputDrafts({ store, chatInputId: "input-1" });
+        return inputNode(backend, draft, { queuedPrompts });
+      }
+      const view = render(<Composer queuedPrompts={queued} />);
+      act(() => draft.setInput("current draft"));
+
+      withdrawn = queued;
+      view.rerender(<Composer queuedPrompts={[]} />);
+
+      expect(draft.input).toBe("first\n\nsecond\n\ncurrent draft");
+      expect(draft.contextNotes).toEqual([note]);
+      expect(draft.images[0]).toMatchObject({ name: "queued-image-1.png" });
     });
 
     it("restores resolved commands and prepends queued images before draft images https://github.com/Brevilabs/obsidian-copilot-private/issues/485", async () => {
@@ -720,6 +781,7 @@ describe("AgentChatInput", () => {
       const backend = {
         sendMessage: jest.fn(() => ({ turn })),
         cancel: jest.fn(),
+        takeWithdrawnPrompts: () => [],
       } as unknown as AgentChatBackend;
       const draft = makeDraft();
 
@@ -742,7 +804,11 @@ describe("AgentChatInput", () => {
     it("passes the real installed-agent list when entitled", () => {
       mockUseCanUseMultiAgent.mockReturnValue(true);
       renderInput(
-        { sendMessage: jest.fn(), cancel: jest.fn() } as unknown as AgentChatBackend,
+        {
+          sendMessage: jest.fn(),
+          cancel: jest.fn(),
+          takeWithdrawnPrompts: () => [],
+        } as unknown as AgentChatBackend,
         makeDraft()
       );
       expect(capturedAgentBrands).toBe(FAKE_BRANDS);
@@ -752,7 +818,11 @@ describe("AgentChatInput", () => {
       const clearSelectedTextContexts = jest.requireMock("@/aiParams")
         .clearSelectedTextContexts as jest.Mock;
       clearSelectedTextContexts.mockClear();
-      const backend = { sendMessage: jest.fn(), cancel: jest.fn() } as unknown as AgentChatBackend;
+      const backend = {
+        sendMessage: jest.fn(),
+        cancel: jest.fn(),
+        takeWithdrawnPrompts: () => [],
+      } as unknown as AgentChatBackend;
       const draft = makeDraft();
       const view = renderInput(backend, draft);
 
@@ -765,7 +835,11 @@ describe("AgentChatInput", () => {
     it("passes the frozen empty list (not a fresh []) when not entitled", () => {
       mockUseCanUseMultiAgent.mockReturnValue(false);
       renderInput(
-        { sendMessage: jest.fn(), cancel: jest.fn() } as unknown as AgentChatBackend,
+        {
+          sendMessage: jest.fn(),
+          cancel: jest.fn(),
+          takeWithdrawnPrompts: () => [],
+        } as unknown as AgentChatBackend,
         makeDraft()
       );
       expect(capturedAgentBrands).toBe(EMPTY_AGENT_MENTION_BRANDS);
@@ -773,7 +847,11 @@ describe("AgentChatInput", () => {
 
     it("shows the running state while a plan-approved turn continues after the composer send settles (https://github.com/Brevilabs/obsidian-copilot-private/issues/41)", () => {
       mockUseCanUseMultiAgent.mockReturnValue(true);
-      const backend = { sendMessage: jest.fn(), cancel: jest.fn() } as unknown as AgentChatBackend;
+      const backend = {
+        sendMessage: jest.fn(),
+        cancel: jest.fn(),
+        takeWithdrawnPrompts: () => [],
+      } as unknown as AgentChatBackend;
       const draft = makeDraft({ loading: false });
       const view = renderInput(backend, draft, { isLoading: true });
 
@@ -786,6 +864,7 @@ describe("AgentChatInput", () => {
       ({
         sendMessage: jest.fn(() => ({ turn: Promise.resolve() })),
         cancel: jest.fn(),
+        takeWithdrawnPrompts: () => [],
       }) as unknown as AgentChatBackend;
 
     const enqueuedItem = (setQueue: jest.Mock) => {
@@ -803,6 +882,99 @@ describe("AgentChatInput", () => {
 
       expect(backend.sendMessage).not.toHaveBeenCalled();
       expect(enqueuedItem(draft.setQueue as jest.Mock).id).toMatch(/^queued-/);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/509 hands a message sent while the agent works straight to a backend that takes mid-turn input, instead of holding it", async () => {
+      const backend = makeBackend();
+      const draft = makeDraft({ input: "only the first two", loading: true });
+
+      renderInput(backend, draft, { acceptsMidTurnMessages: true });
+      fireEvent.click(screen.getByText("send"));
+
+      await waitFor(() => expect(backend.sendMessage).toHaveBeenCalledTimes(1));
+      expect(jest.mocked(backend.sendMessage).mock.calls[0][0]).toBe("only the first two");
+      expect(jest.mocked(backend.sendMessage).mock.calls[0][4]).toEqual({ interrupt: false });
+      expect(draft.setQueue).not.toHaveBeenCalled();
+      expect(draft.setLoading).not.toHaveBeenCalled();
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/747 returns a message the session refuses while the agent works to the composer and says it failed", async () => {
+      jest.mocked(Notice).mockClear();
+      const backend = {
+        sendMessage: jest.fn(() => {
+          throw new Error("Session is closed");
+        }),
+        takeWithdrawnPrompts: () => [],
+      } as unknown as AgentChatBackend;
+      let draft!: AgentInputDraftControls;
+      const store = new AgentInputDraftStore(
+        { workspace: { getActiveFile: () => null } } as unknown as App,
+        () => true
+      );
+      function Composer() {
+        draft = useAgentInputDrafts({ store, chatInputId: "input-1" });
+        return inputNode(backend, draft, { isLoading: true, acceptsMidTurnMessages: true });
+      }
+      render(<Composer />);
+      act(() => draft.setInput("keep this text"));
+
+      fireEvent.click(screen.getByText("send"));
+
+      await waitFor(() => expect(backend.sendMessage).toHaveBeenCalledTimes(1));
+      expect(Notice).toHaveBeenCalledWith("Failed to send message. Please try again.");
+      expect(draft.input).toBe("keep this text");
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/509 sends with interrupt from Send now, which only a backend taking mid-turn input offers", async () => {
+      const backend = makeBackend();
+      const draft = makeDraft({ input: "do this instead", loading: true });
+
+      const { rerender } = renderInput(backend, draft);
+      expect(screen.queryByText("send now")).toBeNull();
+      rerender(inputNode(backend, draft, { acceptsMidTurnMessages: true }));
+      fireEvent.click(screen.getByText("send now"));
+
+      await waitFor(() => expect(backend.sendMessage).toHaveBeenCalledTimes(1));
+      expect(jest.mocked(backend.sendMessage).mock.calls[0][4]).toEqual({ interrupt: true });
+    });
+
+    it.each([
+      { scenario: "/compact", input: "/compact" },
+      { scenario: "anything while the chat is starting", input: "hello", isStarting: true },
+    ])(
+      "https://github.com/Brevilabs/obsidian-copilot-private/issues/509 holds $scenario until the agent finishes, even on a backend that takes mid-turn input",
+      async ({ input, isStarting = false }) => {
+        const backend = makeBackend();
+        const draft = makeDraft({ input, loading: true });
+
+        renderInput(backend, draft, { acceptsMidTurnMessages: true, isStarting });
+        fireEvent.click(screen.getByText("send"));
+
+        await waitFor(() => expect(draft.setQueue).toHaveBeenCalled());
+        expect(backend.sendMessage).not.toHaveBeenCalled();
+      }
+    );
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/509 keeps held messages back until every message already handed to the agent has reached it", async () => {
+      const backend = makeBackend();
+      const held = { id: "queued-1", text: "/compact", rawInput: "/compact" };
+      const queued = { id: "steer", text: "only the first two" };
+
+      const { rerender } = renderInput(backend, makeDraft({ queue: [held] }), {
+        queuedPrompts: [queued],
+        acceptsMidTurnMessages: true,
+      });
+      expect(backend.sendMessage).not.toHaveBeenCalled();
+
+      rerender(
+        inputNode(backend, makeDraft({ queue: [held] }), {
+          queuedPrompts: [],
+          acceptsMidTurnMessages: true,
+        })
+      );
+
+      await waitFor(() => expect(backend.sendMessage).toHaveBeenCalledTimes(1));
+      expect(jest.mocked(backend.sendMessage).mock.calls[0][0]).toBe("/compact");
     });
 
     it("queues a message behind a plan-approved turn even after draft loading clears (https://github.com/Brevilabs/obsidian-copilot-private/issues/41)", async () => {
@@ -863,6 +1035,7 @@ describe("AgentChatInput", () => {
       const backend = {
         sendMessage: jest.fn(() => ({ turn: Promise.resolve() })),
         cancel: jest.fn(),
+        takeWithdrawnPrompts: () => [],
       } as unknown as AgentChatBackend;
       const draft = makeDraft({ images: [slowImage] });
 
@@ -886,6 +1059,7 @@ describe("AgentChatInput", () => {
       const backend = {
         sendMessage: jest.fn(() => ({ turn: Promise.resolve() })),
         cancel: jest.fn(),
+        takeWithdrawnPrompts: () => [],
       } as unknown as AgentChatBackend;
       const draft = makeDraft();
 

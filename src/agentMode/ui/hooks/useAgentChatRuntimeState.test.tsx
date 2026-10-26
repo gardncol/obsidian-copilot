@@ -5,8 +5,10 @@ import type {
   AskUserQuestionPrompt,
   CurrentPlan,
   PermissionPrompt,
+  QueuedPrompt,
 } from "@/agentMode/session/types";
 import type { FeedbackOffer } from "@/agentMode/session/feedback/feedbackOffer";
+import type { AgentTask } from "@/agentMode/session/AgentSession";
 import { useAgentChatRuntimeState } from "@/agentMode/ui/hooks/useAgentChatRuntimeState";
 import { act, render, renderHook } from "@testing-library/react";
 import React, { useEffect } from "react";
@@ -21,6 +23,8 @@ interface FakeBackendState {
   pendingToolPermissions: PermissionPrompt[];
   pendingAskUserQuestions: AskUserQuestionPrompt[];
   feedbackOffer?: FeedbackOffer | null;
+  queuedPrompts?: readonly QueuedPrompt[];
+  tasks?: readonly AgentTask[];
 }
 
 function makeFakeBackend(initial: Partial<FakeBackendState> = {}) {
@@ -34,6 +38,8 @@ function makeFakeBackend(initial: Partial<FakeBackendState> = {}) {
     pendingToolPermissions: initial.pendingToolPermissions ?? [],
     pendingAskUserQuestions: initial.pendingAskUserQuestions ?? [],
     feedbackOffer: initial.feedbackOffer ?? null,
+    queuedPrompts: initial.queuedPrompts ?? [],
+    tasks: initial.tasks ?? [],
   };
   const listeners = new Set<() => void>();
 
@@ -51,6 +57,8 @@ function makeFakeBackend(initial: Partial<FakeBackendState> = {}) {
     getPendingToolPermissions: () => state.pendingToolPermissions,
     getPendingAskUserQuestions: () => state.pendingAskUserQuestions,
     getFeedbackOffer: () => state.feedbackOffer ?? null,
+    getQueuedPrompts: () => state.queuedPrompts ?? [],
+    getTasks: () => state.tasks ?? [],
   } as unknown as AgentChatBackend;
 
   return {
@@ -60,6 +68,14 @@ function makeFakeBackend(initial: Partial<FakeBackendState> = {}) {
     emit: () => listeners.forEach((l) => l()),
   };
 }
+
+const RUNNING_TASK: AgentTask = {
+  taskId: "task-1",
+  toolCallId: "call-1",
+  kind: "subagent",
+  description: "Count words",
+  status: "running",
+};
 
 const msg = (id: string): AgentChatMessage => ({ id }) as unknown as AgentChatMessage;
 
@@ -116,10 +132,14 @@ describe("useAgentChatRuntimeState", () => {
         fake.state.messages = [msg("x"), msg("y")];
         fake.state.isStarting = true;
         fake.state.hasPendingPlanPermission = true;
+        fake.state.queuedPrompts = [{ id: "steer", text: "Only the first two" }];
+        fake.state.tasks = [RUNNING_TASK];
         fake.emit();
       });
 
+      expect(result.current.tasks).toEqual([RUNNING_TASK]);
       expect(result.current.messages).toHaveLength(2);
+      expect(result.current.queuedPrompts).toEqual([{ id: "steer", text: "Only the first two" }]);
       expect(result.current.isStarting).toBe(true);
       expect(result.current.hasPendingPlanPermission).toBe(true);
     });

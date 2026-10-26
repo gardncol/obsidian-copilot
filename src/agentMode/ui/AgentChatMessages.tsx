@@ -7,6 +7,8 @@ import { openReportIssueModal } from "@/agentMode/ui/ReportIssueModal";
 import { formatFeedbackNote, type FeedbackOffer } from "@/agentMode/session/feedback/feedbackOffer";
 import { setSettings } from "@/settings/model";
 import { ToolPermissionCard } from "@/agentMode/ui/ToolPermissionCard";
+import { useAgentTasks } from "@/agentMode/ui/AgentTasksContext";
+import { permissionRequesterName } from "@/agentMode/ui/taskDisplay";
 import { openTurnDiff } from "@/agentMode/ui/TurnDiffView";
 import { AgentTurnDurationIndicator } from "@/agentMode/ui/AgentTurnDurationIndicator";
 import ChatSingleMessage from "@/components/chat-components/ChatSingleMessage";
@@ -69,12 +71,10 @@ function lastAssistant(visible: AgentChatMessage[]): AgentChatMessage | undefine
 
 interface AgentMessageRowProps {
   message: AgentChatMessage;
-  messageKey: string;
   app: App;
   sourcePath: string;
   isLatestAssistant: boolean;
   isStreaming: boolean;
-  minHeight?: number;
   trailingCard?: React.ReactNode;
 }
 
@@ -83,12 +83,10 @@ interface AgentMessageRowProps {
 // https://github.com/logancyang/obsidian-copilot/issues/3343
 const AgentMessageRow = memo(function AgentMessageRow({
   message,
-  messageKey,
   app,
   sourcePath,
   isLatestAssistant,
   isStreaming,
-  minHeight,
   trailingCard,
 }: AgentMessageRowProps) {
   const adaptedMessage = toChatMessageView(message);
@@ -110,11 +108,7 @@ const AgentMessageRow = memo(function AgentMessageRow({
   const fanoutTurn = isAssistant ? message.fanout : undefined;
 
   return (
-    <div
-      data-message-key={messageKey}
-      className="tw-w-full"
-      style={{ minHeight: minHeight !== undefined ? `${minHeight}px` : "auto" }}
-    >
+    <div className="tw-w-full">
       {fanoutTurn ? (
         <div className="tw-px-3 tw-pt-2">
           <FanoutMessageCard
@@ -179,7 +173,6 @@ const AgentChatMessages = memo(
     const visible = useMemo(() => messages.filter((m) => m.isVisible), [messages]);
     const adapted = useMemo(() => visible.map(toChatMessageView), [visible]);
     const {
-      containerMinHeight,
       scrollContainerCallbackRef,
       contentCallbackRef,
       onScroll,
@@ -201,6 +194,11 @@ const AgentChatMessages = memo(
           : undefined,
       [messages, pendingPermission]
     );
+    const tasks = useAgentTasks();
+    const pendingRequester =
+      pendingPermission && tasks
+        ? permissionRequesterName(pendingPermission, tasks.tasks)
+        : undefined;
     // Questions take priority so the separate resolver queues have a stable
     // presentation policy without carrying cross-type sequencing state.
     // https://github.com/logancyang/obsidian-copilot/issues/2948
@@ -252,14 +250,9 @@ const AgentChatMessages = memo(
           scrollToEnd={scrollToEnd}
         >
           {visible.map((message, index) => {
-            const shouldApplyMinHeight =
-              index === visible.length - 1 && message.sender !== USER_SENDER && !showPlanCard;
-            const messageKey = getMessageKey(adapted[index], index);
-
             return (
               <AgentMessageRow
-                key={messageKey}
-                messageKey={messageKey}
+                key={getMessageKey(adapted[index], index)}
                 message={message}
                 app={app}
                 sourcePath={sourcePath}
@@ -267,7 +260,6 @@ const AgentChatMessages = memo(
                   message.sender !== USER_SENDER && message.id === latestAssistant?.id
                 }
                 isStreaming={message.id === streamingMessageId}
-                minHeight={shouldApplyMinHeight ? containerMinHeight : undefined}
                 trailingCard={index === feedbackCardIndex ? feedbackCard : undefined}
               />
             );
@@ -294,6 +286,7 @@ const AgentChatMessages = memo(
                 <ToolPermissionCard
                   request={pendingPermission}
                   toolName={pendingToolName}
+                  requester={pendingRequester}
                   onResolve={chatBackend.resolveToolPermission.bind(chatBackend)}
                 />
               ) : null}

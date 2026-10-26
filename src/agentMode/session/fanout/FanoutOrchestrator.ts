@@ -17,13 +17,13 @@ import type {
   SessionEvent,
   SessionId,
 } from "@/agentMode/session/types";
+import { v4 as uuidv4 } from "uuid";
 import {
   buildSummaryUserPrompt,
   FANOUT_AGENT_TIMEOUT_ERROR,
   FANOUT_AGENT_TIMEOUT_MS,
   FANOUT_ALL_FAILED_SUMMARY,
   FANOUT_CANCEL_GRACE_MS,
-  FANOUT_TRAILING_CHUNK_GRACE_MS,
   selectSummaryInputs,
   type AgentAnswer,
   type FanoutTurn,
@@ -186,12 +186,43 @@ export class FanoutOrchestrator {
         this.host.excludeSubSessionFromHistory(backendId, sessionId);
 
         const live: SubSessionState = { current: opened.state, onChange: null };
+        // An answer is final once its turn and its background tasks have ended, including the turn that reports a task finished after the answer's turn; a task's own content is not part of the answer. https://github.com/Brevilabs/obsidian-copilot-private/issues/175
+        const runningTasks = new Set<string>();
+        let turnOpen = false;
+        let awaitingReport = false;
+        let turnEnded = false;
+        let finishAnswer!: (error?: Error) => void;
+        const answered = new Promise<Error | undefined>((resolve) => (finishAnswer = resolve));
         unregisterHandler = proc.registerSessionHandler(sessionId, (event) => {
-          if (event.update.sessionUpdate === "state_changed") {
-            live.current = event.update.state;
-            live.onChange?.();
-            return;
+          const update = event.update;
+          switch (update.sessionUpdate) {
+            case "turn_started":
+              if (turnEnded) onText("\n\n");
+              turnOpen = true;
+              awaitingReport = false;
+              return;
+            case "turn_ended":
+              turnOpen = false;
+              turnEnded = true;
+              if (update.error !== undefined) finishAnswer(update.error);
+              else if (runningTasks.size === 0 && !awaitingReport) finishAnswer();
+              return;
+            // An agent that exits starts no turn to report the tasks it ended. https://github.com/Brevilabs/obsidian-copilot-private/issues/175
+            case "session_disconnected":
+              finishAnswer(update.error);
+              return;
+            case "task_started":
+              if (update.taskId) runningTasks.add(update.taskId);
+              return;
+            case "task_ended":
+              if (runningTasks.delete(update.taskId) && !turnOpen) awaitingReport = true;
+              return;
+            case "state_changed":
+              live.current = update.state;
+              live.onChange?.();
+              return;
           }
+          if (event.taskToolCallId) return;
           const text = textChunkOf(event);
           if (text !== null) onText(text);
         });
@@ -205,18 +236,25 @@ export class FanoutOrchestrator {
 
         const promptProc = proc;
         const promptSessionId = sessionId;
-        const promptPromise = promptProc.prompt({ sessionId, prompt });
+        const promptPromise = promptProc
+          .prompt({ sessionId, promptId: uuidv4(), prompt })
+          .then(() => answered)
+          .then((error) => {
+            if (error !== undefined) throw error;
+          });
         onPrompt(promptPromise, () => {
           promptProc.cancel({ sessionId: promptSessionId }).catch(() => undefined);
+          finishAnswer();
         });
         await promptPromise;
-        if (!raceSettled()) await this.awaitTrailingChunks();
         return "done";
       } finally {
         unregisterHandler?.();
         unregisterReadOnly?.();
         if (proc && sessionId) {
           proc.cancel({ sessionId }).catch(() => undefined);
+          // A live session keeps its agent process and tasks until it is closed. https://github.com/Brevilabs/obsidian-copilot-private/issues/175
+          proc.closeSession?.({ sessionId }).catch(() => undefined);
         }
       }
     };
@@ -225,12 +263,6 @@ export class FanoutOrchestrator {
       (onPrompt, raceSettled) => attempt(onPrompt, raceSettled),
       signal
     );
-  }
-
-  private awaitTrailingChunks(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      window.setTimeout(resolve, FANOUT_TRAILING_CHUNK_GRACE_MS);
-    });
   }
 
   private runAttemptWithTimeout(

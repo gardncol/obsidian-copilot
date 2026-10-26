@@ -185,6 +185,81 @@ export const RunningAfterStop: StoryObj<AgentChatMessagesProps> = {
   render: (props) => <QueuedActionsDemo {...actionRailArgs} {...props} />,
 };
 
+export const StoppedCommand: StoryObj<AgentChatMessagesProps> = {
+  args: {
+    ...actionRailArgs,
+    pendingToolPermissions: [],
+    pendingAskUserQuestions: [],
+    messages: [
+      {
+        ...message,
+        id: "slow-request",
+        sender: "user",
+        message: "Rebuild the index of every note.",
+      },
+      {
+        ...message,
+        id: "stopped-command",
+        message: "",
+        turnStopReason: "cancelled",
+        turnDurationMs: 4100,
+        parts: [
+          {
+            kind: "tool_call",
+            id: "list-notes",
+            title: "Run ls notes",
+            status: "completed",
+            vendorToolName: "Bash",
+            input: { command: "ls notes" },
+          },
+          {
+            kind: "tool_call",
+            id: "rebuild",
+            title: "Run ./rebuild-index.sh",
+            status: "cancelled",
+            vendorToolName: "Bash",
+            input: { command: "./rebuild-index.sh" },
+          },
+        ],
+      },
+    ],
+    isLoading: false,
+  },
+  render: (props) => <QueuedActionsDemo {...actionRailArgs} {...props} />,
+};
+
+export const MessageDeliveredMidTurn: StoryObj<AgentChatMessagesProps> = {
+  args: {
+    ...actionRailArgs,
+    pendingToolPermissions: [],
+    pendingAskUserQuestions: [],
+    messages: [
+      {
+        ...message,
+        id: "long-request",
+        sender: "user",
+        message: "Write a one-line summary of each note in the vault.",
+      },
+      {
+        ...message,
+        id: "before-steer",
+        message: "Alpha: launch checklist for the spring release.",
+        turnStopReason: "end_turn",
+        turnDurationMs: 8200,
+      },
+      {
+        ...message,
+        id: "steer",
+        sender: "user",
+        message: "Only do the first two notes.",
+      },
+      { ...message, id: "after-steer", message: "Beta: notes from the design review." },
+    ],
+    isLoading: true,
+  },
+  render: (props) => <QueuedActionsDemo {...actionRailArgs} {...props} />,
+};
+
 export const ApprovedPlanRunning: StoryObj<AgentChatMessagesProps> = {
   args: {
     ...actionRailArgs,

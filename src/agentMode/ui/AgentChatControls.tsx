@@ -14,8 +14,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { cn } from "@/lib/utils";
-import { navigateToPlusPage, useCanUseMultiAgent } from "@/plusUtils";
 import { useSettingsValue } from "@/settings/model";
 import { safeAsyncHandler } from "@/utils/safeAsyncHandler";
 import {
@@ -26,7 +24,6 @@ import {
   Link,
   MessageCirclePlus,
   MoreHorizontal,
-  Sparkles,
 } from "lucide-react";
 import React, { useCallback, useState } from "react";
 
@@ -66,7 +63,7 @@ interface AgentChatControlsProps {
   onSetChatBookmarked?: (bookmarked: boolean) => Promise<void>;
   onReportError?: () => void;
   usageMeter?: React.ReactNode;
-  showMultiAgentUpsell?: boolean;
+  tasksIndicator?: React.ReactNode;
 }
 
 export const AgentChatControls: React.FC<AgentChatControlsProps> = ({
@@ -86,10 +83,9 @@ export const AgentChatControls: React.FC<AgentChatControlsProps> = ({
   onSetChatBookmarked,
   onReportError,
   usageMeter,
-  showMultiAgentUpsell = false,
+  tasksIndicator,
 }) => {
   const settings = useSettingsValue();
-  const canUseMultiAgent = useCanUseMultiAgent();
   const historyAvailable = Boolean(
     chatHistoryItems && onLoadChat && onUpdateChatTitle && onDeleteChat
   );
@@ -102,33 +98,33 @@ export const AgentChatControls: React.FC<AgentChatControlsProps> = ({
   return (
     <div className="tw-flex tw-w-full tw-items-center tw-justify-between tw-p-1">
       <div className="tw-ml-1 tw-flex tw-min-w-0 tw-flex-1 tw-items-center tw-gap-1">
-        {showMultiAgentUpsell && !canUseMultiAgent && (
-          <Button
-            variant="ghost2"
-            size="fit"
-            className={cn(
-              "tw-flex tw-min-w-0 tw-items-center tw-gap-1 tw-text-ui-smaller tw-text-muted",
-              "hover:tw-text-normal"
-            )}
-            onClick={() => navigateToPlusPage("multi_agent")}
-          >
-            <Sparkles className="tw-size-3 tw-shrink-0" />
-            <span className="tw-truncate">
-              Mention multiple agents with @ (needs Plus tier or above)
-            </span>
-          </Button>
-        )}
+        {tasksIndicator}
       </div>
       <div className="tw-flex tw-items-center tw-gap-1">
         {usageMeter}
         {onNewChat && (
           <Tooltip>
             <TooltipTrigger asChild>
-              <Button variant="ghost2" size="icon" title="New Chat" onClick={onNewChat}>
+              <Button variant="ghost2" size="icon" title="New chat" onClick={onNewChat}>
                 <MessageCirclePlus className="tw-size-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>New Chat</TooltipContent>
+            <TooltipContent>New chat</TooltipContent>
+          </Tooltip>
+        )}
+        {!settings.autosaveChat && onSaveAsNote && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost2"
+                size="icon"
+                title="Save chat as note"
+                onClick={() => void onSaveAsNote()}
+              >
+                <Download className="tw-size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Save chat as note</TooltipContent>
           </Tooltip>
         )}
         {historyAvailable && (
@@ -149,7 +145,7 @@ export const AgentChatControls: React.FC<AgentChatControlsProps> = ({
                 <Button
                   variant="ghost2"
                   size="icon"
-                  title="Chat History"
+                  title="Chat history"
                   onClick={() => {
                     void onLoadHistory?.();
                   }}
@@ -158,13 +154,13 @@ export const AgentChatControls: React.FC<AgentChatControlsProps> = ({
                 </Button>
               </TooltipTrigger>
             </ChatHistoryPopover>
-            <TooltipContent>Chat History</TooltipContent>
+            <TooltipContent>Chat history</TooltipContent>
           </Tooltip>
         )}
         {onNewChat && (
           <DropdownMenu modal={false}>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost2" size="icon" title="More Actions" ref={trackMoreActionsBody}>
+              <Button variant="ghost2" size="icon" title="More actions" ref={trackMoreActionsBody}>
                 <MoreHorizontal className="tw-size-4" />
               </Button>
             </DropdownMenuTrigger>
@@ -192,18 +188,12 @@ export const AgentChatControls: React.FC<AgentChatControlsProps> = ({
                     Add to bookmarks
                   </NeedsMessageMenuItem>
                 ))}
-              {!settings.autosaveChat && onSaveAsNote && (
-                <DropdownMenuItem onSelect={() => void onSaveAsNote()}>
-                  <Download />
-                  Save chat as note
-                </DropdownMenuItem>
-              )}
               {/* A report from here names the chat's agent, model and session, so only a host with a chat offers it.
                   https://github.com/Brevilabs/obsidian-copilot-private/issues/672 */}
               {onReportError && (
                 <DropdownMenuItem onSelect={onReportError}>
                   <Bug />
-                  Report error
+                  Report an issue
                 </DropdownMenuItem>
               )}
             </DropdownMenuContent>

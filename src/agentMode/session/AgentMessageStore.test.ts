@@ -447,7 +447,7 @@ describe("AgentMessageStore", () => {
     });
   });
 
-  describe("settleOpenCompactions()", () => {
+  describe("settleOpenParts()", () => {
     it("https://github.com/Brevilabs/obsidian-copilot-private/issues/633 settles every in-progress compaction to the given status and leaves settled rows alone", () => {
       const store = new AgentMessageStore();
       const id = store.addMessage(placeholder());
@@ -455,7 +455,7 @@ describe("AgentMessageStore", () => {
       store.upsertAgentPart(id, done);
       store.upsertAgentPart(id, compaction({ id: "open", trigger: "auto" }));
 
-      expect(store.settleOpenCompactions(id)).toBe(true);
+      expect(store.settleOpenParts(id)).toBe(true);
 
       const parts = store.getMessage(id)?.parts ?? [];
       expect(parts[0]).toBe(done);
@@ -467,20 +467,78 @@ describe("AgentMessageStore", () => {
       const id = store.addMessage(placeholder());
       store.upsertAgentPart(id, compaction());
 
-      store.settleOpenCompactions(id, "failed");
+      store.settleOpenParts(id, "failed");
 
       expect(store.getMessage(id)?.parts?.[0]).toEqual(compaction({ status: "failed" }));
     });
 
-    it("reports no change for a message with no in-progress compaction", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/739 fails every tool call still pending, since it never started, even when compactions settle as cancelled, and leaves running background and finished calls alone", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.upsertAgentPart(id, {
+        kind: "tool_call",
+        id: "write",
+        title: "Write",
+        status: "pending",
+      });
+      store.upsertAgentPart(id, {
+        kind: "tool_call",
+        id: "bash",
+        title: "Bash",
+        status: "in_progress",
+      });
+      store.upsertAgentPart(id, {
+        kind: "tool_call",
+        id: "read",
+        title: "Read",
+        status: "completed",
+      });
+      store.upsertAgentPart(id, compaction());
+
+      expect(store.settleOpenParts(id)).toBe(true);
+
+      expect(store.getMessage(id)?.parts).toEqual([
+        { kind: "tool_call", id: "write", title: "Write", status: "failed" },
+        { kind: "tool_call", id: "bash", title: "Bash", status: "in_progress" },
+        { kind: "tool_call", id: "read", title: "Read", status: "completed" },
+        compaction({ status: "cancelled" }),
+      ]);
+    });
+
+    it("reports no change for a message with no in-progress compaction or pending tool call", () => {
       const store = new AgentMessageStore();
       const id = store.addMessage(placeholder());
       store.upsertAgentPart(id, compaction({ status: "skipped" }));
       const before = store.getMessage(id);
 
-      expect(store.settleOpenCompactions(id)).toBe(false);
+      expect(store.settleOpenParts(id)).toBe(false);
       expect(store.getMessage(id)).toBe(before);
-      expect(store.settleOpenCompactions("missing")).toBe(false);
+      expect(store.settleOpenParts("missing")).toBe(false);
+    });
+  });
+
+  describe("stopToolCalls()", () => {
+    it("marks every pending or running tool call stopped, except the ones to keep and those already finished (https://github.com/Brevilabs/obsidian-copilot-private/issues/747)", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      const call = (callId: string, status: "pending" | "in_progress" | "completed") =>
+        store.upsertAgentPart(id, { kind: "tool_call", id: callId, title: callId, status });
+      call("next", "pending");
+      call("bash", "in_progress");
+      call("agent", "in_progress");
+      call("read", "completed");
+
+      expect(store.stopToolCalls(id, new Set(["agent"]))).toBe(true);
+
+      expect(
+        store.getMessage(id)?.parts?.map((p) => (p.kind === "tool_call" ? [p.id, p.status] : null))
+      ).toEqual([
+        ["next", "cancelled"],
+        ["bash", "cancelled"],
+        ["agent", "in_progress"],
+        ["read", "completed"],
+      ]);
+      expect(store.stopToolCalls(id, new Set(["agent"]))).toBe(false);
     });
   });
 

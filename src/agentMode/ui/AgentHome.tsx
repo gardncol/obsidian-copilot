@@ -12,6 +12,11 @@ import { AgentModeStatus } from "@/agentMode/ui/AgentModeStatus";
 import { AgentProjectHeader } from "@/agentMode/ui/AgentProjectHeader";
 import { ProjectInfoPopover } from "@/agentMode/ui/ProjectInfoPopover";
 import { AgentTabStrip } from "@/agentMode/ui/AgentTabStrip";
+import { AgentTasksProvider } from "@/agentMode/ui/AgentTasksContext";
+import { QueuedMessageList } from "@/agentMode/ui/QueuedMessageList";
+import { RunningTasksIndicator } from "@/agentMode/ui/RunningTasksIndicator";
+import { TaskDetailView } from "@/agentMode/ui/TaskDetailView";
+import { taskDisplayStatus } from "@/agentMode/ui/taskDisplay";
 import { AgentWelcomeCard } from "@/agentMode/ui/AgentWelcomeCard";
 import { AgentHomeReleaseUpdate } from "@/components/release-update/AgentHomeReleaseUpdate";
 import { RelevantNotes } from "@/components/chat-components/RelevantNotes";
@@ -33,6 +38,7 @@ import { useAgentInputDrafts } from "@/agentMode/ui/hooks/useAgentInputDrafts";
 import { useAttentionChatIds } from "@/agentMode/ui/hooks/useAttentionChatIds";
 import { useRunningChatIds } from "@/agentMode/ui/hooks/useRunningChatIds";
 import { useChatInputAutoFocus } from "@/agentMode/ui/hooks/useChatInputAutoFocus";
+import { useComposerFocusAfterTaskView } from "@/agentMode/ui/hooks/useComposerFocusAfterTaskView";
 import { useRefreshEmptyLandingOnContextSourceChange } from "@/agentMode/ui/hooks/useRefreshEmptyLandingOnContextSourceChange";
 import { useAgentModelPicker } from "@/agentMode/ui/useAgentModelPicker";
 import { useAgentModePicker } from "@/agentMode/ui/useAgentModePicker";
@@ -48,7 +54,7 @@ import { AppContext } from "@/context";
 import { ChatInputProvider } from "@/context/ChatInputContext";
 import { useChatFileDrop } from "@/hooks/useChatFileDrop";
 import { cn } from "@/lib/utils";
-import { logError } from "@/logger";
+import { logError, logWarn } from "@/logger";
 import type CopilotPlugin from "@/main";
 import { ProjectFileManager } from "@/projects/ProjectFileManager";
 import { getProjectLandingCaptureSignature } from "@/projects/projectContextSignature";
@@ -98,10 +104,34 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     pendingToolPermissions,
     pendingAskUserQuestions,
     feedbackOffer,
+    queuedPrompts,
+    tasks,
   } = useAgentChatRuntimeState(backend);
   const isLoading = draft.loading || isTurnInFlight;
 
   const [rootEl, setRootEl] = useState<HTMLDivElement | null>(null);
+  const [openedTask, setOpenedTask] = useState<{ sessionId: string; toolCallId: string } | null>(
+    null
+  );
+  const handleOpenTask = useCallback(
+    (toolCallId: string) => setOpenedTask({ sessionId, toolCallId }),
+    [sessionId]
+  );
+  const handleStopTask = useCallback(
+    (taskId: string) => {
+      backend.stopTask(taskId).catch((e: unknown) => logWarn("[AgentMode] stop task failed", e));
+    },
+    [backend]
+  );
+  const detailTask =
+    openedTask?.sessionId === sessionId
+      ? tasks.find((task) => task.toolCallId === openedTask.toolCallId)
+      : undefined;
+  const markTaskViewClosedByUser = useComposerFocusAfterTaskView(detailTask !== undefined);
+  const handleCloseTask = useCallback(() => {
+    markTaskViewClosedByUser();
+    setOpenedTask(null);
+  }, [markTaskViewClosedByUser]);
   const chatContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -120,7 +150,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       }
     } catch (error) {
       logError("[AgentMode] manual save failed", error);
-      new Notice("Failed to save chat as note. Check console for details.");
+      new Notice("Failed to save chat as note. Check the Copilot log for details.");
     }
   }, [manager]);
 
@@ -195,7 +225,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       } catch (error) {
         logError("[AgentMode] close chat session failed", error);
         new Notice(
-          `Could not close session: ${error instanceof Error ? error.message : "Try again."}`
+          `Could not close chat: ${error instanceof Error ? error.message : "Try again."}`
         );
       }
     },
@@ -371,7 +401,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       {
         id: "chats",
         icon: <MessageSquare className="tw-size-4" />,
-        title: "Recent Chats",
+        title: "Recent chats",
         renderBody: () => (
           <GlobalRecentChatsSection
             items={chatHistoryItems}
@@ -462,7 +492,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       {
         id: "project-chats",
         icon: <MessageSquare className="tw-size-4" />,
-        title: "Recent Chats",
+        title: "Recent chats",
         renderBody: () => (
           <GlobalRecentChatsSection
             items={chatHistoryItems}
@@ -528,6 +558,8 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       updateUserMessageHistory={updateUserMessageHistory}
       isStarting={isStarting}
       isLoading={isLoading}
+      queuedPrompts={queuedPrompts}
+      acceptsMidTurnMessages={backend.acceptsMidTurnMessages()}
       hasPendingPlanPermission={hasPendingPlanPermission}
       modelPickerOverride={modelPickerOverride ?? undefined}
       modePickerOverride={modePickerOverride ?? undefined}
@@ -535,6 +567,28 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       disabled={isOrphanedProject}
     />
   );
+
+  const { queue: heldMessages, setQueue: setHeldMessages } = draft;
+  const handleRemoveHeldMessage = useCallback(
+    (id: string) => setHeldMessages((queue) => queue.filter((m) => m.id !== id)),
+    [setHeldMessages]
+  );
+  const handleWithdrawMessage = useCallback(
+    (id: string) => {
+      backend.withdrawMessage(id).catch((e: unknown) => logError("[AgentMode] withdraw failed", e));
+    },
+    [backend]
+  );
+  // The controls bar sits directly above the composer, so pending messages list above both. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+  const queuedMessagesNode =
+    queuedPrompts.length > 0 || heldMessages.length > 0 ? (
+      <QueuedMessageList
+        delivering={queuedPrompts}
+        held={heldMessages}
+        onRemove={handleRemoveHeldMessage}
+        onWithdraw={backend.canWithdrawMessages() ? handleWithdrawMessage : undefined}
+      />
+    ) : null;
 
   const showProjectHero = isProjectLanding && !isOrphanedProject;
   const heroText = showProjectHero ? `Chat in ${projectName}` : greeting;
@@ -624,7 +678,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                 className={
                   isLanding
                     ? "tw-flex tw-size-full tw-flex-col tw-overflow-y-auto tw-px-2"
-                    : "tw-flex tw-size-full tw-flex-col tw-overflow-hidden"
+                    : "tw-relative tw-flex tw-size-full tw-flex-col tw-overflow-hidden"
                 }
                 data-agent-landing={
                   isProjectLanding ? "project" : isLanding ? "global" : "conversation"
@@ -634,7 +688,12 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                 {isLanding ? (
                   <AgentLandingStack
                     hero={hero}
-                    composer={composerNode}
+                    composer={
+                      <>
+                        {queuedMessagesNode}
+                        {composerNode}
+                      </>
+                    }
                     floating={
                       !isProjectLanding &&
                       projects.length === 0 &&
@@ -671,46 +730,75 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                     }
                   />
                 ) : (
-                  <>
-                    <AgentChatMessages
-                      sourcePath={manager.getSessionSourcePath(sessionId)}
-                      key={sessionId}
-                      messages={messages}
-                      plugin={plugin}
-                      currentPlan={currentPlan}
-                      pendingToolPermissions={pendingToolPermissions}
-                      pendingAskUserQuestions={pendingAskUserQuestions}
-                      chatBackend={backend}
-                      isLoading={isLoading}
-                      feedbackOffer={feedbackOffer}
-                    />
-                    <AgentChatControls
-                      onCopyChatLink={
-                        activeSession?.hasUserVisibleMessages() ? handleCopyChatLink : undefined
-                      }
-                      getChatBookmarkState={
-                        activeSession?.hasUserVisibleMessages()
-                          ? getActiveChatBookmarkState
-                          : undefined
-                      }
-                      onSetChatBookmarked={handleSetActiveChatBookmarked}
-                      onReportError={handleReportError}
-                      onNewChat={handleNewChat}
-                      onSaveAsNote={handleSaveAsNote}
-                      chatHistoryItems={chatHistoryItems}
-                      onLoadHistory={handleLoadChatHistory}
-                      onLoadChat={handleLoadChat}
-                      onUpdateChatTitle={handleUpdateChatTitle}
-                      onDeleteChat={handleDeleteChat}
-                      onCloseSession={handleCloseSession}
-                      openChatIds={openChatIds}
-                      runningChatIds={runningChatIds}
-                      onOpenSourceFile={handleOpenSourceFile}
-                      usageMeter={<AgentContextMeter backend={backend} />}
-                      showMultiAgentUpsell
-                    />
-                    {composerNode}
-                  </>
+                  <AgentTasksProvider tasks={tasks} openTask={handleOpenTask}>
+                    {detailTask ? (
+                      <TaskDetailView
+                        task={detailTask}
+                        status={taskDisplayStatus(detailTask, pendingToolPermissions)}
+                        messages={backend.getTaskMessages(detailTask.toolCallId)}
+                        app={app}
+                        onBack={handleCloseTask}
+                        chatAwaitsAnswer={
+                          pendingToolPermissions.length > 0 || pendingAskUserQuestions.length > 0
+                        }
+                      />
+                    ) : null}
+                    {/* The chat stays laid out, invisible, under a task's view: hiding it with display none collapses its scroller, which then jumps to the end on Back. https://github.com/Brevilabs/obsidian-copilot-private/issues/749 */}
+                    <div
+                      className={cn(
+                        "tw-flex tw-min-h-0 tw-flex-1 tw-flex-col",
+                        detailTask && "tw-invisible tw-absolute tw-inset-0"
+                      )}
+                    >
+                      <AgentChatMessages
+                        sourcePath={manager.getSessionSourcePath(sessionId)}
+                        key={sessionId}
+                        messages={messages}
+                        plugin={plugin}
+                        currentPlan={currentPlan}
+                        pendingToolPermissions={pendingToolPermissions}
+                        pendingAskUserQuestions={pendingAskUserQuestions}
+                        chatBackend={backend}
+                        isLoading={isLoading}
+                        feedbackOffer={feedbackOffer}
+                      />
+                      {queuedMessagesNode}
+                      <AgentChatControls
+                        onCopyChatLink={
+                          activeSession?.hasUserVisibleMessages() ? handleCopyChatLink : undefined
+                        }
+                        getChatBookmarkState={
+                          activeSession?.hasUserVisibleMessages()
+                            ? getActiveChatBookmarkState
+                            : undefined
+                        }
+                        onSetChatBookmarked={handleSetActiveChatBookmarked}
+                        onReportError={handleReportError}
+                        onNewChat={handleNewChat}
+                        onSaveAsNote={handleSaveAsNote}
+                        chatHistoryItems={chatHistoryItems}
+                        onLoadHistory={handleLoadChatHistory}
+                        onLoadChat={handleLoadChat}
+                        onUpdateChatTitle={handleUpdateChatTitle}
+                        onDeleteChat={handleDeleteChat}
+                        onCloseSession={handleCloseSession}
+                        openChatIds={openChatIds}
+                        runningChatIds={runningChatIds}
+                        onOpenSourceFile={handleOpenSourceFile}
+                        usageMeter={<AgentContextMeter backend={backend} />}
+                        tasksIndicator={
+                          <RunningTasksIndicator
+                            tasks={tasks}
+                            permissions={pendingToolPermissions}
+                            onOpenTask={handleOpenTask}
+                            onStopTask={backend.canStopTasks() ? handleStopTask : undefined}
+                            container={rootEl}
+                          />
+                        }
+                      />
+                      {composerNode}
+                    </div>
+                  </AgentTasksProvider>
                 )}
               </div>
             </div>

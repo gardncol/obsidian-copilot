@@ -30,8 +30,8 @@ describe("ToolPermissionCard", () => {
 
       render(<ToolPermissionCard request={request} onResolve={jest.fn()} toolName="websearch" />);
 
-      expect(screen.getByText(/Agent Mode wants to use/).textContent).toBe(
-        "Agent Mode wants to use websearch: latest stable Node.js version."
+      expect(screen.getByText(/The agent wants to use/).textContent).toBe(
+        "The agent wants to use websearch: latest stable Node.js version."
       );
     });
 
@@ -41,8 +41,25 @@ describe("ToolPermissionCard", () => {
 
       render(<ToolPermissionCard request={request} onResolve={jest.fn()} toolName="Edit" />);
 
-      expect(screen.getByText(/Agent Mode wants to run/).textContent).toBe(
-        "Agent Mode wants to run Edit launch brief.md."
+      expect(screen.getByText(/The agent wants to run/).textContent).toBe(
+        "The agent wants to run Edit launch brief.md."
+      );
+    });
+
+    it("names the subagent that asked instead of the generic agent label (https://github.com/Brevilabs/obsidian-copilot-private/issues/749)", () => {
+      const request = makeRequest([]);
+      request.toolCall.title = "Bash: wc -w Welcome.md";
+
+      render(
+        <ToolPermissionCard
+          request={request}
+          onResolve={jest.fn()}
+          requester={'general-purpose "Count words"'}
+        />
+      );
+
+      expect(screen.getByText(/wants to run/).textContent).toBe(
+        'general-purpose "Count words" wants to run Bash: wc -w Welcome.md.'
       );
     });
 

@@ -4,7 +4,7 @@ import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 import { useApp } from "@/context";
 import { useNoteDrag } from "@/hooks/useNoteDrag";
 import { cn } from "@/lib/utils";
-import { type RelevantNoteEntry } from "@/search/findRelevantNotes";
+import { type RelevantNoteEntry } from "@/miyo/findRelevantNotes";
 import { ArrowRight, FileInput, FileOutput, FileText, PlusCircle } from "lucide-react";
 import { TFile } from "obsidian";
 import React, { useCallback, useEffect, useState } from "react";
@@ -169,7 +169,7 @@ function RelevantNoteHoverCard({
             className="tw-flex-1 tw-gap-1.5"
           >
             <PlusCircle className="tw-size-4" />
-            Add to Chat
+            Add to chat
           </Button>
           <Button
             variant="default"
@@ -265,7 +265,7 @@ export function RelevantNoteRow({
             <Button
               variant="ghost2"
               size="icon"
-              title="Add to Chat"
+              title="Add to chat"
               className="tw-size-6 tw-p-0"
               onClick={(e) => {
                 e.stopPropagation();

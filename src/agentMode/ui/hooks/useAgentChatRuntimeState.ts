@@ -5,8 +5,10 @@ import type {
   AskUserQuestionPrompt,
   CurrentPlan,
   PermissionPrompt,
+  QueuedPrompt,
 } from "@/agentMode/session/types";
 import type { FeedbackOffer } from "@/agentMode/session/feedback/feedbackOffer";
+import type { AgentTask } from "@/agentMode/session/AgentSession";
 import { useEffect, useRef, useState } from "react";
 
 export interface AgentChatRuntimeState {
@@ -19,6 +21,8 @@ export interface AgentChatRuntimeState {
   pendingToolPermissions: PermissionPrompt[];
   pendingAskUserQuestions: AskUserQuestionPrompt[];
   feedbackOffer: FeedbackOffer | null;
+  queuedPrompts: readonly QueuedPrompt[];
+  tasks: readonly AgentTask[];
 }
 
 interface BackendRuntimeSnapshot {
@@ -39,6 +43,8 @@ function readBackendRuntimeSnapshot(backend: AgentChatBackend): BackendRuntimeSn
       pendingToolPermissions: backend.getPendingToolPermissions(),
       pendingAskUserQuestions: backend.getPendingAskUserQuestions(),
       feedbackOffer: backend.getFeedbackOffer(),
+      queuedPrompts: backend.getQueuedPrompts(),
+      tasks: backend.getTasks(),
     },
   };
 }

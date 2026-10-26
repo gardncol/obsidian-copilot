@@ -1,10 +1,13 @@
 import { type App, Platform } from "obsidian";
 import type CopilotPlugin from "@/main";
 import { logError } from "@/logger";
+import { MiyoClient } from "@/miyo/MiyoClient";
+import { getMiyoFolderName, isMiyoParseActive, isMiyoSearchActive } from "@/miyo/miyoUtils";
 import { getSettings, subscribeToSettingsChange, type CopilotSettings } from "@/settings/model";
 import { deriveSkillsFolder } from "@/settings/copilotFolder";
 import { subscribeToSystemPromptChange } from "@/system-prompts/state";
 import { copilotAppDataDir, getVaultId } from "@/utils/appPaths";
+import { isObsidianCliEnabled } from "@/services/obsidianCli/ObsidianCliClient";
 import { requireNodeModule } from "@/utils/desktopRuntime";
 import { buildAgentSystemPrompt } from "./backends/shared/agentSystemPrompt";
 import { getBuiltinSkillEnvRestartPolicy } from "./backends/shared/builtinSkillEnv";
@@ -15,8 +18,27 @@ import { AgentModelPreloader } from "./session/AgentModelPreloader";
 import { AgentSessionIndex } from "./session/AgentSessionIndex";
 import { createNodeFileStorage } from "./session/nodeFileStorage";
 import { AgentSessionManager } from "./session/AgentSessionManager";
-import { createFeedbackMcpServer } from "@/agentMode/session/feedback/feedbackMcpServer";
+import {
+  createCopilotMcpServer,
+  SEND_FEEDBACK_TOOL_NAME,
+} from "@/agentMode/session/copilotMcpServer";
 import { seedCopilotDefaultModel } from "./session/copilotDefaultModel";
+import {
+  MIYO_SEARCH_TOOL,
+  MIYO_SEARCH_TOOL_NAME,
+  MIYO_SEARCH_TURNED_OFF_TEXT,
+  runMiyoSearch,
+} from "@/miyo/miyoSearchTool";
+import {
+  createMiyoParse,
+  MIYO_PARSE_TOOL,
+  MIYO_PARSE_TOOL_NAME,
+  MIYO_PARSE_TURNED_OFF_TEXT,
+  parseWithMiyo,
+} from "@/miyo/miyoParseTool";
+import { OpenArtifactsClient } from "@/openArtifacts/OpenArtifactsClient";
+import { createOpenArtifactsTools } from "@/openArtifacts/openArtifactsTools";
+import { getVaultBase } from "@/utils/vaultPath";
 import { SkillManager } from "./skills";
 import {
   availableBuiltinAgents,
@@ -102,10 +124,23 @@ function spawnModelConfigKey(
     .join("\n");
 }
 
+// The OpenArtifacts tools have no switch: a user without Copilot Plus gets the upgrade offer when they call one.
+// https://github.com/Brevilabs/obsidian-copilot-private/issues/746
+export function isCopilotToolOn(toolName: string, settings: CopilotSettings): boolean {
+  return toolName === SEND_FEEDBACK_TOOL_NAME
+    ? settings.agentMode.offerFeedbackCards
+    : toolName === MIYO_PARSE_TOOL_NAME
+      ? isMiyoParseActive(settings)
+      : toolName === MIYO_SEARCH_TOOL_NAME
+        ? isMiyoSearchActive(settings)
+        : true;
+}
+
 export function createAgentSessionManager(app: App, plugin: CopilotPlugin): AgentSessionManager {
   const os = requireNodeModule<typeof import("node:os")>("os");
   const path = requireNodeModule<typeof import("node:path")>("path");
   let lastAvailableSkillAgents: readonly string[] = [];
+  let seededWithCli = false;
   const availableSkillAgents = (): readonly string[] => {
     const states = Object.fromEntries(
       listBackendDescriptors()
@@ -133,6 +168,13 @@ export function createAgentSessionManager(app: App, plugin: CopilotPlugin): Agen
   const initializing = new Map<BackendId, Promise<void>>();
   const beforeBackendStart = async (id: BackendId): Promise<void> => {
     await initializing.get(id);
+    // Obsidian announces no change to its CLI toggle, so each agent start re-checks it.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/726
+    if (isObsidianCliEnabled() === seededWithCli) return;
+    await seedManagedBuiltins().catch((error) =>
+      logError("[Skills] Refresh after an Obsidian CLI toggle change failed", error)
+    );
+    refreshSystemPromptAffected();
   };
   const preloader = new AgentModelPreloader(
     app,
@@ -165,7 +207,41 @@ export function createAgentSessionManager(app: App, plugin: CopilotPlugin): Agen
     beforeBackendStart,
     persistenceManager,
     sessionIndex,
-    feedbackServer: createFeedbackMcpServer(),
+    copilotMcpServer: createCopilotMcpServer(
+      (toolName) => isCopilotToolOn(toolName, getSettings()),
+      [
+        {
+          definition: MIYO_SEARCH_TOOL,
+          turnedOffText: MIYO_SEARCH_TURNED_OFF_TEXT,
+          call: (args) =>
+            runMiyoSearch(args, {
+              client: new MiyoClient(),
+              getSettings,
+              getVaultName: () => getMiyoFolderName(app),
+            }),
+        },
+        {
+          definition: MIYO_PARSE_TOOL,
+          turnedOffText: MIYO_PARSE_TURNED_OFF_TEXT,
+          call: createMiyoParse((path) =>
+            parseWithMiyo(path, {
+              client: new MiyoClient(),
+              getSettings,
+              getVaultName: () => getMiyoFolderName(app),
+              getVaultBase: () => getVaultBase(app),
+            })
+          ),
+        },
+        ...createOpenArtifactsTools({
+          app,
+          client: new OpenArtifactsClient(),
+          publisher: plugin.openArtifactsPublisher,
+          getLicenseKey: () => getSettings().plusLicenseKey.trim(),
+          getVaultBase: () => getVaultBase(app),
+          openInBrowser: (url) => window.open(url, "_blank", "noopener,noreferrer"),
+        }),
+      ]
+    ),
   });
   managerRef = manager;
   // `noteSpawnConfigChanged` holds the restart behind Reload while a session is open: a skill
@@ -253,16 +329,15 @@ export function createAgentSessionManager(app: App, plugin: CopilotPlugin): Agen
     }
   });
   const seedManagedBuiltins = async (): Promise<void> => {
+    seededWithCli = isObsidianCliEnabled();
     await skillManager.refresh(true);
   };
   subscribeToSettingsChange((prev, next) => {
     for (const descriptor of listBackendDescriptors()) {
       const managedEnvRestartPolicy = getBuiltinSkillEnvRestartPolicy(prev, next, descriptor.id);
       if (managedEnvRestartPolicy === "none") continue;
-      // Applying a new search boundary cannot wait for a running turn to finish,
-      // let alone for the user to accept a Reload: cancel the turn before it can
-      // start another search with the prior scope.
-      // https://github.com/Brevilabs/obsidian-copilot-private/issues/121
+      // Turning Self-Host Mode on cannot wait for a running turn or a Reload, or that turn could still search the web through a hosted path.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/165
       const applied =
         managedEnvRestartPolicy === "immediate"
           ? manager.restartBackend(descriptor.id, "managed agent env changed", {
@@ -288,21 +363,7 @@ export function createAgentSessionManager(app: App, plugin: CopilotPlugin): Agen
       prev.agentMode.skills.builtinPreferences !== next.agentMode.skills.builtinPreferences
     ) {
       void seedManagedBuiltins()
-        .then(() => {
-          refreshSystemPromptAffected();
-          if (prev.enableMiyoDocumentProcessing === next.enableMiyoDocumentProcessing) return;
-          for (const descriptor of listBackendDescriptors()) {
-            if (descriptor.restartOnSystemPromptChange) continue;
-            void manager
-              .noteSpawnConfigChanged(descriptor.id, "Miyo document processing changed")
-              .catch((e) =>
-                logError(
-                  `[AgentMode] restart after Miyo document processing change failed: ${descriptor.id}`,
-                  e
-                )
-              );
-          }
-        })
+        .then(refreshSystemPromptAffected)
         .catch((e) => logError("[Skills] builtin skill re-seeding failed", e));
     }
   });

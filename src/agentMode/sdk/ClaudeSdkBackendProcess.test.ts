@@ -3,8 +3,14 @@ import type {
   HookCallback,
   ModelInfo,
   SDKMessage,
+  SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { BackendDescriptor, SessionEvent } from "@/agentMode/session/types";
+import type {
+  BackendDescriptor,
+  PromptInput,
+  SessionEvent,
+  TurnEnd,
+} from "@/agentMode/session/types";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -62,9 +68,11 @@ jest.mock("./effortOption", () => ({
 import {
   ClaudeSdkBackendProcess,
   type ClaudeSdkBackendProcessOptions,
-  enforceForegroundToolUse,
   promptInputToAnthropicContent,
+  runSubagentsInBackground,
 } from "./ClaudeSdkBackendProcess";
+import { CLAUDE_DISCONNECTED_MESSAGE } from "./claudeLiveQuery";
+import { FakeClaudeQuery, SessionEventRecorder } from "./testing/fakeClaudeQuery";
 import { getCachedSdkCatalog } from "./effortOption";
 import { AuthRequiredError } from "@/agentMode/session/errors";
 
@@ -101,33 +109,35 @@ function fakeDescriptor(): BackendDescriptor {
   } as unknown as BackendDescriptor;
 }
 
-function makeQuery(messages: SDKMessage[]) {
-  const iter = (async function* () {
-    for (const m of messages) yield m;
-  })();
-  return Object.assign(iter, {
-    interrupt: jest.fn().mockResolvedValue(undefined),
-    setModel: jest.fn().mockResolvedValue(undefined),
-    setPermissionMode: jest.fn().mockResolvedValue(undefined),
-  });
+const ISSUE_175 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/175";
+
+let fakes: FakeClaudeQuery[] = [];
+
+interface QueryArgs {
+  prompt: AsyncIterable<SDKUserMessage>;
+  options: Record<string, unknown>;
 }
 
-function makeControlledQuery() {
-  let finish!: () => void;
-  const finished = new Promise<void>((resolve) => {
-    finish = resolve;
-  });
-  const iter = (async function* () {
-    await finished;
-    yield resultMessage();
-  })();
-  return {
-    query: Object.assign(iter, {
-      interrupt: jest.fn().mockResolvedValue(undefined),
-      setModel: jest.fn().mockResolvedValue(undefined),
-      setPermissionMode: jest.fn().mockResolvedValue(undefined),
-    }),
-    finish,
+function answering(script: SDKMessage[] | ((turn: number) => SDKMessage[])) {
+  return ({ prompt }: QueryArgs): FakeClaudeQuery => {
+    const fake = new FakeClaudeQuery(prompt);
+    fakes.push(fake);
+    void (async () => {
+      for (let turn = 0; ; turn++) {
+        const input = await fake.nextInput(turn);
+        fake.echo(input);
+        fake.emit(...(typeof script === "function" ? script(turn) : script));
+      }
+    })();
+    return fake;
+  };
+}
+
+function silent() {
+  return ({ prompt }: QueryArgs): FakeClaudeQuery => {
+    const fake = new FakeClaudeQuery(prompt);
+    fakes.push(fake);
+    return fake;
   };
 }
 
@@ -229,15 +239,18 @@ const WEEKLY_21_PERCENT = {
   rate_limits: { seven_day: { utilization: 21 } },
 };
 
+let planUsage: () => Promise<unknown> = async () => ({});
+
 async function promptReportingPlanUsage(
   proc: ClaudeSdkBackendProcess,
   sessionId: string,
   usage: () => Promise<unknown>
 ): Promise<void> {
-  queryMock.mockImplementationOnce(() =>
-    Object.assign(makeQuery([resultMessage()]), { [USAGE_METHOD]: usage })
+  planUsage = usage;
+  queryMock.mockImplementation((args: QueryArgs) =>
+    Object.assign(answering([resultMessage()])(args), { [USAGE_METHOD]: () => planUsage() })
   );
-  await proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
+  await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
   await flushMicrotasks();
 }
 
@@ -245,10 +258,49 @@ function planUsageUpdates(events: SessionEvent[]): SessionEvent["update"][] {
   return events.map((e) => e.update).filter((u) => u.sessionUpdate === "plan_usage_update");
 }
 
+interface Collector {
+  events: SessionEvent[];
+  turnEnds: Array<(end: TurnEnd) => void>;
+}
+
+const collectors = new WeakMap<ClaudeSdkBackendProcess, Map<string, Collector>>();
+
+function collectorsOf(proc: ClaudeSdkBackendProcess): Map<string, Collector> {
+  let bySession = collectors.get(proc);
+  if (!bySession) {
+    bySession = new Map();
+    collectors.set(proc, bySession);
+  }
+  return bySession;
+}
+
 function registerCollector(proc: ClaudeSdkBackendProcess, sessionId: string): SessionEvent[] {
-  const events: SessionEvent[] = [];
-  proc.registerSessionHandler(sessionId, (e) => events.push(e));
-  return events;
+  const collector: Collector = { events: [], turnEnds: [] };
+  collectorsOf(proc).set(sessionId, collector);
+  proc.registerSessionHandler(sessionId, (event) => {
+    const { update } = event;
+    if (update.sessionUpdate === "turn_ended") collector.turnEnds.shift()?.(update);
+    else if (
+      update.sessionUpdate !== "message_delivered" &&
+      update.sessionUpdate !== "turn_started"
+    )
+      collector.events.push(event);
+  });
+  return collector.events;
+}
+
+let promptSeq = 0;
+
+function promptTurn(
+  proc: ClaudeSdkBackendProcess,
+  input: Omit<PromptInput, "promptId">
+): Promise<TurnEnd> {
+  if (!collectorsOf(proc).has(input.sessionId)) registerCollector(proc, input.sessionId);
+  const collector = collectorsOf(proc).get(input.sessionId)!;
+  return new Promise((resolve, reject) => {
+    collector.turnEnds.push(resolve);
+    proc.prompt({ ...input, promptId: `prompt-${++promptSeq}` }).catch(reject);
+  });
 }
 
 function errorResultMessage(errors: string[]): SDKMessage {
@@ -276,6 +328,7 @@ describe("ClaudeSdkBackendProcess", () => {
     it("returns a plain string when the prompt is text-only", () => {
       const result = promptInputToAnthropicContent({
         sessionId: "s1",
+        promptId: "p1",
         prompt: [
           { type: "text", text: "hello" },
           { type: "text", text: "world" },
@@ -287,6 +340,7 @@ describe("ClaudeSdkBackendProcess", () => {
     it("returns content blocks when an image is attached", () => {
       const result = promptInputToAnthropicContent({
         sessionId: "s1",
+        promptId: "p1",
         prompt: [
           { type: "text", text: "describe" },
           { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
@@ -304,6 +358,7 @@ describe("ClaudeSdkBackendProcess", () => {
     it("normalizes jpg media types before sending image blocks", () => {
       const result = promptInputToAnthropicContent({
         sessionId: "s1",
+        promptId: "p1",
         prompt: [
           { type: "text", text: "describe" },
           { type: "image", mimeType: "image/jpg", data: "aGVsbG8=" },
@@ -321,6 +376,7 @@ describe("ClaudeSdkBackendProcess", () => {
     it("omits image media types Anthropic does not accept", () => {
       const result = promptInputToAnthropicContent({
         sessionId: "s1",
+        promptId: "p1",
         prompt: [
           { type: "text", text: "describe" },
           { type: "image", mimeType: "image/heic", data: "aGVsbG8=" },
@@ -335,6 +391,7 @@ describe("ClaudeSdkBackendProcess", () => {
     it("represents resource_link as a defensive text reference", () => {
       const result = promptInputToAnthropicContent({
         sessionId: "s1",
+        promptId: "p1",
         prompt: [
           { type: "text", text: "see the doc" },
           { type: "resource_link", uri: "vault://README.md", name: "README" },
@@ -352,9 +409,9 @@ describe("ClaudeSdkBackendProcess", () => {
     });
   });
 
-  describe("enforceForegroundToolUse()", () => {
+  describe("runSubagentsInBackground()", () => {
     const invoke = (toolName: string, toolInput: unknown) =>
-      enforceForegroundToolUse(
+      runSubagentsInBackground(
         {
           hook_event_name: "PreToolUse",
           tool_name: toolName,
@@ -365,55 +422,45 @@ describe("ClaudeSdkBackendProcess", () => {
         { signal: new AbortController().signal }
       );
 
-    it.each(["Agent", "Task", "Bash"])(
-      "forces %s to the foreground while preserving its other input",
+    it.each(["Agent", "Task"])(
+      `runs a %s call that does not choose in the background, keeping its other input (${ISSUE_175})`,
       async (toolName) => {
         await expect(
-          invoke(toolName, { description: "Inspect the vault", run_in_background: true })
+          invoke(toolName, { description: "Inspect the vault", isolation: "remote" })
         ).resolves.toEqual({
           hookSpecificOutput: {
             hookEventName: "PreToolUse",
             updatedInput: {
               description: "Inspect the vault",
-              run_in_background: false,
+              isolation: "remote",
+              run_in_background: true,
             },
           },
         });
       }
     );
 
-    it.each(["Agent", "Task"])("denies a remote-isolated %s", async (toolName) => {
-      await expect(
-        invoke(toolName, { description: "Inspect remotely", isolation: "remote" })
-      ).resolves.toEqual({
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "deny",
-          permissionDecisionReason: expect.stringContaining("temporarily unavailable"),
-        },
-      });
-    });
+    it.each([false, true, "false", "true"])(
+      `leaves a subagent whose model chose run_in_background %p to that choice (${ISSUE_175})`,
+      async (choice) => {
+        await expect(
+          invoke("Agent", { prompt: "Count words", run_in_background: choice })
+        ).resolves.toEqual({});
+      }
+    );
 
-    it("keeps worktree-isolated agents synchronous", async () => {
-      await expect(invoke("Agent", { isolation: "worktree" })).resolves.toEqual({
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          updatedInput: { isolation: "worktree", run_in_background: false },
-        },
-      });
-    });
-
-    it("normalizes malformed foreground-tool input without throwing", async () => {
-      await expect(invoke("Bash", null)).resolves.toEqual({
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          updatedInput: { run_in_background: false },
-        },
-      });
-    });
-
-    it("leaves unrelated tools unchanged", async () => {
+    it("leaves Bash and other tools to the model's own choice", async () => {
+      await expect(invoke("Bash", { command: "sleep 20" })).resolves.toEqual({});
       await expect(invoke("Read", { file_path: "note.md" })).resolves.toEqual({});
+    });
+
+    it("treats malformed subagent input as empty input", async () => {
+      await expect(invoke("Agent", null)).resolves.toEqual({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          updatedInput: { run_in_background: true },
+        },
+      });
     });
   });
 
@@ -421,6 +468,7 @@ describe("ClaudeSdkBackendProcess", () => {
     beforeEach(() => {
       queryMock.mockReset();
       createSdkMcpServerMock.mockClear();
+      fakes = [];
     });
 
     describe("newSession()", () => {
@@ -458,12 +506,12 @@ describe("ClaudeSdkBackendProcess", () => {
       });
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/219 sends the initialized model and lowest effort on the first prompt", async () => {
-        queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+        queryMock.mockImplementation(answering([resultMessage()]));
         const proc = makeProc();
 
         const { sessionId } = await proc.newSession({ cwd: "/vault" });
         proc.registerSessionHandler(sessionId, () => {});
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
 
         const promptCalls = getPromptQueryCalls();
         expect(promptCalls).toHaveLength(1);
@@ -513,7 +561,7 @@ describe("ClaudeSdkBackendProcess", () => {
         const initializationResult = jest.fn().mockResolvedValue({ models: FAKE_CATALOG });
         queryMock.mockReturnValue({
           initializationResult,
-          interrupt: jest.fn().mockResolvedValue(undefined),
+          close: jest.fn(),
         });
 
         const proc = makeProc({ getEnvOverrides: () => ({ ANTHROPIC_MODEL: "claude-fable-5" }) });
@@ -531,9 +579,108 @@ describe("ClaudeSdkBackendProcess", () => {
     });
 
     describe("prompt()", () => {
-      it("emits SDK text deltas as agent_message_chunk events and resolves with end_turn", async () => {
-        queryMock.mockImplementation(() =>
-          makeQuery([
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/509 sends an interrupt-and-send prompt to Claude at priority now", async () => {
+        queryMock.mockImplementation(silent());
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+
+        await proc.prompt({
+          sessionId,
+          promptId: "p1",
+          prompt: [{ type: "text", text: "hi" }],
+          interrupt: true,
+        });
+
+        expect(await fakes[0].nextInput()).toMatchObject({ uuid: "p1", priority: "now" });
+      });
+
+      it(`resolves once the prompt is queued on the chat's live query, which reports its delivery and turn when Claude echoes it (${ISSUE_175})`, async () => {
+        queryMock.mockImplementation(silent());
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        const recorder = new SessionEventRecorder();
+        proc.registerSessionHandler(sessionId, recorder.handler);
+
+        await proc.prompt({ sessionId, promptId: "p1", prompt: [{ type: "text", text: "hi" }] });
+        const sent = await fakes[0].nextInput();
+        expect(recorder.updates()).toEqual([]);
+        fakes[0].echo(sent);
+        fakes[0].emit(resultMessage());
+        await recorder.waitFor("turn_ended");
+
+        expect(sent).toMatchObject({ uuid: "p1", message: { role: "user", content: "hi" } });
+        expect(recorder.updates()).toEqual([
+          { sessionUpdate: "message_delivered", promptId: "p1" },
+          { sessionUpdate: "turn_started", turnId: expect.any(String) },
+          {
+            sessionUpdate: "turn_ended",
+            turnId: (recorder.updates()[1] as { turnId: string }).turnId,
+            stopReason: "end_turn",
+          },
+        ]);
+      });
+
+      it(`keeps one query for the whole chat, so a later prompt never starts a query or passes resume (${ISSUE_175})`, async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "1" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "2" }] });
+
+        const promptCalls = getPromptQueryCalls();
+        expect(promptCalls).toHaveLength(1);
+        expect(fakes[0].inputs.map((input) => input.message.content)).toEqual(["1", "2"]);
+        const { options } = promptCalls[0][0] as { options: Record<string, unknown> };
+        expect(options.sessionId).toBe(sessionId);
+        expect(options.resume).toBeUndefined();
+      });
+
+      it(`after Claude exits unexpectedly, reports the disconnect and resumes the chat in a new query on the next prompt (${ISSUE_175})`, async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        const recorder = new SessionEventRecorder();
+        proc.registerSessionHandler(sessionId, recorder.handler);
+        await proc.prompt({ sessionId, promptId: "p1", prompt: [{ type: "text", text: "1" }] });
+        await recorder.waitFor("turn_ended");
+
+        fakes[0].fail(new Error("process exited with code 1"));
+        const disconnected = await recorder.waitFor("session_disconnected");
+        await proc.prompt({ sessionId, promptId: "p2", prompt: [{ type: "text", text: "2" }] });
+        await recorder.waitFor("turn_ended", () => true, 1);
+
+        expect(disconnected.error).toEqual(new Error("process exited with code 1"));
+        const [first, second] = getPromptQueryCalls().map(
+          (call) => (call[0] as { options: Record<string, unknown> }).options
+        );
+        expect(first.sessionId).toBe(sessionId);
+        expect(second.resume).toBe(sessionId);
+        expect(second.sessionId).toBeUndefined();
+        expect(fakes[1].inputs.map((input) => input.uuid)).toEqual(["p2"]);
+      });
+
+      it(`withdraws a prompt Claude never received when it exits, and says it disconnected (${ISSUE_175})`, async () => {
+        queryMock.mockImplementation(silent());
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        const recorder = new SessionEventRecorder();
+        proc.registerSessionHandler(sessionId, recorder.handler);
+        await proc.prompt({ sessionId, promptId: "p1", prompt: [{ type: "text", text: "1" }] });
+        await fakes[0].nextInput();
+
+        fakes[0].end();
+        await recorder.waitFor("session_disconnected");
+
+        expect(recorder.updates()).toEqual([
+          { sessionUpdate: "messages_withdrawn", promptIds: ["p1"] },
+          { sessionUpdate: "session_disconnected", error: new Error(CLAUDE_DISCONNECTED_MESSAGE) },
+        ]);
+      });
+
+      it("emits SDK text deltas as agent_message_chunk events and ends the turn with end_turn", async () => {
+        queryMock.mockImplementation(
+          answering([
             streamEvent({ type: "message_start", message: {} }),
             streamEvent({
               type: "content_block_delta",
@@ -547,7 +694,7 @@ describe("ClaudeSdkBackendProcess", () => {
         const { sessionId } = await proc.newSession({ cwd: "/vault" });
         const events = registerCollector(proc, sessionId);
 
-        const resp = await proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
+        const resp = await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
 
         expect(resp.stopReason).toBe("end_turn");
         expect(events.map((e) => e.update)).toEqual([
@@ -556,7 +703,7 @@ describe("ClaudeSdkBackendProcess", () => {
       });
 
       it("attaches Copilot's MCP servers over HTTP and pre-approves their tools on every turn", async () => {
-        queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+        queryMock.mockImplementation(answering([resultMessage()]));
         const proc = makeProc();
         const { sessionId } = await proc.newSession({
           cwd: "/vault",
@@ -569,7 +716,7 @@ describe("ClaudeSdkBackendProcess", () => {
           ],
         });
 
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
 
         const { options } = getPromptQueryCalls()[0][0] as { options: Record<string, unknown> };
         expect(options.mcpServers).toEqual({
@@ -595,8 +742,8 @@ describe("ClaudeSdkBackendProcess", () => {
       ])(
         "labels the compaction a %j turn reports as %s (https://github.com/Brevilabs/obsidian-copilot-private/issues/635)",
         async (text, trigger) => {
-          queryMock.mockImplementation(() =>
-            makeQuery([
+          queryMock.mockImplementation(
+            answering([
               {
                 type: "system",
                 subtype: "status",
@@ -611,7 +758,7 @@ describe("ClaudeSdkBackendProcess", () => {
           const { sessionId } = await proc.newSession({ cwd: "/vault" });
           const events = registerCollector(proc, sessionId);
 
-          await proc.prompt({ sessionId, prompt: [{ type: "text", text }] });
+          await promptTurn(proc, { sessionId, prompt: [{ type: "text", text }] });
 
           expect(events.map((e) => e.update)).toEqual([
             { sessionUpdate: "compaction", id: "compaction-1", status: "in_progress", trigger },
@@ -619,20 +766,22 @@ describe("ClaudeSdkBackendProcess", () => {
         }
       );
 
-      it("starts the first query with the claude_code preset, the tool deny list, the foreground hook, and a fresh session id", async () => {
-        queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+      it(`starts the chat's query with the claude_code preset, prompt echoes, interrupts that spare background agents, the background-subagent hook, and a fresh session id (${ISSUE_175})`, async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
         const proc = makeProc();
         const { sessionId } = await proc.newSession({ cwd: "/vault" });
 
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
 
         const promptCalls = getPromptQueryCalls();
         expect(promptCalls).toHaveLength(1);
         const { options } = promptCalls[0][0] as { options: Record<string, unknown> };
         expect(options.pathToClaudeCodeExecutable).toBe("/usr/local/bin/claude");
         expect(options.mcpServers).toBeUndefined();
-        expect(options.disallowedTools).toEqual(["TaskOutput", "Workflow", "Monitor"]);
-        expect(options.hooks).toEqual({ PreToolUse: [{ hooks: [enforceForegroundToolUse] }] });
+        expect(options.disallowedTools).toBeUndefined();
+        expect(options.extraArgs).toEqual({ "replay-user-messages": null });
+        expect(options.perTaskStopAffordance).toBe(true);
+        expect(options.hooks).toEqual({ PreToolUse: [{ hooks: [runSubagentsInBackground] }] });
         expect(options.sessionId).toBe(sessionId);
         expect(options.resume).toBeUndefined();
         expect(options.systemPrompt).toEqual({
@@ -644,25 +793,40 @@ describe("ClaudeSdkBackendProcess", () => {
       });
 
       it("auto-allows only read tools so Write and Edit follow the session's permission mode and reach Copilot's prompt in Default mode (https://github.com/Brevilabs/obsidian-copilot-private/issues/690)", async () => {
-        queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+        queryMock.mockImplementation(answering([resultMessage()]));
         const proc = makeProc();
         const { sessionId } = await proc.newSession({ cwd: "/vault" });
 
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
 
         const { options } = getPromptQueryCalls()[0][0] as { options: Record<string, unknown> };
         expect(options.allowedTools).toEqual(["Read", "Glob", "Grep", "LS"]);
       });
 
+      it("has Claude load every AGENTS.md beside any CLAUDE.md, so vault and project instructions apply without a generated CLAUDE.md (https://github.com/logancyang/obsidian-copilot/issues/3662)", async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault/Projects/Research" });
+
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
+
+        const { options } = getPromptQueryCalls()[0][0] as { options: Record<string, unknown> };
+        expect(options.settings).toEqual({
+          pluginConfigs: {
+            "agents-md@builtin": { options: { instructionFiles: "claude-md-and-agents-md" } },
+          },
+        });
+      });
+
       it("forwards the composed system prompt via systemPrompt append on the claude_code preset", async () => {
-        queryMock.mockImplementation(() =>
-          makeQuery([streamEvent({ type: "message_start", message: {} }), resultMessage()])
+        queryMock.mockImplementation(
+          answering([streamEvent({ type: "message_start", message: {} }), resultMessage()])
         );
 
         const proc = makeProc({ getSystemPromptAppend: () => "DO THIS THING WITH SKILLS" });
 
         const { sessionId } = await proc.newSession({ cwd: "/vault" });
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
 
         const calls = getPromptQueryCalls();
         const opts = (calls[0][0] as { options: Record<string, unknown> }).options;
@@ -675,8 +839,8 @@ describe("ClaudeSdkBackendProcess", () => {
       });
 
       it("captures the system prompt at newSession time and ignores later setting changes mid-session", async () => {
-        queryMock.mockImplementation(() =>
-          makeQuery([streamEvent({ type: "message_start", message: {} }), resultMessage()])
+        queryMock.mockImplementation(
+          answering([streamEvent({ type: "message_start", message: {} }), resultMessage()])
         );
 
         let current = "FIRST DIRECTIVE";
@@ -684,7 +848,7 @@ describe("ClaudeSdkBackendProcess", () => {
 
         const { sessionId } = await proc.newSession({ cwd: "/vault" });
         current = "SECOND DIRECTIVE";
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
 
         const opts = (getPromptQueryCalls()[0][0] as { options: Record<string, unknown> }).options;
         expect(opts.systemPrompt).toEqual({
@@ -695,120 +859,55 @@ describe("ClaudeSdkBackendProcess", () => {
         });
       });
 
-      it("passes resume on the second prompt for the same session", async () => {
-        queryMock.mockImplementation(() => makeQuery([resultMessage()]));
-
-        const proc = makeProc();
-
-        const { sessionId } = await proc.newSession({ cwd: "/vault" });
-        proc.registerSessionHandler(sessionId, () => {});
-
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "1" }] });
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "2" }] });
-
-        const promptCalls = getPromptQueryCalls();
-        expect(promptCalls).toHaveLength(2);
-        const second = promptCalls[1][0] as { options: Record<string, unknown> };
-        expect(second.options.resume).toBe(sessionId);
-        expect(second.options.sessionId).toBeUndefined();
-      });
-
       it("disables thinking when the extended-thinking toggle is off", async () => {
-        queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+        queryMock.mockImplementation(answering([resultMessage()]));
         const proc = makeProc({ getEnableThinking: () => false });
 
         const { sessionId } = await proc.newSession({ cwd: "/vault" });
         proc.registerSessionHandler(sessionId, () => {});
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
 
         const call = getPromptQueryCalls()[0][0] as { options: { thinking?: unknown } };
         expect(call.options.thinking).toEqual({ type: "disabled" });
       });
 
       it("requests summarized adaptive thinking when the toggle is on", async () => {
-        queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+        queryMock.mockImplementation(answering([resultMessage()]));
         const proc = makeProc({ getEnableThinking: () => true });
 
         const { sessionId } = await proc.newSession({ cwd: "/vault" });
         proc.registerSessionHandler(sessionId, () => {});
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
 
         const call = getPromptQueryCalls()[0][0] as { options: { thinking?: unknown } };
         expect(call.options.thinking).toEqual({ type: "adaptive", display: "summarized" });
       });
 
-      it("preserves background task identity across prompt queries", async () => {
-        queryMock
-          .mockImplementationOnce(() =>
-            makeQuery([
-              streamEvent({
-                type: "content_block_start",
-                index: 0,
-                content_block: { type: "tool_use", id: "tu-launch", name: "Agent", input: {} },
-              }),
-              {
-                type: "user",
-                tool_use_result: {
-                  isAsync: true,
-                  status: "async_launched",
-                  agentId: "task-a",
-                },
-                message: {
-                  content: [
-                    {
-                      type: "tool_result",
-                      tool_use_id: "tu-launch",
-                      content: "Async agent launched successfully.",
-                    },
-                  ],
-                },
-                parent_tool_use_id: null,
-                session_id: "irrelevant",
-              } as unknown as SDKMessage,
-              resultMessage(),
-            ])
-          )
-          .mockImplementationOnce(() =>
-            makeQuery([
-              {
-                type: "system",
-                subtype: "task_notification",
-                task_id: "task-a",
-                status: "completed",
-                summary: "late report",
-              } as unknown as SDKMessage,
-              resultMessage(),
-            ])
-          );
-
-        const proc = makeProc();
+      it(`applies an extended-thinking toggle flipped mid-chat to the running query before the next prompt, without restarting it (${ISSUE_175})`, async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        let thinking = true;
+        const proc = makeProc({ getEnableThinking: () => thinking });
         const { sessionId } = await proc.newSession({ cwd: "/vault" });
-        const events: SessionEvent[] = [];
-        proc.registerSessionHandler(sessionId, (event) => events.push(event));
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "1" }] });
 
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "start" }] });
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "continue" }] });
+        thinking = false;
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "2" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "3" }] });
+        thinking = true;
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "4" }] });
 
-        expect(events).toContainEqual({
-          sessionId,
-          update: {
-            sessionUpdate: "tool_call_update",
-            toolCallId: "tu-launch",
-            status: "completed",
-            content: [{ type: "content", content: { type: "text", text: "late report" } }],
-          },
-        });
+        expect(fakes[0].setMaxThinkingTokens.mock.calls).toEqual([
+          [0, undefined],
+          [31_999, "summarized"],
+        ]);
+        expect(getPromptQueryCalls()).toHaveLength(1);
       });
 
-      it("keeps concurrent query actions bound to their owning sessions after either query finishes for https://github.com/logancyang/obsidian-copilot/issues/2948", async () => {
-        const queryA = makeControlledQuery();
-        const queryB = makeControlledQuery();
-        queryMock.mockReturnValueOnce(queryA.query).mockReturnValueOnce(queryB.query);
+      it("keeps each chat's permission and question requests bound to its own session for https://github.com/logancyang/obsidian-copilot/issues/2948", async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
         const proc = makeProc();
         const { sessionId: sessionA } = await proc.newSession({ cwd: "/vault/a" });
         const { sessionId: sessionB } = await proc.newSession({ cwd: "/vault/b" });
-        proc.registerSessionHandler(sessionA, () => {});
-        proc.registerSessionHandler(sessionB, () => {});
         const permissionPrompter = jest.fn(async () => ({
           outcome: { outcome: "selected" as const, optionId: "allow_once" },
         }));
@@ -816,10 +915,10 @@ describe("ClaudeSdkBackendProcess", () => {
         proc.setPermissionPrompter(permissionPrompter);
         proc.setAskUserQuestionPrompter(questionPrompter);
 
-        const turnA = proc.prompt({ sessionId: sessionA, prompt: [{ type: "text", text: "A" }] });
-        const turnB = proc.prompt({ sessionId: sessionB, prompt: [{ type: "text", text: "B" }] });
-        await flushMicrotasks();
-        expect(getPromptQueryCalls()).toHaveLength(2);
+        await Promise.all([
+          promptTurn(proc, { sessionId: sessionA, prompt: [{ type: "text", text: "A" }] }),
+          promptTurn(proc, { sessionId: sessionB, prompt: [{ type: "text", text: "B" }] }),
+        ]);
         const [callA, callB] = getPromptQueryCalls().map(
           (call) => (call[0] as { options: { canUseTool: CanUseTool } }).options.canUseTool
         );
@@ -828,36 +927,30 @@ describe("ClaudeSdkBackendProcess", () => {
           signal: new AbortController().signal,
           toolUseID: "tool-a",
         } as never);
-        expect(permissionPrompter).toHaveBeenLastCalledWith(
-          expect.objectContaining({ sessionId: sessionA })
-        );
-
-        queryA.finish();
-        await turnA;
         await callB(
           "AskUserQuestion",
           { questions: [{ question: "Continue?", options: [{ label: "Yes" }] }] },
           { signal: new AbortController().signal, toolUseID: "tool-b" } as never
         );
+
+        expect(permissionPrompter).toHaveBeenLastCalledWith(
+          expect.objectContaining({ sessionId: sessionA })
+        );
         expect(questionPrompter).toHaveBeenLastCalledWith(
           expect.objectContaining({ sessionId: sessionB, requestId: "tool-b" })
         );
-
-        queryB.finish();
-        await turnB;
       });
 
-      it("rejects with Claude's reset message when a success-shaped result reports usage exhaustion", async () => {
-        queryMock.mockImplementation(() => makeQuery(usageLimitMessages()));
+      it("ends the turn with Claude's reset message when a success-shaped result reports usage exhaustion", async () => {
+        queryMock.mockImplementation(answering(usageLimitMessages()));
 
         const proc = makeProc();
 
         const { sessionId } = await proc.newSession({ cwd: "/vault" });
-        proc.registerSessionHandler(sessionId, () => {});
 
-        await expect(
-          proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] })
-        ).rejects.toThrow(new Error(USAGE_LIMIT_MESSAGE));
+        const end = await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
+
+        expect(end.error).toEqual(new Error(USAGE_LIMIT_MESSAGE));
       });
 
       it("does not start a query when its session closes during environment preparation https://github.com/Brevilabs/obsidian-copilot-private/issues/429", async () => {
@@ -867,18 +960,20 @@ describe("ClaudeSdkBackendProcess", () => {
         });
         const backend = makeProc({ getManagedEnv: () => environment });
         const { sessionId } = await backend.newSession({ cwd: "/vault" });
-        queryMock.mockImplementation(() => makeQuery([resultMessage()]));
-        const pending = backend.prompt({ sessionId, prompt: [] });
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const pending = promptTurn(backend, { sessionId, prompt: [] });
         await flushMicrotasks();
         await backend.closeSession({ sessionId });
         finishEnvironment({});
-        await expect(pending).resolves.toEqual({ stopReason: "cancelled" });
+        await expect(pending).rejects.toThrow(
+          `Session ${sessionId} closed before its prompt was sent`
+        );
         expect(getPromptQueryCalls()).toHaveLength(0);
       });
 
       describe("authentication", () => {
         it("rejects with AuthRequiredError and never spawns query when not signed in", async () => {
-          queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+          queryMock.mockImplementation(answering([resultMessage()]));
           const checkAuth = jest.fn().mockResolvedValue(false);
           const proc = makeProc({ checkAuth });
 
@@ -886,24 +981,24 @@ describe("ClaudeSdkBackendProcess", () => {
           proc.registerSessionHandler(sessionId, () => {});
 
           await expect(
-            proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] })
+            promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] })
           ).rejects.toBeInstanceOf(AuthRequiredError);
           expect(getPromptQueryCalls()).toHaveLength(0);
         });
 
         it("checks auth only once across turns once signed in (cached)", async () => {
-          queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+          queryMock.mockImplementation(answering([resultMessage()]));
           const checkAuth = jest.fn().mockResolvedValue(true);
           const proc = makeProc({ checkAuth });
 
           const { sessionId } = await proc.newSession({ cwd: "/vault" });
           proc.registerSessionHandler(sessionId, () => {});
 
-          await proc.prompt({ sessionId, prompt: [{ type: "text", text: "1" }] });
-          await proc.prompt({ sessionId, prompt: [{ type: "text", text: "2" }] });
+          await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "1" }] });
+          await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "2" }] });
 
           expect(checkAuth).toHaveBeenCalledTimes(1);
-          expect(getPromptQueryCalls()).toHaveLength(2);
+          expect(getPromptQueryCalls()).toHaveLength(1);
         });
 
         it("re-checks auth on the next turn when a turn ends non-success with no errors", async () => {
@@ -913,61 +1008,14 @@ describe("ClaudeSdkBackendProcess", () => {
           const { sessionId } = await proc.newSession({ cwd: "/vault" });
           proc.registerSessionHandler(sessionId, () => {});
 
-          queryMock.mockImplementationOnce(() => makeQuery([errorResultMessage([])]));
-          await proc.prompt({ sessionId, prompt: [{ type: "text", text: "1" }] });
+          queryMock.mockImplementation(
+            answering((turn) => [turn === 0 ? errorResultMessage([]) : resultMessage()])
+          );
+          await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "1" }] });
           expect(checkAuth).toHaveBeenCalledTimes(1);
 
-          queryMock.mockImplementationOnce(() => makeQuery([resultMessage()]));
-          await proc.prompt({ sessionId, prompt: [{ type: "text", text: "2" }] });
+          await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "2" }] });
           expect(checkAuth).toHaveBeenCalledTimes(2);
-        });
-      });
-
-      describe("stream stall watchdog", () => {
-        function makeStallingQuery(arg: unknown) {
-          const { options } = arg as { options: { abortController: AbortController } };
-          const { signal } = options.abortController;
-          const iter = (async function* () {
-            yield streamEvent({ type: "message_start", message: {} });
-            yield streamEvent({
-              type: "content_block_delta",
-              index: 0,
-              delta: { type: "text_delta", text: "Draf" },
-            });
-            await new Promise<void>((resolve) => {
-              if (signal.aborted) resolve();
-              else signal.addEventListener("abort", () => resolve(), { once: true });
-            });
-          })();
-          return Object.assign(iter, {
-            interrupt: jest.fn().mockResolvedValue(undefined),
-            setModel: jest.fn().mockResolvedValue(undefined),
-            setPermissionMode: jest.fn().mockResolvedValue(undefined),
-          });
-        }
-
-        it("aborts the turn and rejects when the stream stalls mid-message", async () => {
-          queryMock.mockImplementation((arg: unknown) => makeStallingQuery(arg));
-          const proc = makeProc();
-          const { sessionId } = await proc.newSession({ cwd: "/vault" });
-          proc.registerSessionHandler(sessionId, () => {});
-
-          jest.useFakeTimers();
-          try {
-            const turn = proc.prompt({
-              sessionId,
-              prompt: [{ type: "text", text: "draft a plan" }],
-            });
-            const assertion = expect(turn).rejects.toThrow(/stalled/i);
-            await jest.advanceTimersByTimeAsync(61_000);
-            await assertion;
-          } finally {
-            jest.useRealTimers();
-          }
-          const call = getPromptQueryCalls()[0][0] as {
-            options: { abortController: AbortController };
-          };
-          expect(call.options.abortController.signal.aborted).toBe(true);
         });
       });
 
@@ -1029,8 +1077,8 @@ describe("ClaudeSdkBackendProcess", () => {
 
     describe("registerSessionHandler()", () => {
       it("buffers events emitted before a session handler is registered and replays them", async () => {
-        queryMock.mockImplementation(() =>
-          makeQuery([
+        queryMock.mockImplementation(
+          answering([
             streamEvent({ type: "message_start", message: {} }),
             streamEvent({
               type: "content_block_delta",
@@ -1044,14 +1092,15 @@ describe("ClaudeSdkBackendProcess", () => {
         const proc = makeProc();
 
         const { sessionId } = await proc.newSession({ cwd: "/vault" });
-        const promptPromise = proc.prompt({
-          sessionId,
-          prompt: [{ type: "text", text: "hi" }],
-        });
+        await proc.prompt({ sessionId, promptId: "p1", prompt: [{ type: "text", text: "hi" }] });
 
         const seen: SessionEvent[] = [];
-        proc.registerSessionHandler(sessionId, (e) => seen.push(e));
-        await promptPromise;
+        await new Promise<void>((turnEnded) =>
+          proc.registerSessionHandler(sessionId, (e) => {
+            seen.push(e);
+            if (e.update.sessionUpdate === "turn_ended") turnEnded();
+          })
+        );
 
         expect(seen.map((e) => e.update)).toContainEqual({
           sessionUpdate: "agent_message_chunk",
@@ -1114,7 +1163,7 @@ describe("ClaudeSdkBackendProcess", () => {
 
     describe("setSessionConfigOption()", () => {
       it("sets the effort level on the session state and sends it with the next prompt", async () => {
-        queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+        queryMock.mockImplementation(answering([resultMessage()]));
         const proc = makeProc();
 
         const { sessionId } = await proc.newSession({ cwd: "/vault" });
@@ -1126,11 +1175,22 @@ describe("ClaudeSdkBackendProcess", () => {
         });
         expect(stateAfter.model?.current.effort).toBe("high");
 
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
         const promptCalls = getPromptQueryCalls();
         expect(promptCalls).toHaveLength(1);
         const call = promptCalls[0][0] as { options: { effort?: string } };
         expect(call.options.effort).toBe("high");
+      });
+
+      it(`applies a new effort level to the chat's running query (${ISSUE_175})`, async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
+
+        await proc.setSessionConfigOption({ sessionId, configId: "effort", value: "high" });
+
+        expect(fakes[0].applyFlagSettings).toHaveBeenCalledWith({ effortLevel: "high" });
       });
 
       it("rejects an effort level the session's model does not support", async () => {
@@ -1147,18 +1207,72 @@ describe("ClaudeSdkBackendProcess", () => {
       it.each(["default", "plan", "acceptEdits", "auto", "bypassPermissions"])(
         "carries the %s permission mode into the next turn",
         async (modeId) => {
-          queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+          queryMock.mockImplementation(answering([resultMessage()]));
           const proc = makeProc();
 
           const { sessionId } = await proc.newSession({ cwd: "/vault" });
           proc.registerSessionHandler(sessionId, () => {});
           await proc.setSessionMode({ sessionId, modeId });
-          await proc.prompt({ sessionId, prompt: [{ type: "text", text: "hi" }] });
+          await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
 
           const call = getPromptQueryCalls()[0][0] as { options: { permissionMode?: string } };
           expect(call.options.permissionMode).toBe(modeId);
         }
       );
+
+      it(`switches the running query's permission mode and model in place (${ISSUE_175})`, async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
+
+        await proc.setSessionMode({ sessionId, modeId: "plan" });
+        await proc.setSessionModel({ sessionId, modelId: "claude-fake-mini" });
+
+        expect(fakes[0].setPermissionMode).toHaveBeenCalledWith("plan");
+        expect(fakes[0].setModel).toHaveBeenCalledWith("claude-fake-mini");
+        expect(getPromptQueryCalls()).toHaveLength(1);
+      });
+
+      it(`rejects a mode the running query refuses and keeps the old one, so the chat never claims a mode Claude is not in (${ISSUE_175})`, async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        await proc.setSessionMode({ sessionId, modeId: "default" });
+        const recorder = new SessionEventRecorder();
+        proc.registerSessionHandler(sessionId, recorder.handler);
+        await proc.prompt({ sessionId, promptId: "p1", prompt: [{ type: "text", text: "1" }] });
+        await recorder.waitFor("turn_ended");
+        fakes[0].setPermissionMode.mockRejectedValueOnce(new Error("control request failed"));
+
+        await expect(
+          proc.setSessionMode({ sessionId, modeId: "bypassPermissions" })
+        ).rejects.toThrow("control request failed");
+        fakes[0].fail(new Error("process exited with code 1"));
+        await recorder.waitFor("session_disconnected");
+        await proc.prompt({ sessionId, promptId: "p2", prompt: [{ type: "text", text: "2" }] });
+
+        const reconnected = getPromptQueryCalls()[1][0] as { options: { permissionMode?: string } };
+        expect(reconnected.options.permissionMode).toBe("default");
+      });
+
+      it(`starts the query in a mode chosen while the query was still starting (${ISSUE_175})`, async () => {
+        let finishEnvironment!: (env: Record<string, string>) => void;
+        const environment = new Promise<Record<string, string>>((resolve) => {
+          finishEnvironment = resolve;
+        });
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc({ getManagedEnv: () => environment });
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        const turn = promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
+
+        await proc.setSessionMode({ sessionId, modeId: "plan" });
+        finishEnvironment({});
+        await turn;
+
+        const call = getPromptQueryCalls()[0][0] as { options: { permissionMode?: string } };
+        expect(call.options.permissionMode).toBe("plan");
+      });
 
       it("rejects a permission mode the SDK does not define", async () => {
         const proc = makeProc();
@@ -1172,41 +1286,128 @@ describe("ClaudeSdkBackendProcess", () => {
     });
 
     describe("closeSession()", () => {
-      it("terminates only the closing session's active query https://github.com/Brevilabs/obsidian-copilot-private/issues/429", async () => {
+      it("terminates only the closing session's live query https://github.com/Brevilabs/obsidian-copilot-private/issues/429", async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
         const backend = makeProc();
         const first = await backend.newSession({ cwd: "/vault" });
         const sibling = await backend.newSession({ cwd: "/vault" });
-        const a = makeControlledQuery();
-        const b = makeControlledQuery();
-        const closeA = jest.fn(a.finish);
-        const closeB = jest.fn(b.finish);
-        queryMock
-          .mockReset()
-          .mockReturnValueOnce(Object.assign(a.query, { close: closeA }))
-          .mockReturnValueOnce(Object.assign(b.query, { close: closeB }));
-        const pendingA = backend.prompt({ sessionId: first.sessionId, prompt: [] });
-        const pendingB = backend.prompt({ sessionId: sibling.sessionId, prompt: [] });
-        await flushMicrotasks();
+        await promptTurn(backend, { sessionId: first.sessionId, prompt: [] });
+        await promptTurn(backend, { sessionId: sibling.sessionId, prompt: [] });
+
         await backend.closeSession({ sessionId: first.sessionId });
-        expect(closeA).toHaveBeenCalledTimes(1);
-        expect(closeB).not.toHaveBeenCalled();
-        b.finish();
-        await Promise.all([pendingA, pendingB]);
-        await expect(backend.prompt({ sessionId: first.sessionId, prompt: [] })).rejects.toThrow(
-          "Unknown session"
-        );
+
+        expect(fakes[0].close).toHaveBeenCalledTimes(1);
+        expect(fakes[1].close).not.toHaveBeenCalled();
+        await expect(
+          promptTurn(backend, { sessionId: first.sessionId, prompt: [] })
+        ).rejects.toThrow("Unknown session");
+      });
+    });
+
+    describe("cancel()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/747 interrupts the chat's live query, withdrawing every message Claude has not read yet, and keeps it open so the next message continues the same query", async () => {
+        queryMock.mockImplementation(silent());
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        await proc.prompt({ sessionId, promptId: "p1", prompt: [{ type: "text", text: "hi" }] });
+
+        await proc.cancel({ sessionId });
+        await proc.prompt({ sessionId, promptId: "p2", prompt: [{ type: "text", text: "next" }] });
+
+        expect(fakes[0].interrupt).toHaveBeenCalledTimes(1);
+        expect(fakes[0].close).not.toHaveBeenCalled();
+        expect(queryMock).toHaveBeenCalledTimes(1);
+        expect((await fakes[0].nextInput(1)).uuid).toBe("p2");
+      });
+
+      it(`waits for a query that is still starting, so Stop pressed during setup still interrupts it (${ISSUE_175})`, async () => {
+        let finishEnvironment!: (env: Record<string, string>) => void;
+        const environment = new Promise<Record<string, string>>((resolve) => {
+          finishEnvironment = resolve;
+        });
+        queryMock.mockImplementation(silent());
+        const proc = makeProc({ getManagedEnv: () => environment });
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        const sending = proc.prompt({
+          sessionId,
+          promptId: "p1",
+          prompt: [{ type: "text", text: "hi" }],
+        });
+
+        const cancelling = proc.cancel({ sessionId });
+        finishEnvironment({});
+        await Promise.all([sending, cancelling]);
+
+        expect(fakes[0].interrupt).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe("withdraw()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/747 asks Claude to cancel the queued message by its prompt id and reports whether it did", async () => {
+        queryMock.mockImplementation(silent());
+        const proc = makeProc();
+        const events: SessionEvent[] = [];
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        proc.registerSessionHandler(sessionId, (event) => events.push(event));
+        await proc.prompt({ sessionId, promptId: "p1", prompt: [{ type: "text", text: "hi" }] });
+        fakes[0].cancelAsyncMessage.mockResolvedValue(true);
+
+        await expect(proc.withdraw({ sessionId, promptId: "p1" })).resolves.toBe(true);
+
+        expect(fakes[0].cancelAsyncMessage).toHaveBeenCalledWith("p1");
+        expect(events.map((e) => e.update)).toContainEqual({
+          sessionUpdate: "messages_withdrawn",
+          promptIds: ["p1"],
+        });
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/747 reports nothing withdrawn for a chat whose query is not running", async () => {
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+
+        await expect(proc.withdraw({ sessionId, promptId: "p1" })).resolves.toBe(false);
+      });
+    });
+
+    describe("stopTask()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/748 asks Claude to stop that task on the chat's live query, without interrupting or closing it", async () => {
+        queryMock.mockImplementation(silent());
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        await proc.prompt({ sessionId, promptId: "p1", prompt: [{ type: "text", text: "hi" }] });
+
+        await proc.stopTask({ sessionId, taskId: "bg-task-1" });
+
+        expect(fakes[0].stopTask).toHaveBeenCalledWith("bg-task-1");
+        expect(fakes[0].interrupt).not.toHaveBeenCalled();
+        expect(fakes[0].close).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("shutdown()", () => {
+      it("closes every chat's live query", async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc();
+        const first = await proc.newSession({ cwd: "/vault" });
+        const second = await proc.newSession({ cwd: "/vault" });
+        await promptTurn(proc, { sessionId: first.sessionId, prompt: [] });
+        await promptTurn(proc, { sessionId: second.sessionId, prompt: [] });
+
+        await proc.shutdown();
+
+        expect(fakes.map((fake) => fake.close.mock.calls.length)).toEqual([1, 1]);
       });
     });
 
     describe("resumeSession()", () => {
       it("reopens the session with the seeded model state and sends its next prompt as a resume, replaying nothing", async () => {
-        queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+        queryMock.mockImplementation(answering([resultMessage()]));
         const proc = makeProc();
         const sessionId = "resumed-session";
         const events = registerCollector(proc, sessionId);
 
         const resp = await proc.resumeSession({ sessionId, cwd: "/vault" });
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "continue" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "continue" }] });
 
         expect(resp.sessionId).toBe(sessionId);
         expect(resp.state.model?.current.baseModelId).toBe("claude-fake-pro");
@@ -1295,13 +1496,13 @@ describe("ClaudeSdkBackendProcess", () => {
 
       it("returns the same session id and model state resumeSession returns and sends its next prompt as a resume", async () => {
         await writeTranscript({ type: "user", uuid: "u-1", message: { content: "hello" } });
-        queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+        queryMock.mockImplementation(answering([resultMessage()]));
         const resumed = await makeProcWithConfigDir().resumeSession({ sessionId, cwd });
         const proc = makeProcWithConfigDir();
         registerCollector(proc, sessionId);
 
         const loaded = await proc.loadSession({ sessionId, cwd });
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "continue" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "continue" }] });
 
         expect(loaded).toEqual(resumed);
         const { options } = getPromptQueryCalls()[0][0] as { options: Record<string, unknown> };
@@ -1337,8 +1538,8 @@ describe("ClaudeSdkBackendProcess", () => {
             },
           }
         );
-        queryMock.mockImplementation(() =>
-          makeQuery([
+        queryMock.mockImplementation(
+          answering([
             streamEvent({ type: "message_start", message: {} }),
             streamEvent({
               type: "content_block_start",
@@ -1358,7 +1559,7 @@ describe("ClaudeSdkBackendProcess", () => {
         await proc.loadSession({ sessionId, cwd });
         events.length = 0;
 
-        await proc.prompt({ sessionId, prompt: [{ type: "text", text: "mark it done" }] });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "mark it done" }] });
 
         expect(events.map((e) => e.update)).toContainEqual({
           sessionUpdate: "plan",
@@ -1367,13 +1568,13 @@ describe("ClaudeSdkBackendProcess", () => {
       });
 
       it("https://github.com/logancyang/obsidian-copilot/issues/3643 rejects, and sends no later prompt as a resume, when the session's transcript is not on this machine", async () => {
-        queryMock.mockImplementation(() => makeQuery([resultMessage()]));
+        queryMock.mockImplementation(answering([resultMessage()]));
         const proc = makeProcWithConfigDir();
         const events = registerCollector(proc, sessionId);
 
         await expect(proc.loadSession({ sessionId, cwd })).rejects.toThrow(sessionId);
         await expect(
-          proc.prompt({ sessionId, prompt: [{ type: "text", text: "continue" }] })
+          promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "continue" }] })
         ).rejects.toThrow();
 
         expect(events).toEqual([]);

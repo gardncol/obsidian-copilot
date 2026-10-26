@@ -1,6 +1,6 @@
 import { logError, logWarn } from "@/logger";
 import type { AgentChatBackend } from "@/agentMode/session/AgentChatBackend";
-import type { AgentSession } from "@/agentMode/session/AgentSession";
+import type { AgentSession, AgentTask } from "@/agentMode/session/AgentSession";
 import type {
   AgentChatMessage,
   AgentQuestionAnswers,
@@ -13,6 +13,7 @@ import type {
   PlanDecisionAction,
   PromptContent,
   PlanUsage,
+  QueuedPrompt,
   SessionUsage,
 } from "@/agentMode/session/types";
 import type { MessageContext } from "@/types/message";
@@ -29,6 +30,8 @@ export class AgentChatUIState implements AgentChatBackend {
       onModelChanged: () => this.notifyListeners(),
       onCurrentPlanChanged: () => this.notifyListeners(),
       onCurrentTodoListChanged: () => this.notifyListeners(),
+      onQueuedPromptsChanged: () => this.notifyListeners(),
+      onTasksChanged: () => this.notifyListeners(),
     });
   }
 
@@ -51,13 +54,15 @@ export class AgentChatUIState implements AgentChatBackend {
     text: string,
     context?: MessageContext,
     promptContent?: PromptContent[],
-    mentionedAgents?: ReadonlyArray<BackendId>
+    mentionedAgents?: ReadonlyArray<BackendId>,
+    options?: { interrupt?: boolean }
   ): { id: string; turn: Promise<void> } {
     const { userMessageId, turn } = this.session.sendPrompt(
       text,
       context,
       promptContent,
-      mentionedAgents
+      mentionedAgents,
+      options
     );
     this.notifyListeners();
     const wrapped = turn.then(
@@ -68,6 +73,26 @@ export class AgentChatUIState implements AgentChatBackend {
     );
     this.currentTurn = turn;
     return { id: userMessageId, turn: wrapped };
+  }
+
+  acceptsMidTurnMessages(): boolean {
+    return this.session.acceptsMidTurnPrompts();
+  }
+
+  getQueuedPrompts(): readonly QueuedPrompt[] {
+    return this.session.getQueuedPrompts();
+  }
+
+  canWithdrawMessages(): boolean {
+    return this.session.canWithdrawPrompts();
+  }
+
+  withdrawMessage(id: string): Promise<void> {
+    return this.session.withdrawPrompt(id);
+  }
+
+  takeWithdrawnPrompts(): readonly QueuedPrompt[] {
+    return this.session.takeWithdrawnPrompts();
   }
 
   async cancel(): Promise<void> {
@@ -92,6 +117,22 @@ export class AgentChatUIState implements AgentChatBackend {
 
   getMessages(): AgentChatMessage[] {
     return this.session.store.getDisplayMessages();
+  }
+
+  getTasks(): readonly AgentTask[] {
+    return this.session.getTasks();
+  }
+
+  getTaskMessages(toolCallId: string): readonly AgentChatMessage[] {
+    return this.session.getTaskMessages(toolCallId);
+  }
+
+  canStopTasks(): boolean {
+    return this.session.canStopTasks();
+  }
+
+  stopTask(taskId: string): Promise<void> {
+    return this.session.stopTask(taskId);
   }
 
   isStarting(): boolean {

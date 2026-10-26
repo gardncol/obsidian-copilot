@@ -1,5 +1,6 @@
 import type { RenderNode, ThoughtPart, ToolCallPart } from "@/agentMode/ui/agentTrail";
-import { miyoSearchRun, pluralize } from "@/agentMode/ui/toolSummaries";
+import { pluralize } from "@/agentMode/ui/toolSummaries";
+import { miyoSearchRun } from "@/miyo/agentMode/miyoSearchRun";
 import { formatDuration } from "@/lib/duration";
 
 export type ActivityMember =
@@ -30,7 +31,12 @@ function isInteractive(part: ToolCallPart): boolean {
 
 const EMPTY_GROUPED_TRAIL = Object.freeze([]) as unknown as GroupedTrailNode[];
 
-export function foldActivityGroups(nodes: RenderNode[]): GroupedTrailNode[] {
+const NEVER_STANDALONE = () => false;
+
+export function foldActivityGroups(
+  nodes: RenderNode[],
+  isStandalone: (part: ToolCallPart) => boolean = NEVER_STANDALONE
+): GroupedTrailNode[] {
   if (nodes.length === 0) return EMPTY_GROUPED_TRAIL;
   const out: GroupedTrailNode[] = [];
   let run: ActivityMember[] = [];
@@ -54,7 +60,7 @@ export function foldActivityGroups(nodes: RenderNode[]): GroupedTrailNode[] {
       case "action":
         // A grouped Miyo search would be hidden behind "Ran N commands".
         // https://github.com/Brevilabs/obsidian-copilot-private/issues/718
-        if (isInteractive(node.part) || miyoSearchRun(node.part)) {
+        if (isInteractive(node.part) || miyoSearchRun(node.part) || isStandalone(node.part)) {
           flush();
           out.push(node);
         } else {
@@ -150,9 +156,14 @@ export function summarizeActivity(
     if (member.part.status === "failed") failed++;
     const family = fileFamilyFor(member.part);
     if (!family) continue;
-    // A failed edit left the note unchanged, so it is not an edited file.
+    // A failed or stopped edit left the note unchanged, so it is not an edited file.
     // https://github.com/Brevilabs/obsidian-copilot-private/issues/691
-    if (family === "edit" && member.part.status === "failed") continue;
+    if (
+      family === "edit" &&
+      (member.part.status === "failed" || member.part.status === "cancelled")
+    ) {
+      continue;
+    }
     if (!fileCounts.has(family)) {
       fileOrder.push(family);
       fileCounts.set(family, { paths: new Set(), withoutPath: 0 });

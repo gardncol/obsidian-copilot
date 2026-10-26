@@ -1,5 +1,6 @@
 import type { MessageContext } from "@/types/message";
 import type { FeedbackOffer } from "@/agentMode/session/feedback/feedbackOffer";
+import type { AgentTask } from "@/agentMode/session/AgentSession";
 import type {
   AgentChatMessage,
   AgentQuestionAnswers,
@@ -12,6 +13,7 @@ import type {
   PlanDecisionAction,
   PromptContent,
   PlanUsage,
+  QueuedPrompt,
   SessionUsage,
 } from "./types";
 
@@ -21,12 +23,22 @@ export interface AgentChatBackend {
     text: string,
     context?: MessageContext,
     promptContent?: PromptContent[],
-    mentionedAgents?: ReadonlyArray<BackendId>
+    mentionedAgents?: ReadonlyArray<BackendId>,
+    options?: { interrupt?: boolean }
   ): { id: string; turn: Promise<void> };
+  acceptsMidTurnMessages(): boolean;
+  getQueuedPrompts(): readonly QueuedPrompt[];
+  canWithdrawMessages(): boolean;
+  withdrawMessage(id: string): Promise<void>;
+  takeWithdrawnPrompts(): readonly QueuedPrompt[];
   cancel(): Promise<void>;
   deleteMessage(id: string): Promise<boolean>;
   clearMessages(): void;
   getMessages(): AgentChatMessage[];
+  getTasks(): readonly AgentTask[];
+  getTaskMessages(toolCallId: string): readonly AgentChatMessage[];
+  canStopTasks(): boolean;
+  stopTask(taskId: string): Promise<void>;
 
   isStarting(): boolean;
   isTurnInFlight(): boolean;

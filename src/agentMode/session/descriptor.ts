@@ -103,6 +103,22 @@ export interface BackendDescriptor {
 
   readonly planFeedbackDelivery?: "permission" | "next_turn";
 
+  // A backend that takes input while its agent works gets each message at the agent's next step instead of Copilot holding it until the turn ends.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/509
+  readonly midTurnDelivery?: boolean;
+
+  // A backend that can take back a message the agent has not read yet withdraws every such message at Stop and offers to withdraw each one.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/747
+  readonly withdraw?: boolean;
+
+  // A backend that can end one background task on its own offers a stop control on each running task, leaving the main agent and other tasks running.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/748
+  readonly stopTask?: boolean;
+
+  // A backend that runs one agent process per chat keeps it alive while the chat is hidden, so only a few idle hidden chats stay open and the rest reopen from their transcripts.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/175
+  readonly processPerChat?: boolean;
+
   getInstallState(settings: CopilotSettings): InstallState;
 
   getResolvedBinaryPath?(settings: CopilotSettings): string | null;

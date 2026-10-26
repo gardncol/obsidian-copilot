@@ -20,6 +20,7 @@ interface ToolPermissionCardProps {
    * https://github.com/Brevilabs/obsidian-copilot-private/issues/599
    */
   toolName?: string;
+  requester?: string;
 }
 
 const EMPTY_OPTION_NAMES: readonly string[] = Object.freeze([]);
@@ -42,6 +43,7 @@ export const ToolPermissionCard: React.FC<ToolPermissionCardProps> = ({
   request,
   onResolve,
   toolName,
+  requester = "The agent",
 }) => {
   const { toolCall, options } = request;
   const [busy, setBusy] = useState(false);
@@ -74,17 +76,17 @@ export const ToolPermissionCard: React.FC<ToolPermissionCardProps> = ({
         <p className="tw-m-0 tw-text-sm">
           {namedTool ? (
             <>
-              Agent Mode wants to use <strong>{namedTool}</strong>: {title}.
+              {requester} wants to use <strong>{namedTool}</strong>: {title}.
             </>
           ) : (
             <>
-              Agent Mode wants to run <strong>{title}</strong>.
+              {requester} wants to run <strong>{title}</strong>.
             </>
           )}
         </p>
         {toolCall.kind ? (
           <p className="tw-m-0 tw-text-xs tw-text-muted">
-            Kind: <code>{toolCall.kind}</code>
+            Type: <code>{toolCall.kind}</code>
           </p>
         ) : null}
 
@@ -105,7 +107,7 @@ export const ToolPermissionCard: React.FC<ToolPermissionCardProps> = ({
           </div>
         ) : inputJson ? (
           <details>
-            <summary className="tw-cursor-pointer tw-text-xs tw-text-muted">Show inputs</summary>
+            <summary className="tw-cursor-pointer tw-text-xs tw-text-muted">Show details</summary>
             <pre className="tw-mt-1 tw-max-h-48 tw-overflow-auto tw-rounded tw-bg-primary tw-p-2 tw-text-xs">
               {inputJson}
             </pre>

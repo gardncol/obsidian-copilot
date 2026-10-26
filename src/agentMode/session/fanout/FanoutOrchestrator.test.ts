@@ -7,21 +7,22 @@ import type {
   BackendProcess,
   BackendState,
   ModelSelection,
+  PromptInput,
   SessionEvent,
   SessionUpdateHandler,
+  TurnEnd,
 } from "@/agentMode/session/types";
 import { createFanoutTurn, FanoutOrchestrator, type FanoutHost } from "./FanoutOrchestrator";
-import { FANOUT_ALL_FAILED_SUMMARY, FANOUT_TRAILING_CHUNK_GRACE_MS } from "./fanoutTypes";
+import {
+  FANOUT_AGENT_TIMEOUT_ERROR,
+  FANOUT_AGENT_TIMEOUT_MS,
+  FANOUT_ALL_FAILED_SUMMARY,
+} from "./fanoutTypes";
 
 jest.mock("@/logger", () => ({
   logInfo: jest.fn(),
   logWarn: jest.fn(),
   logError: jest.fn(),
-}));
-
-jest.mock("./fanoutTypes", () => ({
-  ...jest.requireActual("./fanoutTypes"),
-  FANOUT_TRAILING_CHUNK_GRACE_MS: 5,
 }));
 
 jest.mock("@/agentMode/sdk/effortOption", () => ({
@@ -36,9 +37,13 @@ interface MockProc {
   emit: (event: SessionEvent) => void;
   setSessionMode: jest.Mock;
   cancel: jest.Mock;
+  closeSession: jest.Mock;
+  cancelled: () => Promise<void>;
   resolvePrompt: () => void;
   rejectPrompt: (err: unknown) => void;
+  endTurnsAtOnce: (onPrompt?: () => void) => void;
   promptCount: () => number;
+  prompted: (count: number) => Promise<void>;
 }
 
 function makeMockProc(sessionId: string): MockProc {
@@ -48,10 +53,19 @@ function makeMockProc(sessionId: string): MockProc {
     resolve: () => void;
     reject: (err: unknown) => void;
   }> = [];
-  const promptPromise = () =>
-    new Promise<{ stopReason: "end_turn" }>((resolve, reject) => {
-      pending.push({ resolve: () => resolve({ stopReason: "end_turn" }), reject });
+  let accepted = 0;
+  const promptWaiters: Array<{ count: number; resolve: () => void }> = [];
+  const endTurn = (promptId: string, turnEnd: Omit<TurnEnd, "turnId">) =>
+    handler?.({ sessionId, update: { sessionUpdate: "turn_ended", turnId: promptId, ...turnEnd } });
+  const acceptPrompt = async ({ promptId }: PromptInput): Promise<void> => {
+    const end = (turnEnd: Omit<TurnEnd, "turnId">) => endTurn(promptId, turnEnd);
+    pending.push({
+      resolve: () => end({ stopReason: "end_turn" }),
+      reject: (error) => end({ stopReason: "end_turn", error: error as Error }),
     });
+    accepted += 1;
+    for (const waiter of promptWaiters.filter((w) => w.count <= accepted)) waiter.resolve();
+  };
   const settleOldest = (
     apply: (p: { resolve: () => void; reject: (e: unknown) => void }) => void
   ) => {
@@ -59,7 +73,10 @@ function makeMockProc(sessionId: string): MockProc {
     if (next) apply(next);
   };
   const setSessionMode = jest.fn(async () => ({ model: null, mode: null }));
-  const cancel = jest.fn(async () => undefined);
+  let markCancelled!: () => void;
+  const cancelledOnce = new Promise<void>((resolve) => (markCancelled = resolve));
+  const cancel = jest.fn(async () => markCancelled());
+  const closeSession = jest.fn(async () => undefined);
   const proc = {
     isRunning: () => true,
     onExit: () => () => {},
@@ -71,8 +88,9 @@ function makeMockProc(sessionId: string): MockProc {
       };
     },
     newSession: jest.fn(() => Promise.resolve({ sessionId, state: emptyState() })),
-    prompt: jest.fn(() => promptPromise()),
+    prompt: jest.fn(acceptPrompt),
     cancel,
+    closeSession,
     setSessionModel: jest.fn(async () => ({ model: null, mode: null })),
     isSetSessionModelSupported: () => true,
     setSessionMode,
@@ -89,9 +107,20 @@ function makeMockProc(sessionId: string): MockProc {
     emit: (event) => handler?.(event),
     setSessionMode,
     cancel,
+    closeSession,
+    cancelled: () => cancelledOnce,
     resolvePrompt: () => settleOldest((p) => p.resolve()),
     rejectPrompt: (err) => settleOldest((p) => p.reject(err)),
+    endTurnsAtOnce: (onPrompt) =>
+      jest.mocked(proc.prompt).mockImplementation(async ({ promptId }) => {
+        onPrompt?.();
+        endTurn(promptId, { stopReason: "end_turn" });
+      }),
     promptCount: () => (proc.prompt as jest.Mock).mock.calls.length,
+    prompted: (count) =>
+      count <= accepted
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => promptWaiters.push({ count, resolve })),
   };
 }
 
@@ -119,6 +148,10 @@ function opencodeEnabling(baseModelIds: string[]): BackendDescriptor {
         credentialState: "ok" as const,
       })),
   };
+}
+
+function update(sessionId: string, sessionUpdate: SessionEvent["update"]): SessionEvent {
+  return { sessionId, update: sessionUpdate };
 }
 
 function textChunk(sessionId: string, text: string): SessionEvent {
@@ -169,9 +202,6 @@ function makeHost(
 
 const flush = () => new Promise((r) => window.setTimeout(r, 0));
 
-const flushPastGrace = () =>
-  new Promise((r) => window.setTimeout(r, FANOUT_TRAILING_CHUNK_GRACE_MS + 20));
-
 function runInput(
   agents: BackendId[],
   overrides: Partial<Parameters<FanoutOrchestrator["run"]>[0]> = {}
@@ -217,12 +247,12 @@ describe("FanoutOrchestrator", () => {
           })
         );
 
-        await flush();
+        await Promise.all([procs.get("claude")!.prompted(1), procs.get("codex")!.prompted(1)]);
         procs.get("claude")!.emit(textChunk("s-claude", "Claude says hi"));
         procs.get("codex")!.emit(textChunk("s-codex", "Codex says hi"));
         procs.get("claude")!.resolvePrompt();
         procs.get("codex")!.resolvePrompt();
-        await flushPastGrace();
+        await procs.get("claude")!.prompted(2);
         procs.get("claude")!.emit(textChunk("s-claude", "summary"));
         procs.get("claude")!.resolvePrompt();
 
@@ -261,11 +291,11 @@ describe("FanoutOrchestrator", () => {
           runInput(["claude", "codex"], { signal: controller.signal })
         );
 
-        await flush();
+        await Promise.all([procs.get("claude")!.prompted(1), procs.get("codex")!.prompted(1)]);
         procs.get("claude")!.emit(textChunk("s-claude", "ok"));
         procs.get("claude")!.resolvePrompt();
         procs.get("codex")!.rejectPrompt(new Error("backend boom"));
-        await flushPastGrace();
+        await procs.get("claude")!.prompted(2);
         procs.get("claude")!.resolvePrompt();
 
         const turn = await runPromise;
@@ -290,11 +320,9 @@ describe("FanoutOrchestrator", () => {
         const runPromise = orchestrator.run(
           runInput(["codex", "opencode"], { signal: controller.signal })
         );
-        await flush();
+        await Promise.all([procs.get("codex")!.prompted(1), procs.get("opencode")!.prompted(1)]);
         procs.get("codex")!.resolvePrompt();
         procs.get("opencode")!.resolvePrompt();
-        await flushPastGrace();
-        procs.get("codex")!.resolvePrompt();
         await runPromise;
 
         expect(procs.get("codex")!.setSessionMode).toHaveBeenCalledWith({
@@ -308,7 +336,7 @@ describe("FanoutOrchestrator", () => {
         expect(procs.get("opencode")!.setSessionMode).not.toHaveBeenCalled();
       });
 
-      it("cancels EVERY in-flight sub-session and lands each slot terminal-cancelled on abort", async () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/175 cancels and closes EVERY in-flight sub-session and lands each slot terminal-cancelled on abort", async () => {
         const { host, procs } = makeHost({
           claude: { sessionId: "s-claude" },
           codex: { sessionId: "s-codex" },
@@ -319,7 +347,7 @@ describe("FanoutOrchestrator", () => {
           runInput(["claude", "codex"], { signal: controller.signal })
         );
 
-        await flush();
+        await Promise.all([procs.get("claude")!.prompted(1), procs.get("codex")!.prompted(1)]);
         controller.abort();
         procs.get("claude")!.resolvePrompt();
         procs.get("codex")!.resolvePrompt();
@@ -327,10 +355,189 @@ describe("FanoutOrchestrator", () => {
 
         expect(procs.get("claude")!.cancel).toHaveBeenCalledWith({ sessionId: "s-claude" });
         expect(procs.get("codex")!.cancel).toHaveBeenCalledWith({ sessionId: "s-codex" });
+        expect(procs.get("claude")!.closeSession).toHaveBeenCalledWith({ sessionId: "s-claude" });
+        expect(procs.get("codex")!.closeSession).toHaveBeenCalledWith({ sessionId: "s-codex" });
         expect(turn.answers.claude.status).toBe("cancelled");
         expect(turn.answers.codex.status).toBe("cancelled");
         expect(procs.get("claude")!.promptCount()).toBe(1);
         expect(turn.summary.status).toBe("pending");
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/175 closes every answer and summary sub-session once it is final, including a failed one", async () => {
+        const { host, procs } = makeHost({
+          claude: { sessionId: "s-claude" },
+          codex: { sessionId: "s-codex" },
+        });
+        const runPromise = new FanoutOrchestrator(host).run(runInput(["claude", "codex"]));
+
+        await Promise.all([procs.get("claude")!.prompted(1), procs.get("codex")!.prompted(1)]);
+        procs.get("claude")!.emit(textChunk("s-claude", "ok"));
+        procs.get("claude")!.resolvePrompt();
+        procs.get("codex")!.rejectPrompt(new Error("backend boom"));
+        await procs.get("claude")!.prompted(2);
+        procs.get("claude")!.resolvePrompt();
+        await runPromise;
+
+        expect(procs.get("claude")!.closeSession.mock.calls).toEqual([
+          [{ sessionId: "s-claude" }],
+          [{ sessionId: "s-claude" }],
+        ]);
+        expect(procs.get("codex")!.closeSession).toHaveBeenCalledWith({ sessionId: "s-codex" });
+      });
+
+      it(`waits for an answer's background task and includes the reply that reports it as a new paragraph, leaving the task's own text out (https://github.com/Brevilabs/obsidian-copilot-private/issues/175)`, async () => {
+        const { host, procs } = makeHost({
+          claude: { sessionId: "s-claude" },
+          codex: { sessionId: "s-codex" },
+        });
+        const claude = procs.get("claude")!;
+        const runPromise = new FanoutOrchestrator(host).run(runInput(["claude", "codex"]));
+
+        await Promise.all([claude.prompted(1), procs.get("codex")!.prompted(1)]);
+        claude.emit(update("s-claude", { sessionUpdate: "turn_started", turnId: "t1" }));
+        claude.emit(textChunk("s-claude", "Launched a helper."));
+        claude.emit(
+          update("s-claude", {
+            sessionUpdate: "task_started",
+            taskId: "task-1",
+            toolCallId: "call-1",
+            kind: "subagent",
+            description: "Read Welcome",
+          })
+        );
+        claude.resolvePrompt();
+        procs.get("codex")!.resolvePrompt();
+        await procs.get("codex")!.cancelled();
+        claude.emit({ ...textChunk("s-claude", "helper's own notes"), taskToolCallId: "call-1" });
+        claude.emit(
+          update("s-claude", { sessionUpdate: "task_ended", taskId: "task-1", status: "completed" })
+        );
+        claude.emit(update("s-claude", { sessionUpdate: "turn_started", turnId: "t2" }));
+        claude.emit(textChunk("s-claude", "REPORT: it says hello."));
+        claude.emit(
+          update("s-claude", { sessionUpdate: "turn_ended", turnId: "t2", stopReason: "end_turn" })
+        );
+        await claude.prompted(2);
+        claude.resolvePrompt();
+        const turn = await runPromise;
+
+        expect(turn.answers.claude).toEqual({
+          backendId: "claude",
+          status: "done",
+          text: "Launched a helper.\n\nREPORT: it says hello.",
+        });
+      });
+
+      it(`ends an answer whose background task never ends at the per-agent timeout, keeping its text and closing its sub-session (https://github.com/Brevilabs/obsidian-copilot-private/issues/175)`, async () => {
+        jest.useFakeTimers();
+        try {
+          const { host, procs } = makeHost({ claude: { sessionId: "s-claude" } });
+          const claude = procs.get("claude")!;
+          const runPromise = new FanoutOrchestrator(host).run(runInput(["claude"]));
+
+          await claude.prompted(1);
+          claude.emit(textChunk("s-claude", "Launched a helper."));
+          claude.emit(
+            update("s-claude", {
+              sessionUpdate: "task_started",
+              taskId: "task-1",
+              toolCallId: "call-1",
+              kind: "subagent",
+              description: "Never finishes",
+            })
+          );
+          claude.resolvePrompt();
+          await jest.advanceTimersByTimeAsync(FANOUT_AGENT_TIMEOUT_MS);
+          const turn = await runPromise;
+
+          expect(turn.answers.claude).toEqual({
+            backendId: "claude",
+            status: "error",
+            text: "Launched a helper.",
+            error: expect.stringContaining(FANOUT_AGENT_TIMEOUT_ERROR),
+          });
+          expect(claude.closeSession).toHaveBeenCalledWith({ sessionId: "s-claude" });
+        } finally {
+          jest.useRealTimers();
+        }
+      });
+
+      it(`ends an answer waiting on a background task with the disconnect error when the agent exits, keeping its text (https://github.com/Brevilabs/obsidian-copilot-private/issues/175)`, async () => {
+        const { host, procs } = makeHost({ claude: { sessionId: "s-claude" } });
+        const claude = procs.get("claude")!;
+        const runPromise = new FanoutOrchestrator(host).run(runInput(["claude"]));
+
+        await claude.prompted(1);
+        claude.emit(textChunk("s-claude", "Launched a helper."));
+        claude.emit(
+          update("s-claude", {
+            sessionUpdate: "task_started",
+            taskId: "task-1",
+            toolCallId: "call-1",
+            kind: "subagent",
+            description: "Slow helper",
+          })
+        );
+        claude.resolvePrompt();
+        claude.emit(
+          update("s-claude", { sessionUpdate: "task_ended", taskId: "task-1", status: "stopped" })
+        );
+        claude.emit(
+          update("s-claude", {
+            sessionUpdate: "session_disconnected",
+            error: new Error("Claude exited"),
+          })
+        );
+        const turn = await runPromise;
+
+        expect(turn.answers.claude).toEqual({
+          backendId: "claude",
+          status: "error",
+          text: "Launched a helper.",
+          error: expect.stringContaining("Claude exited"),
+        });
+      });
+
+      it(`stops waiting for a background task on abort and closes the sub-session so the task ends with it (https://github.com/Brevilabs/obsidian-copilot-private/issues/175)`, async () => {
+        const { host, procs } = makeHost({ claude: { sessionId: "s-claude" } });
+        const claude = procs.get("claude")!;
+        const controller = new AbortController();
+        const runPromise = new FanoutOrchestrator(host).run(
+          runInput(["claude"], { signal: controller.signal })
+        );
+
+        await claude.prompted(1);
+        claude.emit(
+          update("s-claude", {
+            sessionUpdate: "task_started",
+            taskId: "task-1",
+            toolCallId: "call-1",
+            kind: "subagent",
+            description: "Slow helper",
+          })
+        );
+        claude.resolvePrompt();
+        controller.abort();
+        const turn = await runPromise;
+
+        expect(turn.answers.claude.status).toBe("cancelled");
+        expect(claude.closeSession).toHaveBeenCalledWith({ sessionId: "s-claude" });
+      });
+
+      it(`closes the sub-session on abort when the stopped prompt never starts a turn (https://github.com/Brevilabs/obsidian-copilot-private/issues/175)`, async () => {
+        const { host, procs } = makeHost({ claude: { sessionId: "s-claude" } });
+        const claude = procs.get("claude")!;
+        const controller = new AbortController();
+        const runPromise = new FanoutOrchestrator(host).run(
+          runInput(["claude"], { signal: controller.signal })
+        );
+
+        await claude.prompted(1);
+        controller.abort();
+        const turn = await runPromise;
+
+        expect(turn.answers.claude.status).toBe("cancelled");
+        expect(claude.closeSession).toHaveBeenCalledWith({ sessionId: "s-claude" });
       });
 
       it("lands a brief all-failed note (no fabricated summary) when zero agents succeed", async () => {
@@ -344,7 +551,7 @@ describe("FanoutOrchestrator", () => {
           runInput(["claude", "codex"], { signal: controller.signal })
         );
 
-        await flush();
+        await Promise.all([procs.get("claude")!.prompted(1), procs.get("codex")!.prompted(1)]);
         procs.get("claude")!.rejectPrompt(new Error("boom-a"));
         procs.get("codex")!.rejectPrompt(new Error("boom-b"));
         const turn = await runPromise;
@@ -361,10 +568,7 @@ describe("FanoutOrchestrator", () => {
           opencode: { sessionId: "s-opencode" },
         });
         const proc = procs.get("claude")!;
-        jest.mocked(proc.proc.prompt).mockImplementation(async () => {
-          proc.emit(textChunk("s-claude", "Claude answered directly"));
-          return { stopReason: "end_turn" };
-        });
+        proc.endTurnsAtOnce(() => proc.emit(textChunk("s-claude", "Claude answered directly")));
 
         const turn = await new FanoutOrchestrator(host).run(
           runInput(["claude"], { mainAgent: "opencode" })
@@ -422,11 +626,10 @@ describe("FanoutOrchestrator", () => {
                 descriptor: descriptorFor(backendId),
               };
         host.getDefaultSelection = () => ({ baseModelId: "example", effort: "high" });
-        jest.mocked(proc.prompt).mockImplementation(async () => {
-          procs.get("codex")!.emit(textChunk("s-codex", "answer"));
-          return { stopReason: "end_turn" };
-        });
-        jest.mocked(procs.get("claude")!.proc.prompt).mockResolvedValue({ stopReason: "end_turn" });
+        procs
+          .get("codex")!
+          .endTurnsAtOnce(() => procs.get("codex")!.emit(textChunk("s-codex", "answer")));
+        procs.get("claude")!.endTurnsAtOnce();
         await new FanoutOrchestrator(host).run(runInput(["codex", "claude"]));
         expect(proc.setSessionConfigOption).toHaveBeenCalledWith({
           sessionId: "s-codex",
@@ -481,11 +684,12 @@ describe("FanoutOrchestrator", () => {
           .mockResolvedValueOnce(successState)
           .mockResolvedValueOnce(successState)
           .mockRejectedValueOnce(new Error("Model unavailable"));
-        jest.mocked(proc.prompt).mockImplementation(async () => {
-          procs.get("codex")!.emit(textChunk("s-codex", "Successful answer"));
-          return { stopReason: "end_turn" };
-        });
-        jest.mocked(procs.get("claude")!.proc.prompt).mockResolvedValue({ stopReason: "end_turn" });
+        procs
+          .get("codex")!
+          .endTurnsAtOnce(() =>
+            procs.get("codex")!.emit(textChunk("s-codex", "Successful answer"))
+          );
+        procs.get("claude")!.endTurnsAtOnce();
 
         const result = await new FanoutOrchestrator(host).run(runInput(["codex", "claude"]));
 
@@ -536,11 +740,10 @@ describe("FanoutOrchestrator", () => {
         };
         host.onSelectionApplied = jest.fn();
         jest.mocked(proc.setSessionConfigOption).mockResolvedValue(confirmed);
-        jest.mocked(proc.prompt).mockImplementation(async () => {
-          procs.get("opencode")!.emit(textChunk("s-opencode", "answer"));
-          return { stopReason: "end_turn" };
-        });
-        jest.mocked(procs.get("claude")!.proc.prompt).mockResolvedValue({ stopReason: "end_turn" });
+        procs
+          .get("opencode")!
+          .endTurnsAtOnce(() => procs.get("opencode")!.emit(textChunk("s-opencode", "answer")));
+        procs.get("claude")!.endTurnsAtOnce();
 
         await new FanoutOrchestrator(host).run(runInput(["opencode", "claude"]));
 
@@ -600,7 +803,7 @@ describe("FanoutOrchestrator", () => {
             .mocked(proc.newSession)
             .mockResolvedValue({ sessionId: "s-opencode", state: initial });
           jest.mocked(proc.setSessionConfigOption).mockResolvedValue(refreshed);
-          jest.mocked(proc.prompt).mockResolvedValue({ stopReason: "end_turn" });
+          procs.get("opencode")!.endTurnsAtOnce();
 
           await new FanoutOrchestrator(host).run(runInput(["opencode"]));
 
@@ -639,7 +842,7 @@ describe("FanoutOrchestrator", () => {
           sessionId: "s-opencode",
           state: catalog(["opencode/big-pickle"]),
         });
-        jest.mocked(mock.proc.prompt).mockResolvedValue({ stopReason: "end_turn" });
+        mock.endTurnsAtOnce();
 
         const run = new FanoutOrchestrator(host).run(runInput(["opencode"]));
         await flush();
@@ -708,7 +911,7 @@ describe("FanoutOrchestrator", () => {
         host.getDefaultSelection = () => ({ baseModelId: modelId, effort: "high" });
         const effortOption = ClaudeBackendDescriptor.wire.effortConfigFor?.(modelId);
         expect(effortOption).toBeTruthy();
-        jest.mocked(proc.prompt).mockResolvedValue({ stopReason: "end_turn" });
+        procs.get("claude")!.endTurnsAtOnce();
 
         await new FanoutOrchestrator(host).run(runInput(["claude"]));
 

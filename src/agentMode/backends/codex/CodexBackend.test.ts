@@ -1,7 +1,5 @@
 import { getSettings, resetSettings, setSettings, updateSetting } from "@/settings/model";
-import { OPENARTIFACTS_WORKSPACE_ROOT_ENV } from "@/openArtifacts/constants";
 import { buildAgentSystemPrompt } from "@/agentMode/backends/shared/agentSystemPrompt";
-import { MIYO_SEARCH_FOLDER_ENV, MIYO_SEARCH_SCOPE_ENV } from "@/builtinSkills/builtinSkills";
 import { detectBinary } from "@/utils/detectBinary";
 import { setDisableBuiltinSystemPrompt } from "@/system-prompts/state";
 import { CODEX_QUESTION_CARD_STEERING, CodexBackend } from "./CodexBackend";
@@ -9,6 +7,9 @@ import * as codexVersion from "./codexVersion";
 
 jest.mock("@/utils/detectBinary", () => ({ detectBinary: jest.fn() }));
 
+jest.mock("@/services/obsidianCli/ObsidianCliClient", () => ({
+  isObsidianCliEnabled: () => true,
+}));
 jest.mock("@/logger", () => ({
   logInfo: jest.fn(),
   logWarn: jest.fn(),
@@ -77,21 +78,20 @@ describe("CodexBackend", () => {
         useCodexSettings({ binaryPath: "/usr/local/bin/codex-acp" });
       });
 
-      it("launches the validated adapter entry with the workspace root in its environment", async () => {
+      it("launches the validated adapter entry", async () => {
         const desc = await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
 
         expect(desc.command).toBe(
           "/npm/lib/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
         );
         expect(desc.args).toEqual([]);
-        expect(desc.env[OPENARTIFACTS_WORKSPACE_ROOT_ENV]).toBe("/vault");
       });
 
-      it("encodes the shared product prompt byte for byte, followed by the question-card steering", async () => {
+      it("encodes the shared product prompt with the question-card steering byte for byte", async () => {
         const desc = await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
 
         expect(JSON.parse(desc.env.CODEX_CONFIG as string).developer_instructions).toBe(
-          `${buildAgentSystemPrompt("codex")}\n\n${CODEX_QUESTION_CARD_STEERING}`
+          buildAgentSystemPrompt("codex", CODEX_QUESTION_CARD_STEERING)
         );
       });
 
@@ -158,25 +158,6 @@ describe("CodexBackend", () => {
         expect(config.developer_instructions).not.toContain("drop Copilot prompt");
       });
 
-      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/121 gives global and Project sessions the same protected active-vault Miyo identity", async () => {
-        setSettings({ miyoSearchAll: false });
-        useCodexSettings({
-          binaryPath: "/usr/local/bin/codex-acp",
-          envOverrides: {
-            [MIYO_SEARCH_SCOPE_ENV]: "unrestricted",
-            [MIYO_SEARCH_FOLDER_ENV]: "other-vault",
-          },
-        });
-
-        const desc = await new CodexBackend().buildSpawnDescriptor({
-          vaultBasePath: "/active-vault",
-          vaultName: "active-vault",
-        });
-
-        expect(desc.env[MIYO_SEARCH_SCOPE_ENV]).toBe("current");
-        expect(desc.env[MIYO_SEARCH_FOLDER_ENV]).toBe("active-vault");
-      });
-
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/599 names only the builtin skills enabled for Codex", async () => {
         const agentMode = getSettings().agentMode;
         updateSetting("agentMode", {
@@ -238,7 +219,7 @@ describe("CodexBackend", () => {
 
         await expect(
           new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" })
-        ).rejects.toThrow(/Codex adapter path not configured/);
+        ).rejects.toThrow(/Codex isn't set up/);
       });
     });
 

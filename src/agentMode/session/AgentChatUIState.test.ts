@@ -1,9 +1,12 @@
+import { waitFor } from "@testing-library/react";
 import { AgentChatUIState } from "@/agentMode/session/AgentChatUIState";
 import { AgentSession } from "@/agentMode/session/AgentSession";
 import type { BackendDescriptor } from "@/agentMode/session/descriptor";
 import type {
   BackendProcess,
   PermissionPrompt,
+  PromptInput,
+  SessionEvent,
   SessionUpdateHandler,
 } from "@/agentMode/session/types";
 import { lookupToolSummary } from "@/agentMode/ui/toolSummaries";
@@ -38,7 +41,23 @@ describe("AgentChatUIState", () => {
         emitUpdate = handler;
         return () => undefined;
       },
-      prompt,
+      prompt: async (input: PromptInput) => {
+        const emit = (update: SessionEvent["update"]) =>
+          emitUpdate!({ sessionId: "codex-session", update });
+        emit({ sessionUpdate: "message_delivered", promptId: input.promptId });
+        emit({ sessionUpdate: "turn_started", turnId: input.promptId });
+        void prompt(input).then(
+          (outcome: { stopReason: "end_turn" }) =>
+            emit({ sessionUpdate: "turn_ended", turnId: input.promptId, ...outcome }),
+          (error: Error) =>
+            emit({
+              sessionUpdate: "turn_ended",
+              turnId: input.promptId,
+              stopReason: "end_turn",
+              error,
+            })
+        );
+      },
     } as unknown as BackendProcess;
     const descriptor = { planFeedbackDelivery: feedbackDelivery } as unknown as BackendDescriptor;
     const session = new AgentSession({
@@ -280,6 +299,155 @@ describe("AgentChatUIState", () => {
       review.finishFirstTurn();
       await review.firstTurn;
       expect(review.chat.isTurnInFlight()).toBe(false);
+    });
+  });
+
+  function liveChat(descriptor: Partial<BackendDescriptor>, extra: Partial<BackendProcess> = {}) {
+    let handler: SessionUpdateHandler | undefined;
+    const backend = {
+      isRunning: () => true,
+      onExit: () => () => undefined,
+      registerSessionHandler: (_id: string, h: SessionUpdateHandler) => {
+        handler = h;
+        return () => undefined;
+      },
+      prompt: async () => undefined,
+      ...extra,
+    } as unknown as BackendProcess;
+    const session = new AgentSession({
+      backend,
+      backendSessionId: "claude-session",
+      internalId: "live",
+      backendId: "claude",
+      getDescriptor: () => descriptor as BackendDescriptor,
+    });
+    session.completeResume(null);
+    const chat = new AgentChatUIState(session);
+    const emit = (update: SessionEvent["update"], taskToolCallId?: string) =>
+      handler!({ sessionId: "claude-session", update, taskToolCallId });
+    return Object.assign(chat, { emit });
+  }
+
+  describe("acceptsMidTurnMessages()", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/509 follows the backend's mid-turn delivery capability", () => {
+      expect(liveChat({ midTurnDelivery: true }).acceptsMidTurnMessages()).toBe(true);
+      expect(liveChat({}).acceptsMidTurnMessages()).toBe(false);
+    });
+  });
+
+  describe("getQueuedPrompts()", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/509 lists a message sent while the agent works, and notifies the composer when the agent withdraws it", () => {
+      const chat = liveChat({ midTurnDelivery: true });
+      chat.sendMessage("list the notes");
+      const { id } = chat.sendMessage("only the first two");
+      expect(chat.getQueuedPrompts()).toEqual([
+        expect.objectContaining({ id, text: "only the first two" }),
+      ]);
+      const listener = jest.fn();
+      chat.subscribe(listener);
+
+      chat.emit({ sessionUpdate: "messages_withdrawn", promptIds: [id] });
+
+      expect(chat.getQueuedPrompts()).toEqual([]);
+      expect(listener).toHaveBeenCalled();
+    });
+  });
+
+  describe("canWithdrawMessages()", () => {
+    it("follows the backend's withdraw capability (https://github.com/Brevilabs/obsidian-copilot-private/issues/747)", () => {
+      expect(liveChat({ withdraw: true }).canWithdrawMessages()).toBe(true);
+      expect(liveChat({}).canWithdrawMessages()).toBe(false);
+    });
+  });
+
+  describe("withdrawMessage()", () => {
+    it("asks the backend to withdraw a queued message (https://github.com/Brevilabs/obsidian-copilot-private/issues/747)", async () => {
+      const withdraw = jest.fn(async () => false);
+      const prompt = jest.fn(async () => undefined);
+      const chat = liveChat({ midTurnDelivery: true, withdraw: true }, { prompt, withdraw });
+      chat.sendMessage("list the notes");
+      const { id } = chat.sendMessage("only the first two");
+      await waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+
+      await chat.withdrawMessage(id);
+
+      expect(withdraw).toHaveBeenCalledWith({ sessionId: "claude-session", promptId: id });
+    });
+  });
+
+  describe("takeWithdrawnPrompts()", () => {
+    it("hands over the messages the agent withdrew, once (https://github.com/Brevilabs/obsidian-copilot-private/issues/747)", () => {
+      const chat = liveChat({ midTurnDelivery: true });
+      chat.sendMessage("list the notes");
+      const { id } = chat.sendMessage("only the first two");
+
+      chat.emit({ sessionUpdate: "messages_withdrawn", promptIds: [id] });
+
+      expect(chat.takeWithdrawnPrompts().map((p) => p.text)).toEqual(["only the first two"]);
+      expect(chat.takeWithdrawnPrompts()).toEqual([]);
+    });
+  });
+
+  describe("getTasks()", () => {
+    it("lists the session's tasks and notifies the UI when one starts (https://github.com/Brevilabs/obsidian-copilot-private/issues/749)", () => {
+      const chat = liveChat({});
+      const listener = jest.fn();
+      chat.subscribe(listener);
+
+      chat.emit({
+        sessionUpdate: "task_started",
+        taskId: "task-1",
+        toolCallId: "call-1",
+        kind: "command",
+        description: "Render the video",
+      });
+
+      expect(chat.getTasks()).toEqual([
+        expect.objectContaining({ taskId: "task-1", kind: "command", status: "running" }),
+      ]);
+      expect(listener).toHaveBeenCalled();
+    });
+  });
+
+  describe("getTaskMessages()", () => {
+    it("returns a task's own messages and notifies the UI as they grow (https://github.com/Brevilabs/obsidian-copilot-private/issues/749)", () => {
+      const chat = liveChat({});
+      chat.emit({
+        sessionUpdate: "task_started",
+        taskId: "task-1",
+        toolCallId: "call-1",
+        kind: "subagent",
+        description: "Count words",
+      });
+      const listener = jest.fn();
+      chat.subscribe(listener);
+
+      chat.emit(
+        { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "9 words." } },
+        "call-1"
+      );
+
+      expect(chat.getTaskMessages("call-1")[0].parts).toEqual([{ kind: "text", text: "9 words." }]);
+      expect(chat.getMessages()).toEqual([]);
+      expect(listener).toHaveBeenCalled();
+    });
+  });
+
+  describe("canStopTasks()", () => {
+    it("follows the backend's per-task stop capability (https://github.com/Brevilabs/obsidian-copilot-private/issues/748)", () => {
+      expect(liveChat({ stopTask: true }).canStopTasks()).toBe(true);
+      expect(liveChat({}).canStopTasks()).toBe(false);
+    });
+  });
+
+  describe("stopTask()", () => {
+    it("asks the backend to stop the task with that id (https://github.com/Brevilabs/obsidian-copilot-private/issues/748)", async () => {
+      const stopTask = jest.fn(async () => undefined);
+      const chat = liveChat({ stopTask: true }, { stopTask });
+
+      await chat.stopTask("task-1");
+
+      expect(stopTask).toHaveBeenCalledWith({ sessionId: "claude-session", taskId: "task-1" });
     });
   });
 });

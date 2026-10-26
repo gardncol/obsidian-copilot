@@ -21,18 +21,18 @@ Free is the complete do-it-yourself path. It requires no Copilot account, licens
 
 You can use:
 
-- **Agent Chat with opencode** and an API provider or local OpenAI-compatible endpoint configured under **Settings → Copilot → BYOK**.
+- **Agent Chat with OpenCode** and an API provider or local OpenAI-compatible endpoint configured under **Settings → Copilot → BYOK**.
 - **Agent Chat with Claude** through your existing Claude Code installation and subscription.
 - **Agent Chat with Codex** through `codex-acp` and your existing Codex CLI or ChatGPT login.
 - **Quick Chat and Quick Ask** with a BYOK model.
-- **Projects**, **Copilot Commands**, custom Skills, and Skills shared across opencode, Claude, and Codex.
+- **Projects**, **Copilot Commands**, custom Skills, and Skills shared across OpenCode, Claude, and Codex.
 - The separately available Miyo desktop app and CLI for local semantic search and local-first knowledge ownership.
 
 Free does not mean every model is free. Anthropic, OpenAI, Google, OpenRouter, or another provider may charge your account. A local model uses your own computer instead.
 
 ## Lite
 
-Lite adds Copilot-hosted models. Enter the Copilot license key once, then eligible models appear in the opencode and Quick Chat model lists without separate provider setup.
+Lite adds Copilot-hosted models. Enter the Copilot license key once, then eligible models appear in the OpenCode and Quick Chat model lists without separate provider setup.
 
 Lite is a good fit when you want managed model access but do not need Copilot's collaboration and premium research features. Usage is subject to the current plan allowances. You can purchase Copilot credits from the dashboard when you need additional hosted usage.
 
@@ -78,7 +78,7 @@ The label in the model picker tells you which service handles the conversation:
 | **Copilot-hosted**          | Lite, Plus, or included Supporter access                       | Brevilabs and the enterprise model provider used for that model |
 | **Cloud BYOK**              | Your API key under BYOK                                        | The provider and endpoint you configured                        |
 | **Local BYOK**              | Ollama, LM Studio, or another local OpenAI-compatible endpoint | Your local endpoint                                             |
-| **opencode-reported model** | Authentication managed by opencode                             | The provider behind that opencode model                         |
+| **opencode-reported model** | Authentication managed by OpenCode                             | The provider behind that OpenCode model                         |
 | **Claude**                  | Claude Code login or environment                               | Anthropic under your Claude account                             |
 | **Codex**                   | Codex CLI login through `codex-acp`                            | OpenAI under your Codex or ChatGPT account                      |
 
@@ -89,7 +89,7 @@ A Claude or ChatGPT subscription is not an API key. Use the Claude or Codex Agen
 The selected model is only one possible route. A feature may call another service for the part of the task you asked it to perform:
 
 - A **Copilot-hosted Skill** sends the search query or URL needed by that Skill to Brevilabs.
-- In **Agent Chat**, **Miyo document processing** installs the `miyo-parse` Skill, which runs the local Miyo CLI, so PDF and EPUB parsing stays on this computer even when search uses a remote Miyo server. If Miyo cannot parse a file, the agent reads it with its own tools.
+- In **Agent Chat**, **Miyo document processing** gives agents Copilot's Miyo parse tool, which asks the connected Miyo service to parse PDF and EPUB files. A configured remote Miyo server parses vault files there and can't reach files outside the vault. If Miyo cannot parse a file, the agent reads it with its own tools.
 - In **Quick Chat**, **Miyo document processing** uses the connected Miyo service to read PDFs. A configured remote Miyo server processes the document there rather than on this computer. Without Miyo document processing, Quick Chat does not send PDFs anywhere and tells you to use Miyo or Agent Chat.
 - Saved **project context** is not converted. The agent receives the path of each file, such as a PDF or Office document, and reads it itself. It fetches a saved web page or YouTube link only when a question needs it, through its own tools or a Copilot-hosted Skill.
 - An agent can read a local note and include relevant text in the prompt sent to the selected model. Opening Agent Chat alone does not upload the whole vault.
@@ -118,9 +118,9 @@ You do not need Self-Host Mode to use a local BYOK model or local Miyo. Those ar
 ## Add or change a license
 
 1. Open **Settings → Copilot → Basic**.
-2. Paste your license key under **Copilot License**.
+2. Paste your license key under **Copilot license**.
 3. Select **Apply**.
-4. Review the hosted models enabled under **Basic → Agents → opencode** and **Basic → Agents → Quick Chat**.
+4. Review the hosted models enabled under **Basic → Agents → OpenCode** and **Basic → Agents → Quick Chat**.
 
 Use the [Copilot dashboard](https://www.obsidiancopilot.com/en/dashboard) for current plan, allowance, and credit details. Removing a Copilot license does not remove your BYOK providers or vendor subscriptions.
 

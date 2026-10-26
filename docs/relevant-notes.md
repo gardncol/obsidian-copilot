@@ -50,7 +50,7 @@ Try a question related to material in your vault. The demo uses:
 
 > Help me plan our next team workshop.
 
-Hover over a useful suggestion and choose **Add to Chat**. Check that the note appears in your chat context, then make your question more specific using what you found.
+Hover over a useful suggestion and choose **Add to chat**. Check that the note appears in your chat context, then make your question more specific using what you found.
 
 <video controls muted loop playsinline preload="metadata" aria-label="Preview a related note and add it to Agent Chat while drafting a question" style="width: 100%; height: auto;">
   <source src="https://pub-d0d5db63b5e446cc848d32b65229d622.r2.dev/copilot/2026-09/live-relevant-notes-clean-35f7a92dda84.mp4" type="video/mp4">

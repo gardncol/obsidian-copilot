@@ -16,17 +16,17 @@ import { SubAgentCard } from "@/agentMode/ui/SubAgentCard";
 import { ReasoningBlock } from "@/agentMode/ui/ReasoningBlock";
 import { AgentMarkdownText } from "@/agentMode/ui/AgentMarkdownText";
 import { planEntryClass, planEntryIcon } from "@/agentMode/ui/planEntryStyles";
-import {
-  miyoResultPaths,
-  miyoSearchRun,
-  type ToolSummaryContext,
-} from "@/agentMode/ui/toolSummaries";
-import { MiyoSearchCard } from "@/agentMode/ui/MiyoSearchCard";
+import type { ToolSummaryContext } from "@/agentMode/ui/toolSummaries";
+import { miyoResultPaths, miyoSearchRun } from "@/miyo/agentMode/miyoSearchRun";
+import { MiyoSearchCard } from "@/miyo/agentMode/ui/MiyoSearchCard";
 import { useThinkingClock } from "@/agentMode/ui/useThinkingClock";
 import { useTrailExpansion, type TrailExpansion } from "@/agentMode/ui/useTrailExpansion";
 import { AgentTurnDurationIndicator } from "@/agentMode/ui/AgentTurnDurationIndicator";
+import { useAgentTasks, type AgentTasksContextValue } from "@/agentMode/ui/AgentTasksContext";
+import { TaskCard } from "@/agentMode/ui/TaskCard";
 import { AssistantResponseFooter } from "@/components/ui/AssistantResponseFooter";
 import { getVaultBase } from "@/utils/vaultPath";
+import { openVaultPath } from "@/utils/openVaultPath";
 import { App } from "obsidian";
 
 interface AgentTrailProps {
@@ -44,6 +44,21 @@ interface AgentTrailProps {
 
 const noopOpenFileChange = () => {};
 
+// A turn that ends early without an error leaves a reply that looks finished. https://github.com/Brevilabs/obsidian-copilot-private/issues/739
+const EARLY_STOP_CAUSES: Partial<Record<StopReason, string>> = {
+  max_tokens: "the model hit its output limit",
+  max_turn_requests: "the agent hit its step limit",
+  refusal: "the model's safety system stopped it",
+};
+
+function stopReasonNotice(stopReason: StopReason | undefined): string | undefined {
+  const cause = stopReason && EARLY_STOP_CAUSES[stopReason];
+  return (
+    cause &&
+    `**Stopped early:** ${cause}, so its last step may not have run. Send another message to continue.`
+  );
+}
+
 export const AgentTrail: React.FC<AgentTrailProps> = ({
   parts,
   isStreaming,
@@ -57,6 +72,9 @@ export const AgentTrail: React.FC<AgentTrailProps> = ({
   onOpenFileChange = noopOpenFileChange,
 }) => {
   const answer = agentResponseText(parts);
+  // A failed turn's error is stored as message text, which a reply with parts never shows.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/633
+  const notice = errorText && answer.length === 0 ? errorText : stopReasonNotice(turnStopReason);
   const hasRunningDuration = isStreaming && turnStartedAtMs !== undefined;
   // A compaction row reports its own progress and is not a reply to time or copy.
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/633
@@ -84,11 +102,9 @@ export const AgentTrail: React.FC<AgentTrailProps> = ({
   return (
     <div className="tw-group tw-flex tw-flex-col tw-gap-1">
       <LinearTrail parts={parts} isStreaming={isStreaming} app={app} />
-      {errorText && answer.length === 0 ? (
-        // A failed turn's error is stored as message text, which a reply with parts never shows.
-        // https://github.com/Brevilabs/obsidian-copilot-private/issues/633
+      {notice ? (
         <div className="tw-text-error">
-          <AgentMarkdownText text={errorText} app={app} />
+          <AgentMarkdownText text={notice} app={app} />
         </div>
       ) : null}
       {turnStopReason !== undefined && fileChanges && fileChanges.length > 0 ? (
@@ -108,6 +124,7 @@ interface TrailContext {
   expansion: TrailExpansion;
   summaryCtx: ToolSummaryContext;
   miyoPaths: readonly string[];
+  tasks: AgentTasksContextValue | null;
 }
 
 const LinearTrail: React.FC<{
@@ -116,14 +133,19 @@ const LinearTrail: React.FC<{
   app: App;
 }> = ({ parts, isStreaming, app }) => {
   const expansion = useTrailExpansion();
+  const tasks = useAgentTasks();
   const summaryCtx = useMemo(() => ({ vaultBase: getVaultBase(app) }), [app]);
-  const nodes = foldActivityGroups(buildAgentTrail(parts));
+  // A task's launching card must stay visible, not folded into "Ran N commands". https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+  const nodes = foldActivityGroups(buildAgentTrail(parts), (part) =>
+    Boolean(tasks?.tasks.some((task) => task.toolCallId === part.id))
+  );
   const ctx: TrailContext = {
     app,
     lastPart: parts.length > 0 ? parts[parts.length - 1] : undefined,
     expansion,
     summaryCtx,
     miyoPaths: miyoResultPaths(parts),
+    tasks,
   };
   return (
     <div className="tw-flex tw-flex-col tw-gap-1">
@@ -141,13 +163,25 @@ function renderNode(
   atLiveEdge: boolean,
   trailId: string
 ): React.ReactNode {
+  // A task's work is shown in its own view, so its launching call is only a link there. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+  const launch = node.type === "action" ? node.part : node.type === "subagent" ? node.parent : null;
+  const task = launch && ctx.tasks?.tasks.find((t) => t.toolCallId === launch.id);
+  if (task && ctx.tasks) return <TaskCard key={key} task={task} onOpen={ctx.tasks.openTask} />;
   switch (node.type) {
     case "action": {
+      const expansionId = actionExpansionId(trailId, node.part.id);
       const miyoSearch = miyoSearchRun(node.part);
       if (miyoSearch) {
-        return <MiyoSearchCard key={key} status={node.part.status} {...miyoSearch} />;
+        return (
+          <MiyoSearchCard
+            key={key}
+            {...miyoSearch}
+            open={ctx.expansion.isOpen(expansionId)}
+            onToggle={() => ctx.expansion.toggle(expansionId)}
+            onOpenNote={(path) => openVaultPath(ctx.app, path, { newLeaf: true })}
+          />
+        );
       }
-      const expansionId = actionExpansionId(trailId, node.part.id);
       return (
         <ActionCard
           key={key}

@@ -62,7 +62,17 @@ ESLint and Stylelint findings include the file, line, rule, and message; the sam
 
 The upstream review packages are pinned in `package.json`. Update those versions and the lockfile together, review the upstream rule changes, and rerun the complete preflight before committing an upgrade. Do not weaken an error merely to re-establish a passing baseline, and do not promote a warning to blocking until its remediation is behavior-preserving.
 
-Maintainers should also read the [review-gate maintenance guide](./designdocs/OBSIDIAN_COMMUNITY_REVIEW.md) before changing review rules, severities, or fixtures.
+Maintainers should also read the [review-gate maintenance guide](./internal-docs/OBSIDIAN_COMMUNITY_REVIEW.md) before changing review rules, severities, or fixtures.
+
+#### Limiting Jest Workers
+
+`npm test` starts one Jest worker per CPU core, minus one, and each worker can use 2 GB of memory or more. A full run can use up all the RAM on a 16 GB machine. To cap the number of workers, set `COPILOT_JEST_MAX_WORKERS` in your shell profile:
+
+```bash
+export COPILOT_JEST_MAX_WORKERS=2
+```
+
+It takes a number (`2`) or a share of your CPU cores (`50%`). When it's unset, Jest uses its default. Passing `--maxWorkers` on the command line overrides it for that run.
 
 #### Fast Iteration with `npm run test:vault` (macOS)
 

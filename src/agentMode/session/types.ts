@@ -182,7 +182,7 @@ export type AgentToolKind =
   | "switch_mode"
   | "other";
 
-export type AgentToolStatus = "pending" | "in_progress" | "completed" | "failed";
+export type AgentToolStatus = "pending" | "in_progress" | "completed" | "failed" | "cancelled";
 
 export type AgentToolCallOutput =
   | { type: "text"; text: string }
@@ -272,7 +272,50 @@ export type SessionUpdate =
   | { sessionUpdate: "config_option_update"; configOptions: BackendConfigOption[] }
   | { sessionUpdate: "state_changed"; state: BackendState }
   | { sessionUpdate: "usage_update"; usage: SessionUsage }
-  | { sessionUpdate: "plan_usage_update"; planUsage: PlanUsage | null };
+  | { sessionUpdate: "plan_usage_update"; planUsage: PlanUsage | null }
+  | { sessionUpdate: "message_delivered"; promptId: string }
+  | { sessionUpdate: "messages_withdrawn"; promptIds: string[] }
+  | { sessionUpdate: "turn_started"; turnId: string; startedAt?: number }
+  | ({ sessionUpdate: "turn_ended" } & TurnEnd)
+  | { sessionUpdate: "session_disconnected"; error: Error }
+  | ({ sessionUpdate: "task_started" } & TaskStart)
+  | {
+      sessionUpdate: "task_progress";
+      taskId: string;
+      progress?: AgentToolProgress;
+      model?: string;
+      outputFile?: string;
+    }
+  | ({ sessionUpdate: "task_ended" } & TaskEnd);
+
+export type TaskKind = "subagent" | "command";
+
+export type TaskEndStatus = "completed" | "failed" | "stopped";
+
+// A task is known from the tool call that launches it, before the agent assigns it an id: a launch reports no taskId, and a later task_started for the same toolCallId attaches it. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+export interface TaskStart {
+  taskId?: string;
+  toolCallId: string;
+  kind: TaskKind;
+  description: string;
+  prompt?: string;
+  subagentType?: string;
+  command?: string;
+}
+
+export interface TaskEnd {
+  taskId: string;
+  status: TaskEndStatus;
+  summary?: string;
+  outputFile?: string;
+}
+
+export interface TurnEnd {
+  turnId: string;
+  stopReason: StopReason;
+  error?: Error;
+  turnDiff?: TurnDiff;
+}
 
 export interface SessionUsage {
   usedTokens: number;
@@ -288,6 +331,7 @@ export interface SessionEvent {
   sessionId: SessionId;
   update: SessionUpdate;
   occurredAt?: number;
+  taskToolCallId?: string;
 }
 
 export type PermissionOptionKind = "allow_once" | "allow_always" | "reject_once" | "reject_always";
@@ -316,8 +360,11 @@ export interface PermissionOption {
   kind: PermissionOptionKind;
 }
 
+export type PermissionRequester = "main" | { taskId: string };
+
 export interface PermissionPrompt {
   sessionId: SessionId;
+  requester?: PermissionRequester;
   toolCall: ToolCallSnapshot;
   options: PermissionOption[];
 }
@@ -382,12 +429,16 @@ export type LoadSessionOutput = OpenSessionOutput;
 
 export interface PromptInput {
   sessionId: SessionId;
+  promptId: string;
   prompt: PromptContent[];
+  interrupt?: boolean;
 }
 
-export interface PromptOutput {
-  stopReason: StopReason;
-  turnDiff?: TurnDiff;
+export interface QueuedPrompt {
+  readonly id: string;
+  readonly text: string;
+  readonly context?: MessageContext;
+  readonly promptContent?: PromptContent[];
 }
 
 export interface TurnDiff {
@@ -414,6 +465,16 @@ export interface CancelInput {
   sessionId: SessionId;
 }
 
+export interface WithdrawInput {
+  sessionId: SessionId;
+  promptId: string;
+}
+
+export interface StopTaskInput {
+  sessionId: SessionId;
+  taskId: string;
+}
+
 export type SessionUpdateHandler = (event: SessionEvent) => void;
 
 export interface BackendProcess {
@@ -429,8 +490,10 @@ export interface BackendProcess {
   readContextWindow?(wireModelId: string | null | undefined): Promise<number | null>;
   registerSessionHandler(sessionId: SessionId, handler: SessionUpdateHandler): () => void;
   newSession(params: OpenSessionInput): Promise<OpenSessionOutput>;
-  prompt(params: PromptInput): Promise<PromptOutput>;
+  prompt(params: PromptInput): Promise<void>;
   cancel(params: CancelInput): Promise<void>;
+  withdraw?(params: WithdrawInput): Promise<boolean>;
+  stopTask?(params: StopTaskInput): Promise<void>;
   closeSession?(params: { sessionId: SessionId }): Promise<void>;
   setSessionModel(params: { sessionId: SessionId; modelId: string }): Promise<BackendState>;
   isSetSessionModelSupported(): boolean | null;

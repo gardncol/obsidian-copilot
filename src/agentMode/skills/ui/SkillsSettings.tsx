@@ -1,10 +1,6 @@
 import { availableBuiltinAgents } from "@/agentMode/skills/builtin/reconcileBuiltinSkills";
 import { useBackendInstallStates } from "@/agentMode/session/useBackendInstallStates";
-import {
-  ALL_MANAGED_SKILLS,
-  isMiyoSearchSkillActive,
-  planManagedBuiltins,
-} from "@/builtinSkills/builtinSkills";
+import { BUILTIN_SKILLS, builtinSkillUnavailableReason } from "@/builtinSkills/builtinSkills";
 import { parseSkillFile } from "@/agentMode/skills/skillFormat";
 import { BuiltinSkillsTable } from "./BuiltinSkillsTable";
 import { formatSkillDisplayName } from "@/agentMode/skills/mergeDiscovery";
@@ -56,11 +52,10 @@ const SYNC_BRANDS: ReadonlyArray<{ substr: string; brand: string }> = [
   { substr: "dropbox", brand: "Dropbox" },
 ];
 
-const BUILTIN_ROWS = ALL_MANAGED_SKILLS.map((skill) => ({
+const BUILTIN_ROWS = BUILTIN_SKILLS.map((skill) => ({
   name: skill.name,
   description: parseSkillFile(skill.skillMd, skill.name).frontmatter.description,
   content: skill.skillMd,
-  enabledAgents: skill.enabledAgents,
 }));
 
 export const SkillsSettings: React.FC = () => {
@@ -93,12 +88,8 @@ export const SkillsSettings: React.FC = () => {
   );
   const availableAgents = availableBuiltinAgents(installStates, lastAvailableAgents.current);
   lastAvailableAgents.current = availableAgents;
-  const eligibleBuiltins = planManagedBuiltins({
-    search: isMiyoSearchSkillActive(settings),
-    documents: settings.enableMiyoDocumentProcessing,
-  }).seed;
   const unavailableReasons: Record<string, string> = {};
-  for (const skill of eligibleBuiltins) {
+  for (const skill of BUILTIN_SKILLS) {
     const collision =
       userSkills.some(
         (userSkill) => userSkill.name === skill.name && userSkill.location.kind === "canonical"
@@ -107,15 +98,13 @@ export const SkillsSettings: React.FC = () => {
         (rejected) =>
           toVaultRelative(rejected.dirPath, getVaultBase(app)) === `${skillsFolder}/${skill.name}`
       );
-    if (collision) {
-      unavailableReasons[skill.name] =
-        "A skill with this name already exists in Your Skills. Your file is kept unchanged.";
-    }
+    const reason = collision
+      ? "A skill with this name already exists in Your skills. Your file is kept unchanged."
+      : builtinSkillUnavailableReason(skill.name);
+    if (reason) unavailableReasons[skill.name] = reason;
   }
-  const builtinRows = BUILTIN_ROWS.filter(
-    (skill) =>
-      eligibleBuiltins.some((builtin) => builtin.name === skill.name) &&
-      `${skill.name} ${skill.description}`.toLowerCase().includes(searchValue.trim().toLowerCase())
+  const builtinRows = BUILTIN_ROWS.filter((skill) =>
+    `${skill.name} ${skill.description}`.toLowerCase().includes(searchValue.trim().toLowerCase())
   );
 
   const handleBuiltinChange = useCallback(
@@ -298,7 +287,7 @@ export const SkillsSettings: React.FC = () => {
         <div className="tw-mb-4 tw-flex tw-flex-col tw-gap-2">
           <div className="tw-text-xl tw-font-bold">Skills</div>
           <div className="tw-text-sm tw-text-muted">
-            Skills are instruction packets your agents can run - things like &ldquo;review a
+            Skills are saved instructions your agents can follow - things like &ldquo;review a
             diff&rdquo; or &ldquo;write a release note&rdquo;. Skills you put under your shared
             folder, or directly inside an agent&rsquo;s own skills folder, show up here
             automatically.
@@ -350,13 +339,13 @@ export const SkillsSettings: React.FC = () => {
           <span className="tw-text-xs tw-text-muted">{userSkills.length} loaded</span>
         </div>
 
-        <div className="tw-mt-4" role="region" aria-label="Your Skills">
+        <div className="tw-mt-4" role="region" aria-label="Your skills">
           <div
             role="heading"
             aria-level={3}
             className="tw-mb-3 tw-text-left tw-text-base tw-font-semibold"
           >
-            Your Skills
+            Your skills
           </div>
           {userSkills.length === 0 ? (
             // Rejected files prove skills exist; the empty state would claim there are none. https://github.com/Brevilabs/obsidian-copilot-private/issues/166
@@ -417,12 +406,13 @@ const EpermBanner: React.FC<{ onDismiss: () => void }> = ({ onDismiss }) => {
       <AlertTriangle className="tw-mt-0.5 tw-size-4 tw-shrink-0" aria-hidden="true" />
       <div className="tw-flex-1">
         <span className="tw-block tw-font-semibold">
-          Windows needs Developer Mode for multi-agent fanout.
+          Turn on Windows Developer Mode to share skills with your agents.
         </span>
         <span className="tw-mt-0.5 tw-block tw-text-normal">
-          Creating shortcuts in your agent folders requires admin, or Settings → Privacy &amp;
-          security → For developers → Developer Mode. Until then, agent toggles flip in the file but
-          no shortcut is created.
+          Copilot shares a skill by adding a shortcut to each agent&rsquo;s skills folder, and
+          Windows allows that only for admins or with Developer Mode (Settings → Privacy &amp;
+          security → For developers). Until then, turning a skill on for an agent is saved, but the
+          agent can&rsquo;t see the skill.
         </span>
       </div>
       <button
@@ -453,8 +443,8 @@ const SyncFolderBanner: React.FC<{ brand: string; onDismiss: () => void }> = ({
       <div className="tw-flex-1">
         <span className="tw-block tw-font-semibold">This vault is inside {brand}.</span>
         <span className="tw-mt-0.5 tw-block tw-text-muted">
-          Sync sometimes replaces directory junctions with shortcuts. If a skill disappears from an
-          agent after a sync, re-toggle it here to recreate the link.
+          Sync can break the links Copilot uses to share skills with agents. If a skill disappears
+          from an agent after a sync, turn it off and on again here.
         </span>
       </div>
       <button

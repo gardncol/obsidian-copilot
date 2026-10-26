@@ -205,7 +205,7 @@ export default [
       "dev/gallery/main.js",
       "dev/gallery/styles.css",
       "data.json",
-      "designdocs/**",
+      "internal-docs/**",
       "docs/**",
       ".claude/**",
     ],
@@ -249,7 +249,7 @@ export default [
         callees: ["classnames", "clsx", "ctl", "cn", "cva"],
         config: "./tailwind.config.js",
         cssFiles: ["**/*.css", "!**/node_modules", "!**/.*", "!**/dist", "!**/build"],
-        whitelist: ["clickable-icon", "mod-cta", "markdown-rendered"],
+        whitelist: ["clickable-icon", "mod-cta", "markdown-rendered", "markdown-preview-view"],
       },
     },
     rules: {
@@ -287,7 +287,7 @@ export default [
         {
           name: "app",
           message:
-            "Don't use the global `app` (footgun in popouts). Thread `app` via useApp() or a parameter. See designdocs/agents/PLUGIN_DEV_GUIDE.md.",
+            "Don't use the global `app` (footgun in popouts). Thread `app` via useApp() or a parameter. See internal-docs/PLUGIN_DEV_GUIDE.md.",
         },
       ],
 
@@ -516,6 +516,7 @@ export default [
         { type: "ui", pattern: "src/agentMode/ui" },
         { type: "skills", pattern: "src/agentMode/skills" },
         { type: "modelmgmt", pattern: "src/modelManagement" },
+        { type: "miyoAgent", pattern: "src/miyo/agentMode" },
         { type: "host", pattern: "src/**" },
       ],
     },
@@ -540,8 +541,12 @@ export default [
             {
               from: { type: "ui" },
               allow: {
-                to: { type: ["ui", "session", "registry", "skills", "host"] },
+                to: { type: ["ui", "session", "registry", "skills", "miyoAgent", "host"] },
               },
+            },
+            {
+              from: { type: "miyoAgent" },
+              allow: { to: { type: ["miyoAgent", "ui", "session", "host"] } },
             },
             {
               from: { type: "skills" },

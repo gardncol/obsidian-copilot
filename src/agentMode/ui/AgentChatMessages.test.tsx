@@ -1,3 +1,5 @@
+import { AgentTasksProvider } from "@/agentMode/ui/AgentTasksContext";
+import { makeTask } from "@/agentMode/ui/testing/taskFixtures";
 import type { AgentChatBackend } from "@/agentMode/session/AgentChatBackend";
 import type {
   AgentChatMessage,
@@ -18,12 +20,11 @@ type AgentChatMessagesProps = React.ComponentProps<typeof AgentChatMessages>;
 
 const mockSingleMessageRender = jest.fn();
 const mockTrailRender = jest.fn();
-const mockScrollState = { paused: false, onResume: jest.fn(), containerMinHeight: 0 };
+const mockScrollState = { paused: false, onResume: jest.fn() };
 
 jest.mock("@/hooks/useChatScrolling", () => ({
   // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks the real hook; name must match the export
   useChatScrolling: () => ({
-    containerMinHeight: mockScrollState.containerMinHeight,
     scrollContainerCallbackRef: jest.fn(),
     contentCallbackRef: jest.fn(),
     onScroll: jest.fn(),
@@ -89,10 +90,19 @@ jest.mock("@/agentMode/ui/TurnDiffView", () => ({
 jest.mock("@/logger", () => ({ ...jest.requireActual("@/logger"), logError: jest.fn() }));
 
 jest.mock("@/agentMode/ui/ToolPermissionCard", () => ({
-  ToolPermissionCard: ({ request, toolName }: { request: PermissionPrompt; toolName?: string }) => (
+  ToolPermissionCard: ({
+    request,
+    toolName,
+    requester,
+  }: {
+    request: PermissionPrompt;
+    toolName?: string;
+    requester?: string;
+  }) => (
     <div>
       Permission {request.toolCall.toolCallId}
       {toolName ? ` via ${toolName}` : ""}
+      {requester ? ` from ${requester}` : ""}
     </div>
   ),
 }));
@@ -222,7 +232,6 @@ describe("AgentChatMessages", () => {
       mockSingleMessageRender.mockClear();
       mockTrailRender.mockClear();
       mockScrollState.paused = false;
-      mockScrollState.containerMinHeight = 0;
       mockScrollState.onResume.mockClear();
     });
 
@@ -249,15 +258,6 @@ describe("AgentChatMessages", () => {
       expect(text.indexOf("Report this to the Copilot team?")).toBeLessThan(
         text.indexOf("next question")
       );
-    });
-
-    it("keeps the streaming reply's viewport height when the feedback card attaches to it", () => {
-      mockScrollState.containerMinHeight = 480;
-      renderMessages(FEEDBACK_TRANSCRIPT.slice(0, 2), true, { feedbackOffer: FEEDBACK_OFFER });
-
-      const row = screen.getByTestId("agent-feedback-card").closest("[data-message-key]");
-      expect(row?.getAttribute("data-message-key")).toBe("reply-1");
-      expect((row as HTMLElement).style.minHeight).toBe("480px");
     });
 
     it("hides a dismissed feedback card", () => {
@@ -528,6 +528,29 @@ describe("AgentChatMessages", () => {
 
       expect(screen.getByRole("region", { name: "Pending agent actions" }).textContent).toBe(
         "Permission search-1 via websearch"
+      );
+    });
+
+    it("labels a permission request with the task that asked (https://github.com/Brevilabs/obsidian-copilot-private/issues/749)", () => {
+      const request = { ...permission("sub-bash"), requester: { taskId: "task-1" } };
+
+      render(
+        <AgentTasksProvider tasks={[makeTask()]} openTask={jest.fn()}>
+          <AgentChatMessages
+            messages={[]}
+            plugin={{ app: {} as never, manifest: { version: "4.1.0" } as never }}
+            currentPlan={null}
+            pendingToolPermissions={[request]}
+            pendingAskUserQuestions={[]}
+            chatBackend={chatBackend}
+            isLoading={false}
+            feedbackOffer={null}
+          />
+        </AgentTasksProvider>
+      );
+
+      expect(screen.getByRole("region", { name: "Pending agent actions" }).textContent).toBe(
+        'Permission sub-bash from general-purpose "Count words in Welcome"'
       );
     });
 

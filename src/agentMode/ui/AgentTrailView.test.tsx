@@ -4,6 +4,9 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppContext } from "@/context";
 import { AgentTrail } from "@/agentMode/ui/AgentTrailView";
 import type { AgentMessagePart, TurnFileChange } from "@/agentMode/session/types";
+import { miyoSearchCall } from "@/miyo/agentMode/testing/miyoSearchCall";
+import { AgentTasksProvider } from "@/agentMode/ui/AgentTasksContext";
+import { makeCommandTask, makeTask } from "@/agentMode/ui/testing/taskFixtures";
 
 jest.mock("@/agentMode/ui/AgentMarkdownText", () => ({
   AgentMarkdownText: ({ text, miyoPaths }: { text: string; miyoPaths?: string[] }) => (
@@ -337,6 +340,41 @@ describe("AgentTrail", () => {
     ]);
   });
 
+  it("https://github.com/Brevilabs/obsidian-copilot-private/issues/739 says the turn stopped at the output limit under a reply that already has answer text, rendering the answer once", () => {
+    renderTrail({
+      parts: [
+        text("I'll load the meeting note skill first."),
+        toolCall("w1", { status: "failed" }),
+      ],
+      turnStopReason: "max_tokens",
+    });
+
+    expect(screen.getAllByTestId("agent-md").map((el) => el.textContent)).toEqual([
+      "I'll load the meeting note skill first.",
+      "**Stopped early:** the model hit its output limit, so its last step may not have run. Send another message to continue.",
+    ]);
+  });
+
+  it("https://github.com/Brevilabs/obsidian-copilot-private/issues/739 says why the turn stopped at the agent's step limit or a safety stop", () => {
+    const { rerenderTrail } = renderTrail({ turnStopReason: "max_turn_requests" });
+    expect(screen.getAllByTestId("agent-md")[1].textContent).toBe(
+      "**Stopped early:** the agent hit its step limit, so its last step may not have run. Send another message to continue."
+    );
+
+    rerenderTrail({ turnStopReason: "refusal" });
+    expect(screen.getAllByTestId("agent-md")[1].textContent).toBe(
+      "**Stopped early:** the model's safety system stopped it, so its last step may not have run. Send another message to continue."
+    );
+  });
+
+  it("https://github.com/Brevilabs/obsidian-copilot-private/issues/739 shows no stop notice for a reply that ended normally or was cancelled", () => {
+    const { rerenderTrail } = renderTrail({ turnStopReason: "end_turn" });
+    expect(screen.getAllByTestId("agent-md")).toHaveLength(1);
+
+    rerenderTrail({ turnStopReason: "cancelled" });
+    expect(screen.getAllByTestId("agent-md")).toHaveLength(1);
+  });
+
   it("uses one aligned folding header for reasoning and every tool-card family", () => {
     const { container } = renderTrail({
       parts: [
@@ -596,45 +634,108 @@ describe("AgentTrail", () => {
     expect(screen.getByText("Running `npm run root`")).toBeTruthy();
   });
 
-  it("renders a Miyo search as its own card between grouped work, without the skill load row (https://github.com/Brevilabs/obsidian-copilot-private/issues/718)", () => {
-    renderTrail({
-      parts: [
-        READ_A,
-        LINT,
-        toolCall("load", { vendorToolName: "Skill", input: { skill: "miyo-search" } }),
-        toolCall("miyo", {
-          vendorToolName: "Bash",
-          toolKind: "execute",
-          input: { command: 'sh "/v/.claude/skills/miyo-search/miyo-search.sh" "standing desk"' },
-          output: [{ type: "text", text: '{"results":[{"path":"a.md"},{"path":"b.md"}]}' }],
-        }),
-        READ_B,
-        LINT,
-        text("Found it."),
-      ],
-    });
+  it("renders a Miyo search as its own card between grouped work, with its query and note count (https://github.com/Brevilabs/obsidian-copilot-private/issues/735)", () => {
+    const miyo = miyoSearchCall({ notes: [{ path: "v/a.md" }, { path: "v/b.md" }] });
+    renderTrail({ parts: [READ_A, LINT, miyo, READ_B, LINT, text("Found it.")] });
 
     expect(screen.getByText("Searched with Miyo")).toBeTruthy();
     expect(screen.getByText("“standing desk”")).toBeTruthy();
     expect(screen.getByText("2 notes")).toBeTruthy();
-    expect(screen.queryByText("Ran skill miyo-search")).toBeNull();
     expect(screen.getAllByText("Ran 2 commands, read 1 file")).toHaveLength(2);
   });
 
-  it("gives the answer text the note paths from the turn's saved Miyo output (https://github.com/Brevilabs/obsidian-copilot-private/issues/719)", () => {
+  it("unfolds a Miyo search card to list its notes and opens a clicked note in a new tab (https://github.com/Brevilabs/obsidian-copilot-private/issues/750)", () => {
+    const openLinkText = jest.fn();
+    const app = {
+      workspace: { getActiveFile: jest.fn(() => null), openLinkText },
+      vault: { getAbstractFileByPath: jest.fn(() => ({})) },
+    } as never;
+    renderTrail({
+      app,
+      parts: [miyoSearchCall({ notes: [{ path: "v/a.md" }, { path: "v/b.md" }] }), text("Done.")],
+    });
+
+    expect(screen.queryByText("a")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Searched with Miyo/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^a/ }));
+
+    expect(screen.getByText("b")).toBeTruthy();
+    expect(openLinkText).toHaveBeenCalledWith("v/a.md", "", true);
+  });
+
+  it("renders a failed Miyo search as a failed card with its reason and no badge paths (https://github.com/Brevilabs/obsidian-copilot-private/issues/735)", () => {
+    renderTrail({
+      parts: [miyoSearchCall({ failureReason: "net::ERR_CONNECTION_REFUSED" }), text("See [[a]].")],
+      isStreaming: false,
+    });
+
+    expect(screen.getByText("Miyo search failed")).toBeTruthy();
+    expect(screen.getByText("net::ERR_CONNECTION_REFUSED")).toBeTruthy();
+    expect(screen.getByTestId("agent-md").getAttribute("data-miyo-paths")).toBe("");
+  });
+
+  it("gives the answer text the note paths of the turn's Miyo searches, as when the chat is reopened from history (https://github.com/Brevilabs/obsidian-copilot-private/issues/735)", () => {
     renderTrail({
       parts: [
-        toolCall("miyo", {
-          vendorToolName: "Bash",
-          toolKind: "execute",
-          input: { command: 'sh "/v/.claude/skills/miyo-search/miyo-search.sh" "standing desk"' },
-          output: [{ type: "text", text: '{"results":[{"path":"v/a.md"},{"path":"v/b.md"}]}' }],
-        }),
+        miyoSearchCall({ notes: [{ path: "v/a.md" }, { path: "v/b.md" }] }),
         text("See [[a]]."),
       ],
       isStreaming: false,
     });
 
     expect(screen.getByTestId("agent-md").getAttribute("data-miyo-paths")).toBe("v/a.md|v/b.md");
+  });
+
+  describe("with task state from the session", () => {
+    const AGENT_LAUNCH = toolCall("call-1", {
+      vendorToolName: "Agent",
+      status: "in_progress",
+      input: { description: "Count words in Welcome", subagent_type: "general-purpose" },
+    });
+    const BASH_LAUNCH = toolCall("call-2", {
+      vendorToolName: "Bash",
+      status: "in_progress",
+      input: { command: "for i in $(seq 1 30); do echo $i; done" },
+    });
+
+    function renderWithTasks(parts: AgentMessagePart[], tasks = [makeTask(), makeCommandTask()]) {
+      const openTask = jest.fn();
+      const app = makeApp();
+      render(
+        <AppContext.Provider value={app}>
+          <TooltipProvider>
+            <AgentTasksProvider tasks={tasks} openTask={openTask}>
+              <AgentTrail parts={parts} isStreaming={false} turnStopReason="end_turn" app={app} />
+            </AgentTasksProvider>
+          </TooltipProvider>
+        </AppContext.Provider>
+      );
+      return { openTask };
+    }
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/749 shows a task's launching call as a compact card with the task's status that opens the task", () => {
+      const { openTask } = renderWithTasks([AGENT_LAUNCH, text("Started.")]);
+
+      expect(screen.getByText("general-purpose · Count words in Welcome")).toBeTruthy();
+      expect(screen.getByText("Running")).toBeTruthy();
+      expect(screen.queryByText(/Sub-agent/)).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: /Count words in Welcome/ }));
+
+      expect(openTask).toHaveBeenCalledWith("call-1");
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/749 keeps a background command's card out of the surrounding command group", () => {
+      renderWithTasks([READ_A, BASH_LAUNCH, LINT, text("Started.")]);
+
+      expect(screen.getByText("Print 30 progress lines")).toBeTruthy();
+      expect(screen.queryByText(/Ran 2 commands/)).toBeNull();
+    });
+
+    it("renders a launching call that has no task as before", () => {
+      renderWithTasks([AGENT_LAUNCH, text("Started.")], []);
+
+      expect(screen.getByText('general-purpose · "Count words in Welcome"')).toBeTruthy();
+    });
   });
 });

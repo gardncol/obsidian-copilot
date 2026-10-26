@@ -2,7 +2,7 @@ import type { AgentChatBackend } from "@/agentMode/session/AgentChatBackend";
 import { expandCustomCommandPrefix } from "@/agentMode/session/expandCustomCommandPrefix";
 import { resolveActiveNoteToken } from "@/agentMode/session/resolveActiveNoteToken";
 import type { QueuedAgentMessage } from "@/agentMode/session/AgentInputDraftStore";
-import type { PromptContent } from "@/agentMode/session/types";
+import type { PromptContent, QueuedPrompt } from "@/agentMode/session/types";
 import type { AgentInputDraftControls } from "@/agentMode/ui/hooks/useAgentInputDrafts";
 import {
   clearSelectedTextContexts,
@@ -41,7 +41,6 @@ import { getModelKeyFromModel } from "@/settings/model";
 import { modelSupportsVision } from "@/utils";
 import { arrayBufferToBase64, base64ToArrayBuffer } from "@/utils/base64";
 import { mergeWebTabContexts } from "@/utils/urlNormalization";
-import { QueuedMessageList } from "@/agentMode/ui/QueuedMessageList";
 import { App, Notice, TFile } from "obsidian";
 import React, { memo, useCallback, useContext, useEffect, useMemo, useRef } from "react";
 import { v4 as uuidv4 } from "uuid";
@@ -57,6 +56,8 @@ interface AgentChatInputProps {
   updateUserMessageHistory: (newMessage: string) => void;
   isStarting: boolean;
   isLoading: boolean;
+  queuedPrompts: readonly QueuedPrompt[];
+  acceptsMidTurnMessages: boolean;
   hasPendingPlanPermission: boolean;
   modelPickerOverride: ChatInputProps["modelPickerOverride"];
   modePickerOverride: ChatInputProps["modePickerOverride"];
@@ -155,6 +156,8 @@ export const AgentChatInput = memo(function AgentChatInput({
   updateUserMessageHistory,
   isStarting,
   isLoading: loading,
+  queuedPrompts,
+  acceptsMidTurnMessages,
   hasPendingPlanPermission,
   modelPickerOverride,
   modePickerOverride,
@@ -214,18 +217,14 @@ export const AgentChatInput = memo(function AgentChatInput({
     mentionedAgentIdsRef.current = [];
   }, [chatInputId]);
 
-  const handleStopGenerating = useCallback(async () => {
-    // Restore before cancellation can finish the turn and flush the queue.
-    // Only runSend owns loading; a late cancel must not mark a newer turn idle.
-    // Selected text remains ephemeral and is deliberately not restored.
-    // https://github.com/Brevilabs/obsidian-copilot-private/issues/365
-    // https://github.com/Brevilabs/obsidian-copilot-private/issues/485
-    setQueuedMessages([]);
-    if (queuedMessages.length > 0) {
+  // Selected text remains ephemeral and is deliberately not restored.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/365
+  const restoreToComposer = useCallback(
+    (items: QueuedAgentMessage[]) => {
       // Merged into one draft, /compact would swallow the queued messages as compaction input.
       // https://github.com/Brevilabs/obsidian-copilot-private/issues/634
-      const nonCompact = queuedMessages.filter((item) => !isCompactCommand(item.text));
-      const restored = combineQueuedMessages(nonCompact.length > 0 ? nonCompact : queuedMessages);
+      const nonCompact = items.filter((item) => !isCompactCommand(item.text));
+      const restored = combineQueuedMessages(nonCompact.length > 0 ? nonCompact : items);
       // A fixed copy of the current page would duplicate its Active Web Tab badge and outlive
       // that badge's removal. https://github.com/Brevilabs/obsidian-copilot-private/issues/667
       const activeUrl = activeWebTabForMentions?.url;
@@ -249,23 +248,36 @@ export const AgentChatInput = memo(function AgentChatInput({
         .map(imageBlockToFile)
         .filter((file): file is File => file !== null);
       if (images.length > 0) setSelectedImages((previous) => [...images, ...previous]);
-    }
+    },
+    [
+      activeWebTabForMentions,
+      app,
+      setContextNotes,
+      setIncludeActiveNote,
+      setIncludeActiveWebTab,
+      setSelectedImages,
+    ]
+  );
+
+  const handleStopGenerating = useCallback(async () => {
+    // Restore before cancellation can finish the turn and flush the queue.
+    // Only runSend owns loading; a late cancel must not mark a newer turn idle.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/485
+    setQueuedMessages([]);
+    if (queuedMessages.length > 0) restoreToComposer(queuedMessages);
     try {
       await backend.cancel();
     } catch (e) {
       logError("[AgentMode] cancel failed", e);
     }
-  }, [
-    activeWebTabForMentions,
-    app,
-    backend,
-    queuedMessages,
-    setContextNotes,
-    setIncludeActiveNote,
-    setIncludeActiveWebTab,
-    setSelectedImages,
-    setQueuedMessages,
-  ]);
+  }, [backend, queuedMessages, restoreToComposer, setQueuedMessages]);
+
+  // A message withdrawn before the agent read it returns to the composer ahead of the draft. https://github.com/Brevilabs/obsidian-copilot-private/issues/747
+  useEffect(() => {
+    const withdrawn = backend.takeWithdrawnPrompts();
+    if (withdrawn.length === 0) return;
+    restoreToComposer(withdrawn.map((p) => ({ ...p, rawInput: p.text })));
+  }, [backend, queuedPrompts, restoreToComposer]);
 
   const runSend = useCallback(
     async (item: QueuedAgentMessage) => {
@@ -289,8 +301,23 @@ export const AgentChatInput = memo(function AgentChatInput({
     [backend, setLoading, updateUserMessageHistory]
   );
 
+  // The session shows the message once it reaches the agent, so the composer neither waits nor holds it. https://github.com/Brevilabs/obsidian-copilot-private/issues/509
+  const sendMidTurn = useCallback(
+    (item: QueuedAgentMessage, interrupt: boolean) => {
+      try {
+        backend.sendMessage(item.text, item.context, item.promptContent, undefined, { interrupt });
+        if (item.rawInput) updateUserMessageHistory(item.rawInput);
+      } catch (error) {
+        logError("Error sending agent message:", error);
+        new Notice("Failed to send message. Please try again.");
+        restoreToComposer([item]);
+      }
+    },
+    [backend, restoreToComposer, updateUserMessageHistory]
+  );
+
   const handleSendMessage = useCallback(
-    async (webTabs?: WebTabContext[]) => {
+    async (webTabs?: WebTabContext[], interrupt = false) => {
       if (disabled) return;
       const text = inputMessage.trim();
       if (!text && selectedImages.length === 0) return;
@@ -370,7 +397,17 @@ export const AgentChatInput = memo(function AgentChatInput({
         mentionedAgents,
       };
 
-      if (loading || isStarting) {
+      if (loading || isStarting || queuedPrompts.length > 0) {
+        // Compaction and multi-agent questions are whole turns of their own, so Copilot holds them until the agent finishes. https://github.com/Brevilabs/obsidian-copilot-private/issues/509
+        if (
+          !isStarting &&
+          acceptsMidTurnMessages &&
+          !isCompactCommand(item.text) &&
+          !item.mentionedAgents
+        ) {
+          sendMidTurn(item, interrupt);
+          return;
+        }
         setQueuedMessages((q) => [...q, item]);
         return;
       }
@@ -387,6 +424,9 @@ export const AgentChatInput = memo(function AgentChatInput({
       selectedTextContexts,
       loading,
       isStarting,
+      queuedPrompts.length,
+      acceptsMidTurnMessages,
+      sendMidTurn,
       unsupportedImageModelLabel,
       disabled,
       resetCompose,
@@ -398,7 +438,16 @@ export const AgentChatInput = memo(function AgentChatInput({
   );
 
   useEffect(() => {
-    if (disabled || loading || isStarting || queuedMessages.length === 0) return;
+    // Held messages go after every message already handed to the agent. https://github.com/Brevilabs/obsidian-copilot-private/issues/509
+    if (
+      disabled ||
+      loading ||
+      isStarting ||
+      queuedPrompts.length > 0 ||
+      queuedMessages.length === 0
+    ) {
+      return;
+    }
     const { batch, rest } = takeNextQueuedBatch(queuedMessages);
     const combined = combineQueuedMessages(batch);
     if (
@@ -416,18 +465,12 @@ export const AgentChatInput = memo(function AgentChatInput({
     disabled,
     loading,
     isStarting,
+    queuedPrompts.length,
     queuedMessages,
     runSend,
     setQueuedMessages,
     unsupportedImageModelLabel,
   ]);
-
-  const handleRemoveQueuedMessage = useCallback(
-    (id: string) => {
-      setQueuedMessages((q) => q.filter((m) => m.id !== id));
-    },
-    [setQueuedMessages]
-  );
 
   useEffect(() => {
     const handleAbortStream = () => {
@@ -441,9 +484,6 @@ export const AgentChatInput = memo(function AgentChatInput({
 
   return (
     <>
-      {queuedMessages.length > 0 && (
-        <QueuedMessageList messages={queuedMessages} onRemove={handleRemoveQueuedMessage} />
-      )}
       <div
         className={
           hasPendingPlanPermission || disabled ? "tw-pointer-events-none tw-opacity-50" : undefined
@@ -457,8 +497,11 @@ export const AgentChatInput = memo(function AgentChatInput({
           placeholder="Ask anything • @ to add context • / for commands"
           inputMessage={inputMessage}
           setInputMessage={setInputMessage}
-          handleSendMessage={safeAsyncHandler((meta) => handleSendMessage(meta?.webTabs))}
+          handleSendMessage={safeAsyncHandler((meta) =>
+            handleSendMessage(meta?.webTabs, meta?.interrupt)
+          )}
           isGenerating={loading}
+          canInterruptAndSend={acceptsMidTurnMessages}
           onStopGenerating={safeAsyncHandler(handleStopGenerating)}
           onEscape={loading ? safeAsyncHandler(handleStopGenerating) : undefined}
           onShiftTab={modePickerOverride ? onCycleMode : undefined}
