@@ -52,6 +52,7 @@ interface FakeFile {
 
 function makeApp() {
   const files = new Map<string, FakeFile>();
+  const cacheListeners = new Set<(file: FakeFile) => void>();
   return {
     files,
     vault: {
@@ -101,7 +102,16 @@ function makeApp() {
       },
     },
     metadataCache: {
-      getFileCache: jest.fn(() => undefined),
+      getFileCache: jest.fn((_file: FakeFile): unknown => undefined),
+      listeners: cacheListeners,
+      on: (_name: "changed", listener: (file: FakeFile) => void) => {
+        cacheListeners.add(listener);
+        return listener;
+      },
+      offref: (ref: (file: FakeFile) => void) => cacheListeners.delete(ref),
+      trigger: (_name: "changed", file: FakeFile) => {
+        for (const listener of Array.from(cacheListeners)) listener(file);
+      },
     },
     fileManager: {
       processFrontMatter: jest.fn(
@@ -250,6 +260,29 @@ describe("AgentChatPersistenceManager", () => {
       expect(loaded.messages[1].message).toBe("hi back");
     });
 
+    it("saves a reply that starts with a code fence so the note renders it and it loads back unchanged (https://github.com/Brevilabs/obsidian-copilot-private/issues/889)", async () => {
+      const reply = "```mermaid\nflowchart LR\n  A --> B\n```\n\nThat is the flow.";
+      const saved = await manager.saveSession(
+        [makeMessage(USER_SENDER, "Draw it"), makeMessage(AI_SENDER, reply)],
+        "claude"
+      );
+
+      const file = app.files.get(saved!.path)!;
+      expect(file.contents).toContain("**ai**: \n\n```mermaid\n");
+      const loaded = await manager.loadFile(file as unknown as TFile);
+      expect(loaded.messages.map((m) => m.message)).toEqual(["Draw it", reply]);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/815 writes the chat title to the note's topic, the one title the chat lists read", async () => {
+      const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude", {
+        label: "My chat",
+      });
+
+      const contents = app.files.get(saved!.path)!.contents!;
+      expect(contents).toContain('topic: "My chat"\n');
+      expect(contents).not.toContain("agentLabel");
+    });
+
     it("writes under the folder captured at entry, not one a mid-save root change swaps in", async () => {
       const folderMock = jest.mocked(getEffectiveConversationsFolder);
       folderMock.mockReturnValueOnce("old-folder");
@@ -312,7 +345,7 @@ describe("AgentChatPersistenceManager", () => {
         label: "first\nsecond\rthird",
       });
       const raw = app.files.get(saved!.path)!.contents!;
-      const labelLines = raw.split("\n").filter((l) => l.startsWith("agentLabel:"));
+      const labelLines = raw.split("\n").filter((l) => l.startsWith("topic:"));
       expect(labelLines).toHaveLength(1);
       const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
       expect(loaded.label).toBe("first second third");
@@ -453,7 +486,7 @@ describe("AgentChatPersistenceManager", () => {
       note.contents = note.contents!.replace("tags:", 'topic: "New"\ntags:');
       app.metadataCache.getFileCache.mockReturnValue({
         frontmatter: { topic: "Old" },
-      } as never);
+      });
 
       await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude", {
         existingPath: first!.path,
@@ -493,6 +526,40 @@ describe("AgentChatPersistenceManager", () => {
     });
   });
 
+  describe("updateTopic()", () => {
+    it("writes the trimmed title to the note's topic once Obsidian holds it", async () => {
+      const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude");
+      app.metadataCache.getFileCache.mockReturnValue({ frontmatter: { topic: "Quarterly plan" } });
+
+      await manager.updateTopic(saved!.path, "  Quarterly plan  ");
+
+      expect(app.files.get(saved!.path)!.contents).toContain("topic: Quarterly plan\n");
+    });
+
+    it("waits for Obsidian to re-read the renamed note so Recent Chats lists the new title https://github.com/logancyang/obsidian-copilot/issues/3555", async () => {
+      const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude");
+      const file = app.files.get(saved!.path)!;
+      let cachedTopic = "Old title";
+      let reportStaleRead!: () => void;
+      const staleRead = new Promise<string>((resolve) => {
+        reportStaleRead = () => resolve("read the stale cache");
+      });
+      app.metadataCache.getFileCache.mockImplementation(() => {
+        if (cachedTopic === "Old title") reportStaleRead();
+        return { frontmatter: { topic: cachedTopic } };
+      });
+
+      const renaming = manager.updateTopic(saved!.path, "New title");
+      const first = await Promise.race([staleRead, renaming.then(() => "resolved early")]);
+      cachedTopic = "New title";
+      app.metadataCache.trigger("changed", file);
+      await renaming;
+
+      expect(first).toBe("read the stale cache");
+      expect(app.metadataCache.listeners.size).toBe(0);
+    });
+  });
+
   describe("setPinnedAt()", () => {
     it("pins a chat by writing the pin time to its note's frontmatter", async () => {
       const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude");
@@ -529,6 +596,55 @@ describe("AgentChatPersistenceManager", () => {
       );
 
       expect(app.files.get(saved!.path)!.contents).toContain("pinnedAt: 1760000000000\n");
+    });
+  });
+
+  describe("setArchivedAt()", () => {
+    it("archives a chat by writing the archive time to its note's frontmatter", async () => {
+      const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude");
+
+      await manager.setArchivedAt(saved!.path, 1_760_000_000_000);
+
+      expect(app.files.get(saved!.path)!.contents).toContain("archivedAt: 1760000000000\n");
+    });
+
+    it("changes nothing in the note except the archive field", async () => {
+      const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude");
+      const before = app.files.get(saved!.path)!.contents!;
+
+      await manager.setArchivedAt(saved!.path, 1_760_000_000_000);
+      await manager.setArchivedAt(saved!.path, null);
+
+      expect(app.files.get(saved!.path)!.contents).toBe(before);
+    });
+
+    it("unarchives a chat by removing the archivedAt key from its note's frontmatter", async () => {
+      const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude");
+      await manager.setArchivedAt(saved!.path, 1_760_000_000_000);
+
+      await manager.setArchivedAt(saved!.path, null);
+
+      expect(app.files.get(saved!.path)!.contents).not.toContain("archivedAt");
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 rejects archiving a note that was moved or deleted so the row is not shown archived", async () => {
+      await expect(
+        manager.setArchivedAt("test-folder/agent__gone.md", 1_760_000_000_000)
+      ).rejects.toThrow("test-folder/agent__gone.md");
+      expect(app.files.has("test-folder/agent__gone.md")).toBe(false);
+    });
+
+    it("keeps a chat archived through later autosaves", async () => {
+      const saved = await manager.saveSession([makeMessage(USER_SENDER, "hi")], "claude");
+      await manager.setArchivedAt(saved!.path, 1_760_000_000_000);
+
+      await manager.saveSession(
+        [makeMessage(USER_SENDER, "hi"), makeMessage(AI_SENDER, "hi again")],
+        "claude",
+        { existingPath: saved!.path }
+      );
+
+      expect(app.files.get(saved!.path)!.contents).toContain("archivedAt: 1760000000000\n");
     });
   });
 
@@ -637,6 +753,45 @@ describe("AgentChatPersistenceManager", () => {
         expect(app.files.get(saved!.path)!.contents).toContain(`epoch: ${visibleEpoch}\n`);
       }
     );
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/815 keeps the title of a note saved with only agentLabel", async () => {
+      const path = "test-folder/agent__old-title.md";
+      await app.vault.adapter.write(
+        path,
+        [
+          "---",
+          "epoch: 1735732800000",
+          "mode: agent",
+          "backendId: claude",
+          'agentLabel: "Agent title"',
+          "---",
+          "",
+          "**user**: hi",
+        ].join("\n")
+      );
+      const loaded = await manager.loadFile(app.files.get(path) as unknown as TFile);
+      expect(loaded.label).toBe("Agent title");
+    });
+
+    it("takes the title from topic when the note also has an older agentLabel", async () => {
+      const path = "test-folder/agent__renamed.md";
+      await app.vault.adapter.write(
+        path,
+        [
+          "---",
+          "epoch: 1735732800000",
+          "mode: agent",
+          "backendId: claude",
+          'topic: "Renamed"',
+          'agentLabel: "Agent title"',
+          "---",
+          "",
+          "**user**: hi",
+        ].join("\n")
+      );
+      const loaded = await manager.loadFile(app.files.get(path) as unknown as TFile);
+      expect(loaded.label).toBe("Renamed");
+    });
 
     it("ignores malformed usage JSON instead of failing the load", async () => {
       const path = "test-folder/agent__badusage.md";

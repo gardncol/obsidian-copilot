@@ -12,10 +12,14 @@ import {
   type AgentSessionStartOptions,
   type AgentSessionStateOptions,
 } from "./AgentSession";
-import { ensureMultiAgentEntitlement, showMultiAgentUpgradePrompt } from "@/plusUtils";
+import {
+  ensureMultiAgentEntitlement,
+  showMultiAgentUpgradePrompt,
+} from "@/agentMode/session/fanout/multiAgentEntitlement";
 import { getSettings } from "@/settings/model";
 import { ContextProcessor } from "@/contextProcessor";
 import { GLOBAL_SCOPE } from "./scope";
+import { defineChatExtension, type ChatStateKey } from "./chatExtension";
 import { writePermissionRequest } from "./testing/permissionPrompts";
 import { OUTPUT_LIMIT_CONTINUATION_PROMPT } from "./promptEnvelope";
 import { __resetVaultBaseCache } from "@/utils/vaultPath";
@@ -45,7 +49,7 @@ jest.mock("@/logger", () => ({
 jest.mock("@/settings/model", () => ({
   getSettings: jest.fn().mockReturnValue({ agentMode: {} }),
 }));
-jest.mock("@/plusUtils", () => ({
+jest.mock("@/agentMode/session/fanout/multiAgentEntitlement", () => ({
   ensureMultiAgentEntitlement: jest.fn(async () => true),
   showMultiAgentUpgradePrompt: jest.fn(),
 }));
@@ -235,6 +239,21 @@ function makeDescriptorWireWithoutEffort(): BackendDescriptor {
   } as unknown as BackendDescriptor;
 }
 
+const COUNTER: ChatStateKey<number> = Object.freeze({ id: "counter", initial: 0 });
+
+const NEWS: ChatStateKey<readonly string[]> = Object.freeze({ id: "news", initial: [] });
+
+const NEWS_EXTENSION = defineChatExtension({
+  key: NEWS,
+  beforePrompt: (news) =>
+    news.length > 0
+      ? {
+          note: `<news>${news.join(", ")}</news>`,
+          delivered: (latest) => latest.filter((item) => !news.includes(item)),
+        }
+      : null,
+});
+
 function makeSession(
   mock: MockBackend,
   { initialState = null, ...overrides }: ResumedSessionOverrides = {}
@@ -298,6 +317,7 @@ function withdrawingDescriptor(): BackendDescriptor {
 
 const ISSUE_747 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/747";
 const ISSUE_749 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/749";
+const ISSUE_757 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/757";
 
 function recordPrompts(mock: MockBackend): PromptInput[] {
   const sent: PromptInput[] = [];
@@ -882,7 +902,12 @@ describe("AgentSession", () => {
       it("passes the plugin's MCP servers into the newSession payload", async () => {
         const mock = makeMockBackend();
         const mcpServers = [
-          { name: "obsidian-copilot", url: "http://127.0.0.1:1/mcp", headers: { A: "b" } },
+          {
+            name: "obsidian-copilot",
+            url: "http://127.0.0.1:1/mcp",
+            headers: { A: "b" },
+            readOnlyToolNames: [],
+          },
         ];
         const session = startSession(mock, { mcpServers });
         await session.ready;
@@ -1413,6 +1438,68 @@ describe("AgentSession", () => {
     });
 
     describe("sendPrompt()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/860 adds each chat extension's note in front of the next message, once", async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock, { chatExtensions: [NEWS_EXTENSION] });
+        session.updateChatState(NEWS, () => ["notion connected"]);
+
+        await session.sendPrompt("go on").turn;
+        await session.sendPrompt("and then?").turn;
+
+        const sent = mock.prompt.mock.calls.map(([input]) => input as PromptInput);
+        expect(promptText(sent[0])).toBe(
+          "<news>notion connected</news>\n\n<user-message>\ngo on\n</user-message>"
+        );
+        expect(promptText(sent[1])).toBe("and then?");
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/860 sends a chat extension's note again after the prompt that carried it failed", async () => {
+        const mock = makeMockBackend();
+        mock.prompt.mockRejectedValueOnce(new Error("transport down"));
+        const session = makeSession(mock, { chatExtensions: [NEWS_EXTENSION] });
+        session.updateChatState(NEWS, () => ["notion connected"]);
+
+        await expect(session.sendPrompt("go on").turn).rejects.toThrow("transport down");
+        await session.sendPrompt("retry").turn;
+
+        const sent = mock.prompt.mock.calls.map(([input]) => input as PromptInput);
+        expect(promptText(sent[1])).toContain("<news>notion connected</news>");
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/860 hands a delivered note the feature's latest state, so news added during the reply waits for the next message", async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock, { chatExtensions: [NEWS_EXTENSION] });
+        session.updateChatState(NEWS, () => ["notion connected"]);
+        mock.prompt.mockImplementationOnce(async () => {
+          session.updateChatState(NEWS, (news) => [...news, "linear ignored"]);
+          return { stopReason: "end_turn" };
+        });
+
+        await session.sendPrompt("go on").turn;
+        await session.sendPrompt("and then?").turn;
+
+        const sent = mock.prompt.mock.calls.map(([input]) => input as PromptInput);
+        expect(promptText(sent[1])).toContain("<news>linear ignored</news>");
+        expect(promptText(sent[1])).not.toContain("notion");
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/762 hands a failed reply's error to each chat extension with the chat, and keeps the state it returns", async () => {
+        const mock = makeMockBackend();
+        mock.prompt.mockRejectedValue(new Error("model not supported: gemini-4"));
+        const onTurnFailed = jest.fn((count: number) => count + 1);
+        const session = makeSession(mock, {
+          chatExtensions: [defineChatExtension({ key: COUNTER, onTurnFailed })],
+        });
+
+        await expect(session.sendPrompt("hi").turn).rejects.toThrow("model not supported");
+
+        expect(onTurnFailed).toHaveBeenCalledWith(0, session, {
+          errorText: "model not supported: gemini-4",
+          error: expect.any(Error),
+        });
+        expect(session.readChatState(COUNTER)).toBe(1);
+      });
+
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/625 refuses to run a turn, and says why, while the agent is on a model the user has not enabled", async () => {
         const mock = makeMockBackend();
         const agent = fakeCatalogAgent(mock, catalogState([PLUS_FLASH, PARETO], PLUS_FLASH));
@@ -2220,9 +2307,7 @@ describe("AgentSession", () => {
         emit({ sessionUpdate: "message_delivered", promptId: sent[0].promptId });
         emit({ sessionUpdate: "turn_started", turnId: "t1" });
         emit(replayText("agent_message_chunk", "First answer."));
-        const steer = session.sendPrompt("now this", undefined, undefined, undefined, {
-          interrupt: true,
-        });
+        const steer = session.sendPrompt("now this");
         await waitFor(() => expect(sent).toHaveLength(2));
         emit({ sessionUpdate: "turn_ended", turnId: "t1", stopReason: "end_turn" });
         await waitFor(() => expect(session.getStatus()).toBe("idle"));
@@ -2240,18 +2325,6 @@ describe("AgentSession", () => {
           { sender: USER_SENDER, message: "now this" },
           { sender: AI_SENDER, message: "Second answer." },
         ]);
-      });
-
-      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/509 asks the backend to interrupt the running turn for an interrupt-and-send message", async () => {
-        const mock = makeMockBackend();
-        const sent = recordPrompts(mock);
-        const session = makeSession(mock, { getDescriptor: midTurnDescriptor });
-        session.sendPrompt("first");
-        session.sendPrompt("plain steer");
-        session.sendPrompt("urgent", undefined, undefined, undefined, { interrupt: true });
-
-        await waitFor(() => expect(sent).toHaveLength(3));
-        expect(sent.map((input) => input.interrupt)).toEqual([undefined, undefined, true]);
       });
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/509 hands messages to the backend in the order they were sent, even while an earlier one is still being handed over", async () => {
@@ -3271,11 +3344,19 @@ describe("AgentSession", () => {
             return new Promise<never>(() => {});
           });
           const session = makeSession(mock, vault.app);
+          const changesShown = new Promise<void>((resolve) => {
+            subscribeTo(session, {
+              onMessagesChanged: () => {
+                if (fileChangesOf(session)) resolve();
+              },
+            });
+          });
 
           const { turn } = session.sendPrompt("edit it");
           await promptEntered;
           await session.cancel();
           await turn;
+          await changesShown;
 
           expect(fileChangesOf(session)).toMatchObject([
             { path: "notes/a.md", status: "modified", additions: 1, deletions: 0 },
@@ -3817,6 +3898,57 @@ describe("AgentSession", () => {
     });
 
     describe("cancel()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/788 stops only the agent's reply, leaving running subagents and background commands to the running-tasks list", async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock, { getDescriptor: () => ClaudeBackendDescriptor });
+        const stopTask = jest.fn(async ({ taskId }: { taskId: string }) => {
+          mock.emitUpdate({ sessionUpdate: "task_ended", taskId, status: "stopped" });
+        });
+        mock.asBackend.stopTask = stopTask;
+        for (const [taskId, kind] of [
+          ["agent-1", "subagent"],
+          ["agent-2", "subagent"],
+          ["server", "command"],
+          ["agent-done", "subagent"],
+        ] as const) {
+          mock.emitUpdate({
+            sessionUpdate: "task_started",
+            taskId,
+            toolCallId: `tool-${taskId}`,
+            kind,
+            description: taskId,
+          });
+        }
+        mock.emitUpdate({ sessionUpdate: "task_ended", taskId: "agent-done", status: "completed" });
+        mock.emitUpdate({ sessionUpdate: "busy_changed", busy: true });
+
+        await session.cancel();
+
+        expect(mock.cancel).toHaveBeenCalledWith({ sessionId: "acp-1" });
+        expect(stopTask).not.toHaveBeenCalled();
+        expect(session.getTasks().map((t) => [t.taskId, t.status])).toEqual([
+          ["agent-1", "running"],
+          ["agent-2", "running"],
+          ["server", "running"],
+          ["agent-done", "completed"],
+        ]);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/789 interrupts the reply but keeps waiting messages with the agent when asked to keep them, so it reads them next", async () => {
+        const mock = makeMockBackend();
+        const sent = recordPrompts(mock);
+        const session = makeSession(mock, { getDescriptor: withdrawingDescriptor });
+        session.sendPrompt("first");
+        session.sendPrompt("read this now");
+        await waitFor(() => expect(sent).toHaveLength(2));
+
+        await session.cancel({ keepUnread: true });
+
+        expect(mock.cancel).toHaveBeenCalledWith({ sessionId: "acp-1", keepUnread: true });
+        expect(session.getQueuedPrompts().map((p) => p.text)).toEqual(["read this now"]);
+        expect(session.takeWithdrawnPrompts()).toEqual([]);
+      });
+
       it(`shows the tool calls Stop cut off as stopped, while the card of a background task launched in that turn keeps running (${ISSUE_747})`, async () => {
         const mock = makeMockBackend();
         const finishPrompt = holdPrompt(mock);
@@ -4755,7 +4887,7 @@ describe("AgentSession", () => {
           else mock.closeSession.mockRejectedValueOnce(new MethodUnsupportedError("session/close"));
 
           await expect(session.releaseBackendSession()).rejects.toThrow(
-            "This agent does not support closing individual sessions."
+            "This agent can't shut down a single chat."
           );
         }
       );
@@ -5654,6 +5786,37 @@ describe("AgentSession", () => {
       });
     });
 
+    describe("isReplyRunning()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/788 is true while the agent's reply runs and false once it ends, even while the chat still runs for its subagents", async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock, { backendId: "claude" });
+
+        const { turn } = session.sendPrompt("launch a subagent");
+        expect(session.isReplyRunning()).toBe(true);
+        mock.emitUpdate({ sessionUpdate: "busy_changed", busy: true });
+        await turn;
+
+        expect(session.isReplyRunning()).toBe(false);
+        expect(session.getStatus()).toBe("running");
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/788 notifies status listeners when the reply ends while subagents keep the chat running, so the composer stops showing Stop", async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock, { backendId: "claude" });
+        const replyRunningSeen: boolean[] = [];
+        subscribeTo(session, {
+          onStatusChanged: () => replyRunningSeen.push(session.isReplyRunning()),
+        });
+
+        const { turn } = session.sendPrompt("launch a subagent");
+        mock.emitUpdate({ sessionUpdate: "busy_changed", busy: true });
+        await turn;
+
+        expect(session.getStatus()).toBe("running");
+        expect(replyRunningSeen.at(-1)).toBe(false);
+      });
+    });
+
     describe("getStatus()", () => {
       it("reports 'error' after a failed turn and resets to 'running' on the next sendPrompt", async () => {
         const mock = makeMockBackend();
@@ -5682,6 +5845,57 @@ describe("AgentSession", () => {
         expect(session.getPendingToolPermissions()).toHaveLength(1);
         expect(await session.sendPrompt("meanwhile").turn).toBe("end_turn");
       });
+
+      it(`${ISSUE_757} stays running after a reply ends while the agent reports itself busy with its subagents, and goes idle only when the agent reports idle`, async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock, { backendId: "claude" });
+        const statusChanges: string[] = [];
+        subscribeTo(session, {
+          onStatusChanged: (status) => {
+            if (statusChanges.at(-1) !== status) statusChanges.push(status);
+          },
+        });
+
+        const { turn } = session.sendPrompt("launch two subagents");
+        mock.emitUpdate({ sessionUpdate: "busy_changed", busy: true });
+        await turn;
+        expect(session.getStatus()).toBe("running");
+
+        mock.emitUpdate({ sessionUpdate: "turn_started", turnId: "report-a" });
+        mock.emitUpdate({
+          sessionUpdate: "turn_ended",
+          turnId: "report-a",
+          stopReason: "end_turn",
+        });
+        expect(session.getStatus()).toBe("running");
+
+        mock.emitUpdate({ sessionUpdate: "busy_changed", busy: false });
+        expect(session.getStatus()).toBe("idle");
+        expect(statusChanges).toEqual(["running", "idle"]);
+      });
+
+      it(`${ISSUE_757} awaits permission when a subagent asks while the agent is busy only with its subagents`, () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock, { backendId: "claude" });
+        mock.emitUpdate({ sessionUpdate: "busy_changed", busy: true });
+
+        void session.handleToolPermission({
+          ...writePermissionRequest(),
+          requester: { taskId: "task-1" },
+        });
+
+        expect(session.getStatus()).toBe("awaiting_permission");
+      });
+
+      it(`${ISSUE_757} goes idle when the agent disconnects while it reported itself busy`, () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock, { backendId: "claude" });
+        mock.emitUpdate({ sessionUpdate: "busy_changed", busy: true });
+
+        mock.emitUpdate({ sessionUpdate: "session_disconnected", error: new Error("exited") });
+
+        expect(session.getStatus()).toBe("idle");
+      });
     });
 
     describe("subscribe()", () => {
@@ -5700,6 +5914,32 @@ describe("AgentSession", () => {
         await turn;
 
         expect(statusChanges).toEqual(["running", "awaiting_permission", "running", "idle"]);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 fires onPromptSent once for a message sent and once for a message queued while the agent works", () => {
+        const mock = makeMockBackend();
+        recordPrompts(mock);
+        const session = makeSession(mock, { getDescriptor: midTurnDescriptor });
+        const onPromptSent = jest.fn();
+        subscribeTo(session, { onPromptSent });
+
+        session.sendPrompt("list the notes");
+        session.sendPrompt("only do the first two");
+
+        expect(onPromptSent).toHaveBeenCalledTimes(2);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 does not fire onPromptSent for a message refused because a turn is in flight", () => {
+        const mock = makeMockBackend();
+        recordPrompts(mock);
+        const session = makeSession(mock);
+        session.sendPrompt("list the notes");
+        const onPromptSent = jest.fn();
+        subscribeTo(session, { onPromptSent });
+
+        expect(() => session.sendPrompt("only do the first two")).toThrow();
+
+        expect(onPromptSent).not.toHaveBeenCalled();
       });
 
       it("fires onDisconnected when the agent's connection drops, after the session ends its running tasks (https://github.com/Brevilabs/obsidian-copilot-private/issues/175)", () => {
@@ -6005,131 +6245,91 @@ describe("AgentSession", () => {
       });
     });
 
-    describe("getFeedbackOffer()", () => {
-      it("starts with no feedback card", () => {
-        expect(makeSession(makeMockBackend()).getFeedbackOffer()).toBeNull();
-      });
-    });
-
-    describe("offerFeedback()", () => {
-      const DRAFT = {
-        title: "Replied in Swedish to an English request",
-        whatHappened: "The agent answered 'hej'.",
-        userSaid: "Why do you switch to a different language?",
-        repro: "1. Ask in English.",
-      };
-
-      const sessionWithTranscript = () => {
-        const session = makeSession(makeMockBackend(), {
-          backendId: "codex",
-          initialState: sonnetAndGpt5State(),
-        });
+    describe("getDisplayMessages()", () => {
+      it("returns the transcript the chat shows", () => {
+        const session = makeSession(makeMockBackend());
         session.loadDisplayMessages([
           { id: "u1", sender: USER_SENDER, message: "hej", isVisible: true, timestamp: null },
-          { id: "a1", sender: AI_SENDER, message: "hej", isVisible: true, timestamp: null },
-          { id: "u2", sender: USER_SENDER, message: "why?", isVisible: true, timestamp: null },
         ]);
-        return session;
-      };
 
-      it("opens a card with the draft, session evidence and the latest user message as its anchor", () => {
-        const session = sessionWithTranscript();
-        const onMessagesChanged = jest.fn();
-        subscribeTo(session, { onMessagesChanged });
-
-        expect(session.offerFeedback(DRAFT)).toBe("shown");
-
-        expect(onMessagesChanged).toHaveBeenCalled();
-        expect(session.getFeedbackOffer()).toEqual({
-          draft: DRAFT,
-          evidence: {
-            backendId: "codex",
-            model: "anthropic/sonnet",
-            sessionId: "acp-1",
-            raisedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
-          },
-          afterUserMessageId: "u2",
-          status: "open",
-        });
-      });
-
-      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/672 refuses a second card in the same session whether the first is open, dismissed or sent", () => {
-        const session = sessionWithTranscript();
-        session.offerFeedback(DRAFT);
-        const first = session.getFeedbackOffer();
-
-        expect(session.offerFeedback({ ...DRAFT, title: "Another problem" })).toBe(
-          "already_offered"
-        );
-        session.dismissFeedbackOffer();
-        expect(session.offerFeedback(DRAFT)).toBe("already_offered");
-        expect(session.getFeedbackOffer()?.draft).toBe(first?.draft);
-      });
-
-      it("anchors to nothing when the session has no user message yet", () => {
-        const session = makeSession(makeMockBackend());
-        session.offerFeedback(DRAFT);
-        expect(session.getFeedbackOffer()?.afterUserMessageId).toBeNull();
+        expect(session.getDisplayMessages().map(({ id }) => id)).toEqual(["u1"]);
       });
     });
 
-    describe("dismissFeedbackOffer()", () => {
-      const DRAFT = { title: "t", whatHappened: "w", userSaid: "", repro: "r" };
+    describe("readChatState()", () => {
+      it("returns a feature's initial state until the feature stores one", () => {
+        expect(makeSession(makeMockBackend()).readChatState(COUNTER)).toBe(0);
+      });
+    });
 
-      it("marks an open card dismissed and notifies, without any other effect", () => {
-        const mock = makeMockBackend();
-        const session = makeSession(mock);
-        session.offerFeedback(DRAFT);
+    describe("updateChatState()", () => {
+      it("stores the new state, hands the change the session as its chat, and notifies", () => {
+        const session = makeSession(makeMockBackend());
         const onMessagesChanged = jest.fn();
         subscribeTo(session, { onMessagesChanged });
+        const change = jest.fn((count: number) => count + 1);
 
-        session.dismissFeedbackOffer();
+        session.updateChatState(COUNTER, change);
 
-        expect(session.getFeedbackOffer()?.status).toBe("dismissed");
+        expect(session.readChatState(COUNTER)).toBe(1);
+        expect(change).toHaveBeenCalledWith(0, session);
         expect(onMessagesChanged).toHaveBeenCalledTimes(1);
-        expect(mock.prompt).not.toHaveBeenCalled();
       });
 
-      it("leaves a sent card and a missing card unchanged", () => {
+      it("neither stores nor notifies when the change returns the same state", () => {
         const session = makeSession(makeMockBackend());
-        session.dismissFeedbackOffer();
-        expect(session.getFeedbackOffer()).toBeNull();
+        const before = session.getChatStates();
+        const onMessagesChanged = jest.fn();
+        subscribeTo(session, { onMessagesChanged });
 
-        session.offerFeedback(DRAFT);
-        session.markFeedbackReported({ reportId: "r1", issueUrl: "https://example.com" });
-        session.dismissFeedbackOffer();
-        expect(session.getFeedbackOffer()?.status).toBe("reported");
+        session.updateChatState(COUNTER, (count) => count);
+
+        expect(session.getChatStates()).toBe(before);
+        expect(onMessagesChanged).not.toHaveBeenCalled();
       });
     });
 
-    describe("markFeedbackReported()", () => {
-      it("records the report ID and issue link on the card", () => {
+    describe("getChatStates()", () => {
+      it("returns a new snapshot after each change, so the chat view re-renders, and the same one otherwise", () => {
         const session = makeSession(makeMockBackend());
-        session.offerFeedback({ title: "t", whatHappened: "w", userSaid: "", repro: "r" });
+        const empty = session.getChatStates();
 
-        session.markFeedbackReported({ reportId: "r1", issueUrl: "https://example.com" });
+        session.updateChatState(COUNTER, (count) => count + 1);
 
-        expect(session.getFeedbackOffer()).toMatchObject({
-          status: "reported",
-          report: { reportId: "r1", issueUrl: "https://example.com" },
+        expect(session.getChatStates()).not.toBe(empty);
+        expect(session.getChatStates()).toBe(session.getChatStates());
+      });
+    });
+
+    describe("getReloadableChatStates()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/860 returns only the state of features kept across Reload", () => {
+        const session = makeSession(makeMockBackend(), {
+          chatExtensions: [defineChatExtension({ key: NEWS, keepOnReload: true })],
         });
+        session.updateChatState(NEWS, () => ["notion connected"]);
+        session.updateChatState(COUNTER, (count) => count + 1);
+
+        const states = session.getReloadableChatStates();
+
+        expect([...states.keys()]).toEqual(["news"]);
+        expect(states.get("news")).toEqual(["notion connected"]);
       });
+    });
 
-      it("ignores a report when no card was offered", () => {
-        const session = makeSession(makeMockBackend());
-        session.markFeedbackReported({ reportId: "r1", issueUrl: "https://example.com" });
-        expect(session.getFeedbackOffer()).toBeNull();
-      });
+    describe("restoreChatStates()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/860 carries a chat's kept state into the session that replaces it on Reload, and redraws", () => {
+        const before = makeSession(makeMockBackend(), {
+          chatExtensions: [defineChatExtension({ key: NEWS, keepOnReload: true })],
+        });
+        before.updateChatState(NEWS, () => ["notion connected"]);
+        const after = makeSession(makeMockBackend());
+        const onMessagesChanged = jest.fn();
+        subscribeTo(after, { onMessagesChanged });
 
-      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/672 keeps a dismissed card dismissed when its upload lands afterwards", () => {
-        const session = makeSession(makeMockBackend());
-        session.offerFeedback({ title: "t", whatHappened: "w", userSaid: "", repro: "r" });
-        session.dismissFeedbackOffer();
+        after.restoreChatStates(before.getReloadableChatStates());
 
-        session.markFeedbackReported({ reportId: "r1", issueUrl: "https://example.com" });
-
-        expect(session.getFeedbackOffer()).toMatchObject({ status: "dismissed" });
-        expect(session.getFeedbackOffer()?.report).toBeUndefined();
+        expect(after.readChatState(NEWS)).toEqual(["notion connected"]);
+        expect(onMessagesChanged).toHaveBeenCalled();
       });
     });
 
@@ -6350,6 +6550,36 @@ describe("AgentSession", () => {
 
         expect(session.getTasks()).toBe(ended);
         expect(ended).toEqual([expect.objectContaining({ status: "completed" })]);
+      });
+
+      it("https://github.com/logancyang/obsidian-copilot/issues/3842 lists each resumed run of a task under its resuming call and ends that run when the task ends again, so no run stays running", async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock, { backendId: "claude" });
+        const { run } = launchTurn(mock, session);
+        run(AGENT_CARD, AGENT_LAUNCH, TASK_STARTED);
+        mock.emitUpdate({ sessionUpdate: "task_ended", taskId: "task-1", status: "completed" });
+
+        for (const toolCallId of ["tool-resume-1", "tool-resume-2"]) {
+          mock.emitUpdate({
+            sessionUpdate: "tool_call",
+            toolCallId,
+            title: "SendMessage",
+            kind: "other",
+            status: "in_progress",
+            vendorToolName: "SendMessage",
+          });
+          mock.emitUpdate({ ...TASK_STARTED, toolCallId });
+          mock.emitUpdate({ sessionUpdate: "task_ended", taskId: "task-1", status: "completed" });
+        }
+
+        expect(session.getTasks()).toEqual([
+          expect.objectContaining({ toolCallId: "tool-agent", status: "completed" }),
+          expect.objectContaining({ toolCallId: "tool-resume-1", status: "completed" }),
+          expect.objectContaining({ toolCallId: "tool-resume-2", status: "completed" }),
+        ]);
+        expect(
+          aiMessage(session)?.parts?.find((p) => p.kind === "tool_call" && p.id === "tool-resume-2")
+        ).toMatchObject({ status: "completed" });
       });
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/749 ends a command a subagent was launching as stopped when that subagent ends first", async () => {

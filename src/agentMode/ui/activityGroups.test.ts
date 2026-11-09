@@ -3,10 +3,13 @@ import {
   summarizeActivity,
   type ActivityMember,
   type GroupedTrailNode,
+  type ToolCardKind,
 } from "@/agentMode/ui/activityGroups";
 import { buildAgentTrail, type RenderNode, type ToolCallPart } from "@/agentMode/ui/agentTrail";
 import type { AgentMessagePart } from "@/agentMode/session/types";
 import { miyoSearchCall } from "@/miyo/agentMode/testing/miyoSearchCall";
+import { excalidrawToolCall } from "@/excalidraw/agentMode/testing/excalidrawToolCall";
+import { makeCommandTask } from "@/agentMode/ui/testing/taskFixtures";
 
 function tool(id: string, overrides: Partial<ToolCallPart> = {}): ToolCallPart {
   return { kind: "tool_call", id, title: id, status: "completed", ...overrides };
@@ -63,10 +66,195 @@ describe("activityGroups", () => {
         action("c", { vendorToolName: "Read" }),
         action("d", { vendorToolName: "Read" }),
       ]);
-      expect(types(grouped)).toEqual(["activityGroup", "action", "activityGroup"]);
+      expect(types(grouped)).toEqual(["activityGroup", "toolCard", "activityGroup"]);
     });
 
-    it("keeps a call the caller marks standalone out of the group, such as a task's launching call (https://github.com/Brevilabs/obsidian-copilot-private/issues/749)", () => {
+    describe("with tool card kinds (https://github.com/Brevilabs/obsidian-copilot-private/issues/793)", () => {
+      const NOTE_CARD: ToolCardKind = {
+        place: (part) =>
+          part.vendorToolName === "note_tool"
+            ? { joinKey: (part.input as { note?: string }).note ?? null }
+            : null,
+        render: () => null,
+      };
+      const SEARCH_CARD: ToolCardKind = {
+        place: (part) => (part.vendorToolName === "search_tool" ? { joinKey: null } : null),
+        render: () => null,
+      };
+      const fold = (nodes: RenderNode[]) =>
+        foldActivityGroups(nodes, { tasks: null }, [NOTE_CARD, SEARCH_CARD]);
+      const onNote = (id: string, note?: string) =>
+        action(id, { vendorToolName: "note_tool", input: { note } });
+      const cardAt = (nodes: GroupedTrailNode[], index: number) => {
+        const node = nodes[index];
+        if (node.type !== "toolCard") throw new Error(`node ${index} is ${node.type}`);
+        return { kind: node.kind, ids: node.members.map((part) => part.id) };
+      };
+
+      it("joins a call to the open card when its kind gives the same key, folding plain calls and thoughts between them into a group after the card", () => {
+        const grouped = fold([
+          onNote("n1", "Plan"),
+          action("read", { vendorToolName: "Read" }),
+          reasoning(),
+          onNote("n2", "Plan"),
+        ]);
+
+        expect(types(grouped)).toEqual(["toolCard", "activityGroup"]);
+        expect(cardAt(grouped, 0)).toEqual({ kind: NOTE_CARD, ids: ["n1", "n2"] });
+      });
+
+      it("opens a new card for a call whose key differs from the open card's", () => {
+        const grouped = fold([onNote("n1", "Plan"), onNote("n2", "Notes"), onNote("n3", "Plan")]);
+
+        expect(types(grouped)).toEqual(["toolCard", "toolCard", "toolCard"]);
+      });
+
+      it("gives a call with no key its own card that no later call joins", () => {
+        const grouped = fold([onNote("n1"), onNote("n2")]);
+
+        expect(types(grouped)).toEqual(["toolCard", "toolCard"]);
+      });
+
+      it.each<[string, RenderNode]>([
+        ["message", prose()],
+        ["plan", { type: "plan", part: { kind: "plan", entries: [] } }],
+        [
+          "compaction",
+          {
+            type: "compaction",
+            part: {
+              kind: "compaction",
+              id: "c1",
+              status: "completed",
+              trigger: "auto",
+              startedAtMs: 0,
+            },
+          },
+        ],
+        [
+          "sub-agent",
+          { type: "subagent", parent: tool("t", { vendorToolName: "Task" }), children: [] },
+        ],
+        ["card of another kind", action("s1", { vendorToolName: "search_tool" })],
+      ])(
+        "ends the open card at a %s, so a later call with the same key opens a new card",
+        (_, boundary) => {
+          const grouped = fold([onNote("n1", "Plan"), boundary, onNote("n2", "Plan")]);
+
+          expect(grouped).toHaveLength(3);
+          expect(cardAt(grouped, 0).ids).toEqual(["n1"]);
+          expect(cardAt(grouped, 2).ids).toEqual(["n2"]);
+        }
+      );
+
+      it("puts a sub-agent whose launching call a kind claims into that kind's card", () => {
+        const grouped = fold([
+          {
+            type: "subagent",
+            parent: tool("t", { vendorToolName: "search_tool" }),
+            children: [],
+          },
+        ]);
+
+        expect(cardAt(grouped, 0)).toEqual({ kind: SEARCH_CARD, ids: ["t"] });
+      });
+    });
+
+    describe("with Copilot's Excalidraw tools (https://github.com/Brevilabs/obsidian-copilot-private/issues/787)", () => {
+      const BOARD = "Boards/Launch board.excalidraw.md";
+      const draw = (
+        id: string,
+        overrides: Partial<ToolCallPart> = {},
+        path = BOARD
+      ): RenderNode => ({
+        type: "action",
+        part: excalidrawToolCall(
+          "excalidraw_write",
+          { path, operations: [] },
+          { id, ...overrides }
+        ),
+      });
+      const render = (id: string): RenderNode => ({
+        type: "action",
+        part: excalidrawToolCall("excalidraw_render", { path: BOARD }, { id }),
+      });
+      const drawingAt = (nodes: GroupedTrailNode[], index: number) => {
+        const node = nodes[index];
+        if (node.type !== "toolCard") throw new Error(`node ${index} is ${node.type}`);
+        return node.members.map((part) => part.id);
+      };
+
+      it("folds a write-render-fix loop on one drawing into one card, grouping the other tools after it", () => {
+        const grouped = foldActivityGroups([
+          action("grep", { vendorToolName: "Grep" }),
+          draw("w1"),
+          render("r1"),
+          reasoning(),
+          draw("w2", { status: "failed" }),
+          action("read", { vendorToolName: "Read" }),
+          draw("w3"),
+          action("edit", { vendorToolName: "Edit" }),
+          draw("w4"),
+        ]);
+
+        expect(types(grouped)).toEqual(["action", "toolCard", "activityGroup"]);
+        expect(drawingAt(grouped, 1)).toEqual(["w1", "r1", "w2", "w3", "w4"]);
+        expect(groupAt(grouped, 2).members.map((m) => m.type)).toEqual([
+          "reasoning",
+          "action",
+          "action",
+        ]);
+      });
+
+      it("opens the card with a failed first attempt so its retry joins it", () => {
+        const grouped = foldActivityGroups([
+          action("bash", { vendorToolName: "Bash" }),
+          draw("w1", { status: "failed" }),
+          draw("w2"),
+        ]);
+
+        expect(types(grouped)).toEqual(["action", "toolCard"]);
+        expect(drawingAt(grouped, 1)).toEqual(["w1", "w2"]);
+      });
+
+      it("starts a new card after a message, so a later change never joins an earlier card", () => {
+        const grouped = foldActivityGroups([draw("w1"), prose("Sheet 1 is in."), draw("w2")]);
+
+        expect(types(grouped)).toEqual(["toolCard", "text", "toolCard"]);
+      });
+
+      it("gives each drawing its own card", () => {
+        const grouped = foldActivityGroups([
+          draw("w1"),
+          draw("w2", {}, "Boards/Other.excalidraw.md"),
+          draw("w3"),
+        ]);
+
+        expect(types(grouped)).toEqual(["toolCard", "toolCard", "toolCard"]);
+      });
+
+      it("gives each call whose drawing path is unknown its own card, since it may target a different drawing (https://github.com/Brevilabs/obsidian-copilot-private/issues/787)", () => {
+        const unknown = (id: string): RenderNode => ({
+          type: "action",
+          part: excalidrawToolCall("excalidraw_write", { operations: [] }, { id }),
+        });
+        const grouped = foldActivityGroups([unknown("w1"), unknown("w2")]);
+
+        expect(types(grouped)).toEqual(["toolCard", "toolCard"]);
+      });
+
+      it("opens a card for a render with no card to join, like any other Excalidraw call", () => {
+        const grouped = foldActivityGroups([
+          action("read", { vendorToolName: "Read" }),
+          render("r1"),
+          prose("The board looks right."),
+        ]);
+
+        expect(types(grouped)).toEqual(["action", "toolCard", "text"]);
+      });
+    });
+
+    it("keeps a call that launched a session task out of the group, such as a background command (https://github.com/Brevilabs/obsidian-copilot-private/issues/749)", () => {
       const grouped = foldActivityGroups(
         [
           action("a", { vendorToolName: "Read" }),
@@ -74,9 +262,9 @@ describe("activityGroups", () => {
           action("launch", { vendorToolName: "Bash" }),
           action("c", { vendorToolName: "Bash" }),
         ],
-        (part) => part.id === "launch"
+        { tasks: { tasks: [makeCommandTask({ toolCallId: "launch" })], openTask: jest.fn() } }
       );
-      expect(types(grouped)).toEqual(["activityGroup", "action", "action"]);
+      expect(types(grouped)).toEqual(["activityGroup", "toolCard", "action"]);
     });
 
     it("never folds a compaction row into a group and splits the groups around it", () => {
@@ -136,7 +324,7 @@ describe("activityGroups", () => {
         action("answer", { userResponse: "Answered: Checklist" }),
         action("read", { vendorToolName: "Read" }),
       ]);
-      expect(types(grouped)).toEqual(["action", "action", "action"]);
+      expect(types(grouped)).toEqual(["action", "toolCard", "action"]);
     });
 
     it("splits a run in two when prose interrupts it", () => {
@@ -171,7 +359,7 @@ describe("activityGroups", () => {
           action("c", { vendorToolName: "Read" }),
           action("d", { vendorToolName: "Bash" }),
         ]);
-        expect(types(grouped)).toEqual(["activityGroup", "action", "activityGroup"]);
+        expect(types(grouped)).toEqual(["activityGroup", "toolCard", "activityGroup"]);
       }
     );
 
@@ -183,7 +371,7 @@ describe("activityGroups", () => {
         action("c", { toolKind: "read" }),
         action("d", { toolKind: "execute" }),
       ]);
-      expect(types(grouped)).toEqual(["activityGroup", "action", "activityGroup"]);
+      expect(types(grouped)).toEqual(["activityGroup", "toolCard", "activityGroup"]);
     });
 
     it("groups an MCP tool that shares a bare name with an interactive native tool", () => {

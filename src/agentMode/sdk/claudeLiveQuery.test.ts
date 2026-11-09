@@ -42,6 +42,8 @@ function readSdkFixture(name: string): FixtureFrame[] {
 const ISSUE_175 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/175";
 const ISSUE_195 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/195";
 const ISSUE_747 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/747";
+const ISSUE_757 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/757";
+const ISSUE_870 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/870";
 
 interface Harness {
   live: ClaudeLiveQuery;
@@ -49,11 +51,13 @@ interface Harness {
   recorder: SessionEventRecorder;
   ended: Promise<void>;
   onSignedOut: jest.Mock;
+  onPermissionModeChanged: jest.Mock;
 }
 
 function startLive(stallTimeoutMs?: number): Harness {
   const recorder = new SessionEventRecorder();
   const onSignedOut = jest.fn();
+  const onPermissionModeChanged = jest.fn();
   let fake!: FakeClaudeQuery;
   let markEnded!: () => void;
   const ended = new Promise<void>((resolve) => (markEnded = resolve));
@@ -67,10 +71,11 @@ function startLive(stallTimeoutMs?: number): Harness {
     emit: recorder.handler,
     onTurnStarted: jest.fn(),
     onSignedOut,
+    onPermissionModeChanged,
     onEnded: markEnded,
     stallTimeoutMs,
   });
-  return { live, fake, recorder, ended, onSignedOut };
+  return { live, fake, recorder, ended, onSignedOut, onPermissionModeChanged };
 }
 
 function lifecycle(updates: SessionUpdate[]): string[] {
@@ -90,6 +95,8 @@ function lifecycle(updates: SessionUpdate[]): string[] {
         return [`task_started ${update.taskId ?? `launch ${update.toolCallId}`}`];
       case "task_ended":
         return [`task_ended ${update.taskId} ${update.status}`];
+      case "busy_changed":
+        return [update.busy ? "busy" : "idle"];
       default:
         return [];
     }
@@ -104,6 +111,26 @@ function taskFrame(subtype: string, fields: Record<string, unknown>): SDKMessage
     description: "Count words",
     session_id: SESSION_ID,
     uuid: `uuid-${subtype}`,
+    ...fields,
+  } as unknown as SDKMessage;
+}
+
+function sessionState(state: "idle" | "running" | "requires_action"): SDKMessage {
+  return {
+    type: "system",
+    subtype: "session_state_changed",
+    state,
+    session_id: SESSION_ID,
+    uuid: `uuid-state-${state}`,
+  } as unknown as SDKMessage;
+}
+
+function statusFrame(fields: Record<string, unknown>): SDKMessage {
+  return {
+    type: "system",
+    subtype: "status",
+    session_id: SESSION_ID,
+    uuid: "uuid-status",
     ...fields,
   } as unknown as SDKMessage;
 }
@@ -135,16 +162,6 @@ describe("claudeLiveQuery", () => {
           message: { role: "user", content: [{ type: "text", text: "second" }] },
         });
         expect(fake.inputs.map((input) => input.uuid)).toEqual(["prompt-1", "prompt-2"]);
-      });
-
-      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/509 sends an interrupt-and-send prompt at priority now, so Claude ends the running turn at its next safe point and runs it", async () => {
-        const { live, fake } = startLive();
-
-        live.push("steer", "keep going");
-        live.push("urgent", "do this instead", true);
-
-        expect((await fake.nextInput(0)).priority).toBeUndefined();
-        expect((await fake.nextInput(1)).priority).toBe("now");
       });
 
       it(`reports a prompt delivered when Claude echoes it and starts its turn there, without rendering the echo (${ISSUE_175})`, async () => {
@@ -229,6 +246,55 @@ describe("claudeLiveQuery", () => {
           "turn_started",
           "turn_ended",
         ]);
+      });
+
+      it(`reports each permission mode Claude switches the chat to, and nothing for a status without one (${ISSUE_870})`, async () => {
+        const { live, fake, recorder, onPermissionModeChanged } = startLive();
+        live.push("prompt-1", "edit the note");
+        fake.echo(await fake.nextInput(0));
+
+        fake.emit(
+          statusFrame({ status: "compacting" }),
+          statusFrame({ status: null, permissionMode: "acceptEdits" }),
+          resultFrame()
+        );
+        await recorder.waitFor("turn_ended");
+
+        expect(onPermissionModeChanged.mock.calls).toEqual([["acceptEdits"]]);
+      });
+
+      it(`reports Claude busy from its first reply until it has reported on its last subagent, across the replies in between (${ISSUE_757})`, async () => {
+        const frames = readSdkFixture("claude-live-subagents-session-state");
+        const echo = frames.find((frame) => frame.tag === "user:echo")!;
+        const { live, fake, recorder } = startLive();
+
+        live.push(echo.payload.uuid!, "launch two subagents");
+        fake.emit(...frames.map((frame) => frame.payload));
+        await recorder.waitFor("busy_changed", (update) => !update.busy);
+
+        expect(
+          lifecycle(recorder.updates()).filter(
+            (line) => !line.startsWith("task_") && !line.startsWith("delivered")
+          )
+        ).toEqual([
+          "busy",
+          "turn_started",
+          "turn_ended",
+          "turn_started",
+          "turn_ended",
+          "turn_started",
+          "turn_ended",
+          "idle",
+        ]);
+      });
+
+      it(`reports Claude busy while it waits on the user, and idle only when its session state says so (${ISSUE_757})`, async () => {
+        const { fake, recorder } = startLive();
+
+        fake.emit(sessionState("running"), sessionState("requires_action"), sessionState("idle"));
+        await recorder.waitFor("busy_changed", (update) => !update.busy);
+
+        expect(lifecycle(recorder.updates())).toEqual(["busy", "busy", "idle"]);
       });
 
       it(`routes a subagent's content to its task by the tool call that launched it, never to a main-agent reply (${ISSUE_175})`, async () => {
@@ -507,6 +573,18 @@ describe("claudeLiveQuery", () => {
     });
 
     describe("interrupt()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/789 interrupts without taking back unread messages when asked to keep them, so Claude reads them right after", async () => {
+        const { live, fake } = startLive();
+        live.push("prompt-1", "first");
+        live.push("prompt-2", "waiting");
+        await fake.nextInput(1);
+
+        await live.interrupt(false);
+
+        expect(fake.cancelAsyncMessage).not.toHaveBeenCalled();
+        expect(fake.interrupt).toHaveBeenCalledWith();
+      });
+
       it(`withdraws each prompt Claude has not read and reports them together, then interrupts without cancel_queued, so a background task's report waiting in Claude's queue survives Stop (${ISSUE_747})`, async () => {
         const { live, fake, recorder } = startLive();
         live.push("prompt-1", "first");

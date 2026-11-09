@@ -1,5 +1,10 @@
 /* eslint-disable obsidianmd/no-tfile-tfolder-cast -- test fixtures; not real TFiles */
-import { fileToHistoryItem, parseChatPinnedAt } from "@/utils/chatHistoryUtils";
+import {
+  extractChatTitle,
+  fileToHistoryItem,
+  parseChatTimestamp,
+  formatChatNoteMessage,
+} from "@/utils/chatHistoryUtils";
 import { RecentUsageManager } from "@/utils/recentUsageManager";
 import type { App, TFile } from "obsidian";
 
@@ -66,21 +71,82 @@ describe("chatHistoryUtils", () => {
     });
   });
 
-  describe("parseChatPinnedAt()", () => {
+  describe("extractChatTitle()", () => {
+    function noteNamed(basename: string): TFile {
+      return { path: `test-folder/${basename}.md`, basename } as unknown as TFile;
+    }
+
+    it("uses the note's topic as the title", () => {
+      const app = makeApp({ topic: " Planning ", projectId: "proj-123" });
+      expect(extractChatTitle(app, noteNamed("agent__20260101_120000__Write_a_poem"))).toBe(
+        "Planning"
+      );
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/815 uses the agentLabel of an Agent Mode note saved with no topic", () => {
+      const app = makeApp({ agentLabel: "Garden planting schedule" });
+      expect(extractChatTitle(app, noteNamed("agent__20260101_120000__Plan_the_garden"))).toBe(
+        "Garden planting schedule"
+      );
+    });
+
+    it("derives a global chat's title from its filename without the agent prefix, date and time", () => {
+      const app = makeApp({});
+      expect(extractChatTitle(app, noteNamed("agent__20260101_120000__Write_a_poem"))).toBe(
+        "Write a poem"
+      );
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/809 derives an untitled Agent Mode project chat's title without the agent prefix", () => {
+      const app = makeApp({ projectId: "proj-123" });
+      expect(extractChatTitle(app, noteNamed("agent__20260101_120000__Write_a_poem"))).toBe(
+        "Write a poem"
+      );
+    });
+
+    it("derives a legacy project chat's title without its project id prefix", () => {
+      const app = makeApp({ projectId: "My project" });
+      expect(extractChatTitle(app, noteNamed("My project__20260101_120000__Write_a_poem"))).toBe(
+        "Write a poem"
+      );
+    });
+  });
+
+  describe("formatChatNoteMessage()", () => {
+    it("writes a message that starts with text on the sender's line", () => {
+      expect(formatChatNoteMessage("ai", "Here is the plan.")).toBe("**ai**: Here is the plan.");
+    });
+
+    it.each([
+      ["a code fence", "```mermaid\nflowchart LR\n  A --> B\n```"],
+      ["a heading", "## Callouts\nUse them."],
+      ["a list", "- one\n- two"],
+      ["a numbered list", "1. one\n2. two"],
+      ["a quote", "> [!note] Tip"],
+      ["a table", "| a | b |\n| --- | --- |"],
+    ])(
+      `starts a message that opens with %s on its own paragraph so the block renders (${"https://github.com/Brevilabs/obsidian-copilot-private/issues/889"})`,
+      (_, body) => {
+        expect(formatChatNoteMessage("ai", body)).toBe(`**ai**: \n\n${body}`);
+      }
+    );
+  });
+
+  describe("parseChatTimestamp()", () => {
     it("accepts a pin time written as a YAML number", () => {
-      expect(parseChatPinnedAt(1735733000000)).toBe(1735733000000);
+      expect(parseChatTimestamp(1735733000000)).toBe(1735733000000);
     });
 
     it("accepts a pin time read back as text from a note outside the metadata cache", () => {
-      expect(parseChatPinnedAt("1735733000000")).toBe(1735733000000);
+      expect(parseChatTimestamp("1735733000000")).toBe(1735733000000);
     });
 
     it("treats a missing, non-numeric, zero, or negative value as not pinned", () => {
-      expect(parseChatPinnedAt(undefined)).toBeUndefined();
-      expect(parseChatPinnedAt("yesterday")).toBeUndefined();
-      expect(parseChatPinnedAt(0)).toBeUndefined();
-      expect(parseChatPinnedAt(-5)).toBeUndefined();
-      expect(parseChatPinnedAt(true)).toBeUndefined();
+      expect(parseChatTimestamp(undefined)).toBeUndefined();
+      expect(parseChatTimestamp("yesterday")).toBeUndefined();
+      expect(parseChatTimestamp(0)).toBeUndefined();
+      expect(parseChatTimestamp(-5)).toBeUndefined();
+      expect(parseChatTimestamp(true)).toBeUndefined();
     });
   });
 });

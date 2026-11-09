@@ -1,4 +1,5 @@
 import type {
+  PermissionMode,
   Query,
   SDKMessage,
   SDKResultMessage,
@@ -30,6 +31,7 @@ export interface ClaudeLiveQueryOptions {
   emit: (event: SessionEvent) => void;
   onTurnStarted: (query: Query) => void;
   onSignedOut: () => void;
+  onPermissionModeChanged: (mode: PermissionMode) => void;
   onEnded: () => void;
   stallTimeoutMs?: number;
 }
@@ -55,7 +57,7 @@ export class ClaudeLiveQuery {
     void this.consume();
   }
 
-  push(promptId: string, content: ClaudeUserContent, interrupt = false): void {
+  push(promptId: string, content: ClaudeUserContent): void {
     this.undelivered.push(promptId);
     this.input.push({
       type: "user",
@@ -63,14 +65,18 @@ export class ClaudeLiveQuery {
       session_id: "",
       parent_tool_use_id: null,
       message: { role: "user", content },
-      // "now" ends the running turn at its next safe point and runs this message; background tasks keep running. https://github.com/Brevilabs/obsidian-copilot-private/issues/509
-      ...(interrupt ? { priority: "now" as const } : {}),
     });
   }
 
   // Stop takes back each message Claude has not read, then interrupts without cancel_queued, which would also drop a finished background task's report waiting in Claude's queue. https://github.com/Brevilabs/obsidian-copilot-private/issues/747
-  async interrupt(): Promise<void> {
+  async interrupt(takeBackUnread = true): Promise<void> {
     this.interrupted = true;
+    // Send now interrupts so that Claude reads its waiting messages right away, as Claude Code's send-now key does. https://github.com/Brevilabs/obsidian-copilot-private/issues/789
+    if (takeBackUnread) await this.takeBackUnread();
+    await this.query.interrupt();
+  }
+
+  private async takeBackUnread(): Promise<void> {
     const withdrawn: string[] = [];
     this.stopWithdrawals = withdrawn;
     await Promise.all(
@@ -85,7 +91,6 @@ export class ClaudeLiveQuery {
     this.stopWithdrawals = null;
     // One report for the whole Stop returns its messages to the composer together, in send order. https://github.com/Brevilabs/obsidian-copilot-private/issues/747
     this.withdraw(withdrawn);
-    await this.query.interrupt();
   }
 
   async cancelQueued(promptId: string): Promise<boolean> {
@@ -130,6 +135,15 @@ export class ClaudeLiveQuery {
       if (this.stopWithdrawals) this.stopWithdrawals.push(cancelled);
       else this.withdraw([cancelled]);
       return;
+    }
+    // Claude stays busy after a reply that launched subagents until it has reported on each of them. https://github.com/Brevilabs/obsidian-copilot-private/issues/757
+    if (msg.type === "system" && msg.subtype === "session_state_changed") {
+      this.emit({ sessionUpdate: "busy_changed", busy: msg.state !== "idle" });
+      return;
+    }
+    // Claude changes the chat's mode on its own, such as for an approved "Allow always" that covers all file edits, so the picker must follow its reports. https://github.com/Brevilabs/obsidian-copilot-private/issues/870
+    if (msg.type === "system" && msg.subtype === "status" && msg.permissionMode) {
+      this.opts.onPermissionModeChanged(msg.permissionMode);
     }
     // Claude announces each turn with an init frame, well before a reply it starts on its own streams, so that reply's duration counts from here. https://github.com/Brevilabs/obsidian-copilot-private/issues/175
     if (msg.type === "system" && msg.subtype === "init" && !this.openTurnId) {

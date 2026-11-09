@@ -63,8 +63,10 @@ export async function filterChatHistoryFiles(app: App, files: TFile[]): Promise<
 export function extractChatTitle(app: App, file: TFile): string {
   const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
 
-  if (frontmatter?.topic && typeof frontmatter.topic === "string" && frontmatter.topic.trim()) {
-    return frontmatter.topic.trim();
+  // Agent Mode notes saved before their title moved to topic keep it only in agentLabel.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/815
+  for (const title of [frontmatter?.topic, frontmatter?.agentLabel]) {
+    if (typeof title === "string" && title.trim()) return title.trim();
   }
 
   let basename = file.basename;
@@ -76,17 +78,15 @@ export function extractChatTitle(app: App, file: TFile): string {
         ? String(rawProjectId)
         : "";
 
-  if (projectId) {
-    const sanitizedPrefix = `${sanitizeVaultPathSegment(projectId)}__`;
-    const rawPrefix = `${projectId}__`;
-    if (basename.startsWith(sanitizedPrefix)) {
-      basename = basename.slice(sanitizedPrefix.length);
-    } else if (basename.startsWith(rawPrefix)) {
-      basename = basename.slice(rawPrefix.length);
-    }
-  } else {
-    basename = basename.replace(/^[a-zA-Z0-9_-]+__/, "");
-  }
+  const projectPrefixes = projectId
+    ? [`${sanitizeVaultPathSegment(projectId)}__`, `${projectId}__`]
+    : [];
+  const projectPrefix = projectPrefixes.find((prefix) => basename.startsWith(prefix));
+  // Agent Mode names project chat notes agent__…, like global ones, instead of <projectId>__….
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/809
+  basename = projectPrefix
+    ? basename.slice(projectPrefix.length)
+    : basename.replace(/^[a-zA-Z0-9_-]+__/, "");
 
   return basename
     .replace(/\{\$date\}|\d{8}/g, "")
@@ -129,7 +129,7 @@ export function extractChatLastAccessedAtMs(app: App, file: TFile): number | nul
   return null;
 }
 
-export function parseChatPinnedAt(raw: unknown): number | undefined {
+export function parseChatTimestamp(raw: unknown): number | undefined {
   const value = typeof raw === "string" ? Number(raw) : raw;
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
@@ -165,4 +165,11 @@ export function getChatDisplayText(app: App, file: TFile): string {
   const date = extractChatDate(app, file);
   const formattedDateTime = formatDateTime(date);
   return `${title} - ${formattedDateTime.display}`;
+}
+
+const BLOCK_START = /^ {0,3}(?:`{3}|~{3}|#{1,6}(?:\s|$)|[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$)|>|\|)/;
+
+// A reply whose first line is a Markdown block (a fence, heading or list) stops being one after the sender label, so it gets its own paragraph; the label keeps its trailing space so every loader still recognizes it. https://github.com/Brevilabs/obsidian-copilot-private/issues/889
+export function formatChatNoteMessage(sender: string, body: string): string {
+  return BLOCK_START.test(body) ? `**${sender}**: \n\n${body}` : `**${sender}**: ${body}`;
 }

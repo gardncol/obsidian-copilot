@@ -10,11 +10,14 @@ import type {
   SessionUpdateHandler,
 } from "@/agentMode/session/types";
 import { lookupToolSummary } from "@/agentMode/ui/toolSummaries";
+import type { ChatStateKey } from "@/agentMode/session/chatExtension";
 
 jest.mock("@/logger", () => ({ logInfo: jest.fn(), logWarn: jest.fn(), logError: jest.fn() }));
 jest.mock("@/settings/model", () => ({
   getSettings: jest.fn().mockReturnValue({ agentMode: {} }),
 }));
+
+const COUNTER: ChatStateKey<number> = Object.freeze({ id: "counter", initial: 0 });
 
 describe("AgentChatUIState", () => {
   function planReview(
@@ -238,7 +241,7 @@ describe("AgentChatUIState", () => {
     });
   });
 
-  function feedbackChat(): AgentChatUIState {
+  function stateChat(): AgentChatUIState {
     const session = new AgentSession({
       backend: {
         isRunning: () => true,
@@ -246,44 +249,41 @@ describe("AgentChatUIState", () => {
         registerSessionHandler: () => () => undefined,
       } as unknown as BackendProcess,
       backendSessionId: "s-1",
-      internalId: "feedback",
+      internalId: "chat-state",
       backendId: "claude",
     });
     session.completeResume(null);
-    const chat = new AgentChatUIState(session);
-    session.offerFeedback({ title: "t", whatHappened: "w", userSaid: "", repro: "r" });
-    return chat;
+    return new AgentChatUIState(session);
   }
 
-  describe("getFeedbackOffer()", () => {
-    it("serves the session's open feedback card", () => {
-      expect(feedbackChat().getFeedbackOffer()?.status).toBe("open");
-    });
-  });
-
-  describe("dismissFeedbackOffer()", () => {
-    it("dismisses the session's open card and notifies the view", () => {
-      const chat = feedbackChat();
+  describe("updateChatState()", () => {
+    it("changes the session's state for a feature and notifies the view", () => {
+      const chat = stateChat();
       const listener = jest.fn();
       chat.subscribe(listener);
 
-      chat.dismissFeedbackOffer();
+      chat.updateChatState(COUNTER, (count) => count + 1);
 
-      expect(chat.getFeedbackOffer()?.status).toBe("dismissed");
       expect(listener).toHaveBeenCalled();
     });
   });
 
-  describe("markFeedbackReported()", () => {
-    it("records the sent report on the session's card", () => {
-      const chat = feedbackChat();
+  describe("readChatState()", () => {
+    it("serves the session's state for a feature", () => {
+      const chat = stateChat();
 
-      chat.markFeedbackReported({ reportId: "r1", issueUrl: "https://example.com" });
+      chat.updateChatState(COUNTER, (count) => count + 1);
 
-      expect(chat.getFeedbackOffer()).toMatchObject({
-        status: "reported",
-        report: { reportId: "r1", issueUrl: "https://example.com" },
-      });
+      expect(chat.readChatState(COUNTER)).toBe(1);
+    });
+  });
+
+  describe("getChatStates()", () => {
+    it("serves the session's current snapshot of every feature's state", () => {
+      const chat = stateChat();
+      chat.updateChatState(COUNTER, (count) => count + 1);
+
+      expect(chat.getChatStates().get(COUNTER.id)).toBe(1);
     });
   });
 
@@ -372,6 +372,33 @@ describe("AgentChatUIState", () => {
       await chat.withdrawMessage(id);
 
       expect(withdraw).toHaveBeenCalledWith({ sessionId: "claude-session", promptId: id });
+    });
+  });
+
+  describe("sendWaitingNow()", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/789 interrupts the running reply and leaves the waiting messages with the agent", async () => {
+      const cancel = jest.fn(async () => undefined);
+      const prompt = jest.fn(async () => undefined);
+      const chat = liveChat({ midTurnDelivery: true, withdraw: true }, { prompt, cancel });
+      chat.sendMessage("list the notes");
+      chat.sendMessage("only the first two");
+      await waitFor(() => expect(prompt).toHaveBeenCalledTimes(2));
+
+      await chat.sendWaitingNow();
+
+      expect(cancel).toHaveBeenCalledWith({ sessionId: "claude-session", keepUnread: true });
+      expect(chat.getQueuedPrompts().map((p) => p.text)).toEqual(["only the first two"]);
+    });
+  });
+
+  describe("isReplyRunning()", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/788 follows whether the agent's reply is running", () => {
+      const chat = liveChat({ midTurnDelivery: true });
+      expect(chat.isReplyRunning()).toBe(false);
+
+      chat.sendMessage("list the notes");
+
+      expect(chat.isReplyRunning()).toBe(true);
     });
   });
 

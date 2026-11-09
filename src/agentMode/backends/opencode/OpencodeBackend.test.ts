@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import type { App } from "obsidian";
 import { verifyOpencodeBinary } from "./OpencodeBinaryManager";
 import { OPENCODE_COPILOT_PLUGIN_SOURCE } from "./opencodeCopilotPlugin";
 import { updateAgentModeBackendFields } from "@/settings/model";
@@ -44,6 +45,10 @@ function resetPromptState(): void {
 jest.mock("./OpencodeBinaryManager", () => ({
   ...jest.requireActual("./OpencodeBinaryManager"),
   verifyOpencodeBinary: jest.fn().mockResolvedValue({ stdout: "2.0.21" }),
+}));
+
+jest.mock("@/utils/loginShellPath", () => ({
+  agentShellPath: jest.fn(async () => "/login/bin:/usr/bin"),
 }));
 
 jest.mock("@/services/obsidianCli/ObsidianCliClient", () => ({
@@ -142,12 +147,15 @@ function okEntry(provider: Provider, model: ConfiguredModel): EnabledBackendEntr
   };
 }
 
+const APP = {} as App;
+
 function makeDeps(args: {
   resolved: EnabledBackendEntry[];
   keys?: Record<string, string | null>;
 }): OpencodeModelDeps {
   const keys = args.keys ?? {};
   return {
+    app: APP,
     backendConfigRegistry: {
       resolveEnabled: (backend: string) => (backend === "opencode" ? args.resolved : []),
     } as unknown as BackendConfigRegistry,
@@ -206,6 +214,7 @@ const COPILOT_BUILD_ASKS = [
   { action: "shell", resource: "*", effect: "ask" },
   { action: "edit", resource: "*", effect: "ask" },
   { action: "websearch", resource: "*", effect: "ask" },
+  { action: "obsidian-copilot_*", resource: "*", effect: "ask" },
 ];
 
 describe("OpencodeBackend", () => {
@@ -330,6 +339,24 @@ describe("OpencodeBackend", () => {
       });
     });
 
+    it("https://github.com/logancyang/obsidian-copilot/issues/3840 passes the endpoint-reported 262144 context window to OpenCode for a custom model", async () => {
+      const provider = makeOpenAICompatibleProvider("p-custom", "https://my-endpoint/v1", "Custom");
+      const model = makeModel("p-custom", "qwen3-coder");
+      model.info.limits = { context: 262_144 };
+      const deps = makeDeps({
+        resolved: [okEntry(provider, model)],
+        keys: { "p-custom": "secret-key" },
+      });
+
+      const cfg = await buildOpencodeConfig(getSettings(), deps);
+
+      expect(cfg.providers["p-custom"].models?.["qwen3-coder"]).toEqual({
+        capabilities: { tools: true, input: ["text"], output: ["text"] },
+        limit: { context: 262_144 },
+        variants: [],
+      });
+    });
+
     it("https://github.com/Brevilabs/obsidian-copilot-private/issues/557 inherits catalog effort choices for a BYOK reasoning model", async () => {
       const provider = makeProvider("p-anthropic", {
         kind: "byok",
@@ -420,6 +447,35 @@ describe("OpencodeBackend", () => {
       expect(cfg.providers.openai.models).toEqual({ "gpt-5": {} });
     });
 
+    it("stops OpenCode from swapping a BYOK provider's keychain key for that provider's environment variable, such as DEEPSEEK_API_KEY (https://github.com/logancyang/obsidian-copilot/issues/3837)", async () => {
+      const provider = makeProvider("p-deepseek", { kind: "byok", catalogProviderId: "deepseek" });
+      const deps = makeDeps({
+        resolved: [okEntry(provider, makeModel("p-deepseek", "deepseek-chat"))],
+        keys: { "p-deepseek": "ds-verified" },
+      });
+      const cfg = await buildOpencodeConfig(getSettings(), deps);
+      expect(cfg.providers.deepseek.env).toEqual([]);
+      expect(cfg.providers.deepseek.settings).toEqual({ apiKey: "ds-verified" });
+    });
+
+    it("leaves a keyless provider's environment variables to OpenCode when Copilot has no key to give it (https://github.com/logancyang/obsidian-copilot/issues/3837)", async () => {
+      const provider = makeProvider(
+        "p-ollama-catalog",
+        { kind: "byok", catalogProviderId: "ollama" },
+        {
+          providerType: "openai-compatible",
+          baseUrl: "http://localhost:11434/v1",
+          requiresApiKey: false,
+        }
+      );
+      const deps = makeDeps({
+        resolved: [okEntry(provider, makeModel("p-ollama-catalog", "llama3.2"))],
+        keys: { "p-ollama-catalog": null },
+      });
+      const cfg = await buildOpencodeConfig(getSettings(), deps);
+      expect(cfg.providers.ollama.env).toBeUndefined();
+    });
+
     it("skips a model when a key-requiring provider has no key in the keychain", async () => {
       const provider = makeProvider("p-openai", { kind: "byok", catalogProviderId: "openai" });
       const deps = makeDeps({
@@ -454,6 +510,24 @@ describe("OpencodeBackend", () => {
       });
       const cfg = await buildOpencodeConfig(getSettings(), deps);
       expect(cfg.providers).toEqual({});
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/766 starts new sessions on an OpenCode-hosted model the user enabled and saved as the default", async () => {
+      const provider = makeProvider("opencode-provider", { kind: "agent", agentType: "opencode" });
+      const deps = makeDeps({
+        resolved: [
+          okEntry(makePlusProvider(), makeModel("p-plus", "copilot-plus-flash")),
+          okEntry(provider, makeModel("opencode-provider", "opencode/big-pickle")),
+        ],
+        keys: { "p-plus": "plus-token-123" },
+      });
+      updateAgentModeBackendFields("opencode", {
+        defaultModel: { baseModelId: "opencode/big-pickle", effort: null },
+      });
+
+      const cfg = await buildOpencodeConfig(getSettings(), deps);
+
+      expect(cfg.model).toBe("opencode/big-pickle");
     });
 
     it("skips a BYOK provider without a catalog id that is not OpenAI-compatible", async () => {
@@ -615,6 +689,23 @@ describe("OpencodeBackend", () => {
       });
     });
 
+    it("gives OpenCode an AIHubMix gateway URL without the /v1 its SDK adds itself, so requests reach /v1 once (https://github.com/logancyang/obsidian-copilot/issues/3641)", async () => {
+      const provider = makeProvider(
+        "p-aihubmix",
+        { kind: "byok", catalogProviderId: "aihubmix" },
+        { providerType: "openai-compatible", baseUrl: "https://api.inferera.com/v1" }
+      );
+      const deps = makeDeps({
+        resolved: [okEntry(provider, makeModel("p-aihubmix", "kimi-k3"))],
+        keys: { "p-aihubmix": "ahm-789" },
+      });
+      const cfg = await buildOpencodeConfig(getSettings(), deps);
+      expect(cfg.providers.aihubmix.settings).toEqual({
+        apiKey: "ahm-789",
+        baseURL: "https://api.inferera.com",
+      });
+    });
+
     it("omits the base URL when a catalog provider uses its own default endpoint", async () => {
       const provider = makeProvider(
         "p-google",
@@ -679,6 +770,43 @@ describe("OpencodeBackend", () => {
         limit: { context: 1024 * 1024 },
         variants: [],
       });
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/766 starts new sessions on the saved default model instead of an OpenCode free model the user never enabled", async () => {
+      const deps = makeDeps({
+        resolved: [
+          okEntry(makePlusProvider(), makeModel("p-plus", "glm-5.2")),
+          okEntry(makePlusProvider(), makeModel("p-plus", "copilot-plus-flash")),
+        ],
+        keys: { "p-plus": "plus-token-123" },
+      });
+      updateAgentModeBackendFields("opencode", {
+        defaultModel: { baseModelId: "copilot-plus/copilot-plus-flash", effort: null },
+      });
+
+      const cfg = await buildOpencodeConfig(getSettings(), deps);
+
+      expect(cfg.model).toBe("copilot-plus/copilot-plus-flash");
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/766 starts new sessions on the first runnable enabled model when the saved default cannot run", async () => {
+      const deps = makeDeps({
+        resolved: [okEntry(makePlusProvider(), makeModel("p-plus", "glm-5.2"))],
+        keys: { "p-plus": "plus-token-123" },
+      });
+      updateAgentModeBackendFields("opencode", {
+        defaultModel: { baseModelId: "copilot-plus/copilot-plus-flash", effort: null },
+      });
+
+      const cfg = await buildOpencodeConfig(getSettings(), deps);
+
+      expect(cfg.model).toBe("copilot-plus/glm-5.2");
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/766 leaves the startup model to OpenCode when no enabled model can run", async () => {
+      const cfg = await buildOpencodeConfig(getSettings(), makeDeps({ resolved: [] }));
+
+      expect(cfg).not.toHaveProperty("model");
     });
 
     it("https://github.com/Brevilabs/obsidian-copilot-private/issues/557 offers only the effort levels Copilot Plus published", async () => {
@@ -838,18 +966,32 @@ describe("OpencodeBackend", () => {
       ]);
     });
 
-    it("configures copilot-build as a primary agent that asks before shell, edit, and web search", async () => {
+    it("configures copilot-build as a primary agent that asks before shell, edit, web search, and Copilot's MCP tools", async () => {
       const cfg = await buildOpencodeConfig(getSettings(), NO_MODELS_DEPS);
 
       expect(cfg.agents["copilot-build"].mode).toBe("primary");
       expect(cfg.agents["copilot-build"].permissions).toEqual(COPILOT_BUILD_ASKS);
     });
 
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/862 lets the ask-first agent run Copilot's read-only MCP tools, named as OpenCode names them, without asking, while Auto runs every tool", async () => {
+      const cfg = await buildOpencodeConfig(getSettings(), {
+        ...NO_MODELS_DEPS,
+        readCopilotReadOnlyToolNames: async () => ["send_feedback", "drive_files.list"],
+      });
+
+      expect(cfg.agents["copilot-build"].permissions).toEqual([
+        ...COPILOT_BUILD_ASKS,
+        { action: "obsidian-copilot_send_feedback", resource: "*", effect: "allow" },
+        { action: "obsidian-copilot_drive_files_list", resource: "*", effect: "allow" },
+      ]);
+      expect(cfg.agents.build.permissions).toBeUndefined();
+    });
+
     it("gives both agents the shared product prompt, byte for byte", async () => {
       const cfg = await buildOpencodeConfig(getSettings(), NO_MODELS_DEPS);
 
-      expect(cfg.agents["copilot-build"].system).toBe(buildAgentSystemPrompt("opencode"));
-      expect(cfg.agents.build.system).toBe(buildAgentSystemPrompt("opencode"));
+      expect(cfg.agents["copilot-build"].system).toBe(buildAgentSystemPrompt("opencode", APP));
+      expect(cfg.agents.build.system).toBe(buildAgentSystemPrompt("opencode", APP));
     });
 
     it("https://github.com/Brevilabs/obsidian-copilot-private/issues/599 names only the builtin skills enabled for OpenCode in both agent prompts", async () => {
@@ -1011,6 +1153,16 @@ describe("OpencodeBackend", () => {
         });
 
         expect(desc.env.OPENCODE_LOG_LEVEL).toBe("INFO");
+      });
+
+      it("https://github.com/logancyang/obsidian-copilot/issues/4096 runs OpenCode with the user's login-shell PATH, because its shell reads no login or interactive startup files", async () => {
+        setOpencodeSettings({ binaryPath: "/path/to/opencode" });
+
+        const desc = await new OpencodeBackend(NO_MODELS_DEPS).buildSpawnDescriptor({
+          vaultBasePath: "/vault",
+        });
+
+        expect(desc.env.PATH).toBe("/login/bin:/usr/bin");
       });
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/561 lets a user opt into more detailed OpenCode logs", async () => {

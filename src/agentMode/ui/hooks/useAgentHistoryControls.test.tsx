@@ -16,6 +16,7 @@ function makeManager() {
     updateChatTitle: jest.fn(async () => {}),
     deleteChatHistory: jest.fn(async () => {}),
     setChatPinned: jest.fn(async (id: string) => ({ id, pinnedAt: 5_000 })),
+    setChatArchived: jest.fn(async (id: string) => ({ id, archivedAt: 7_000 })),
     ensureChatNote: jest.fn(async (id: string) => id),
     saveActiveSession: jest.fn(async () => ({ path: "chats/saved.md" })),
     getActiveSession: jest.fn(() => null),
@@ -25,6 +26,7 @@ function makeManager() {
     updateChatTitle: jest.Mock;
     deleteChatHistory: jest.Mock;
     setChatPinned: jest.Mock;
+    setChatArchived: jest.Mock;
     ensureChatNote: jest.Mock;
     saveActiveSession: jest.Mock;
     getActiveSession: jest.Mock;
@@ -51,10 +53,26 @@ function makeBookmarks(urls: string[] = []) {
   return bookmarks;
 }
 
+type VaultListener = (...args: unknown[]) => void;
+const vaultListeners = new Map<string, Set<VaultListener>>();
+
+function emitVault(event: "rename" | "delete", ...args: unknown[]) {
+  for (const listener of vaultListeners.get(event) ?? []) listener(...args);
+}
+
 function makeBookmarkingPlugin(bookmarks: ReturnType<typeof makeBookmarks> | null) {
   const epochs: Record<string, number> = { "chats/agent__a.md": 1_000, "chats/saved.md": 3_000 };
   const app = {
     vault: {
+      on: (event: string, listener: VaultListener) => {
+        const listeners = vaultListeners.get(event) ?? new Set<VaultListener>();
+        listeners.add(listener);
+        vaultListeners.set(event, listeners);
+        return { event, listener };
+      },
+      offref: (ref: { event: string; listener: VaultListener }) => {
+        vaultListeners.get(ref.event)?.delete(ref.listener);
+      },
       getName: () => "Notes",
       getAbstractFileByPath: (path: string) =>
         path in epochs ? new (TFile as unknown as new (path: string) => TFile)(path) : null,
@@ -94,6 +112,31 @@ describe("useAgentHistoryControls", () => {
 
       expect(manager.getChatHistoryItems).toHaveBeenCalledWith(undefined);
       expect(result.current.chatHistoryItems).toHaveLength(2);
+    });
+
+    it("reloads when a listed chat's note is renamed or deleted in the vault, and not for other files, for https://github.com/Brevilabs/obsidian-copilot-private/issues/801", async () => {
+      const manager = makeManager() as AgentSessionManager & { getChatHistoryItems: jest.Mock };
+      const { result } = renderControls(manager);
+      await act(async () => {
+        await result.current.loadChatHistory();
+      });
+      manager.getChatHistoryItems.mockClear();
+
+      await act(async () => {
+        emitVault("rename", { path: "notes/other.md" }, "notes/elsewhere.md");
+        emitVault("delete", { path: "notes/other.md" });
+      });
+      expect(manager.getChatHistoryItems).not.toHaveBeenCalled();
+
+      await act(async () => {
+        emitVault("rename", { path: "chats/renamed.md" }, "a");
+      });
+      expect(manager.getChatHistoryItems).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        emitVault("delete", { path: "b" });
+      });
+      expect(manager.getChatHistoryItems).toHaveBeenCalledTimes(2);
     });
 
     it("loads only the chats of the given project scope", async () => {
@@ -264,7 +307,7 @@ describe("useAgentHistoryControls", () => {
         await result.current.setChatPinned("a", true);
       });
 
-      expect(manager.setChatPinned).toHaveBeenCalledWith("a", true);
+      expect(manager.setChatPinned).toHaveBeenCalledWith("a", true, undefined);
       expect(result.current.chatHistoryItems).toEqual([{ id: "a", pinnedAt: 5_000 }, item("b")]);
       expect(manager.getChatHistoryItems).toHaveBeenCalledTimes(1);
     });
@@ -321,6 +364,55 @@ describe("useAgentHistoryControls", () => {
       expect(result.current.chatHistoryItems).toEqual([item("new")]);
     });
 
+    it("re-pins a chat at the given pin time and moves its row before the note write finishes for https://github.com/Brevilabs/obsidian-copilot-private/issues/811", async () => {
+      const manager = makeManager();
+      let finishWrite!: () => void;
+      manager.setChatPinned.mockImplementation(
+        (id: string, _pinned: boolean, pinnedAt: number) =>
+          new Promise((resolve) => (finishWrite = () => resolve({ id, pinnedAt })))
+      );
+      const { result } = renderControls(manager);
+      await act(async () => {
+        await result.current.loadChatHistory();
+      });
+
+      let write!: Promise<void>;
+      act(() => {
+        write = result.current.setChatPinned("a", true, 2_500);
+      });
+
+      expect(manager.setChatPinned).toHaveBeenCalledWith("a", true, 2_500);
+      expect(result.current.chatHistoryItems).toEqual([{ id: "a", pinnedAt: 2_500 }, item("b")]);
+      await act(async () => {
+        finishWrite();
+        await write;
+      });
+      expect(result.current.chatHistoryItems).toEqual([{ id: "a", pinnedAt: 2_500 }, item("b")]);
+    });
+
+    it("puts a dragged pin back where the notes say when saving its new pin time fails, for https://github.com/Brevilabs/obsidian-copilot-private/issues/811", async () => {
+      const manager = makeManager();
+      manager.getChatHistoryItems.mockResolvedValue([
+        { id: "a", pinnedAt: 3_000 },
+        { id: "b", pinnedAt: 2_000 },
+      ]);
+      manager.setChatPinned.mockRejectedValue(new Error("vault is read-only"));
+      const { result } = renderControls(manager);
+      await act(async () => {
+        await result.current.loadChatHistory();
+      });
+
+      await act(async () => {
+        await result.current.setChatPinned("a", true, 1_500);
+      });
+
+      expect(Notice).toHaveBeenCalledWith("Failed to pin chat.");
+      expect(result.current.chatHistoryItems).toEqual([
+        { id: "a", pinnedAt: 3_000 },
+        { id: "b", pinnedAt: 2_000 },
+      ]);
+    });
+
     it("unpins a chat on its row right away", async () => {
       const manager = makeManager();
       manager.getChatHistoryItems.mockResolvedValue([{ id: "a", pinnedAt: 5_000 }]);
@@ -353,6 +445,105 @@ describe("useAgentHistoryControls", () => {
       expect(result.current.chatHistoryItems).toEqual([
         { id: "chats/agent__s1.md", pinnedAt: 5_000 },
       ]);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 moves an archived chat from the chat list to the archived list right away, without reloading history the metadata cache has not caught up with", async () => {
+      const manager = makeManager();
+      const { result } = renderControls(manager);
+      await act(async () => {
+        await result.current.loadChatHistory();
+      });
+
+      await act(async () => {
+        await result.current.setChatArchived("a", true);
+      });
+
+      expect(manager.setChatArchived).toHaveBeenCalledWith("a", true);
+      expect(result.current.chatHistoryItems).toEqual([item("b")]);
+      expect(result.current.archivedChatItems).toEqual([{ id: "a", archivedAt: 7_000 }]);
+      expect(manager.getChatHistoryItems).toHaveBeenCalledTimes(1);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 hides a pinned chat from the chat list once it is archived", async () => {
+      const manager = makeManager();
+      manager.getChatHistoryItems.mockResolvedValue([{ id: "a", pinnedAt: 5_000 }, item("b")]);
+      const { result } = renderControls(manager);
+      await act(async () => {
+        await result.current.loadChatHistory();
+      });
+
+      await act(async () => {
+        await result.current.setChatArchived("a", true);
+      });
+
+      expect(result.current.chatHistoryItems).toEqual([item("b")]);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 keeps chats the history already marks archived out of the chat list and in the archived list", async () => {
+      const manager = makeManager();
+      manager.getChatHistoryItems.mockResolvedValue([item("a"), { id: "old", archivedAt: 3_000 }]);
+      const { result } = renderControls(manager);
+
+      await act(async () => {
+        await result.current.loadChatHistory();
+      });
+
+      expect(result.current.chatHistoryItems).toEqual([item("a")]);
+      expect(result.current.archivedChatItems).toEqual([{ id: "old", archivedAt: 3_000 }]);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 returns an archived chat to the chat list when it is unarchived", async () => {
+      const manager = makeManager();
+      manager.getChatHistoryItems.mockResolvedValue([{ id: "old", archivedAt: 3_000 }]);
+      manager.setChatArchived.mockImplementation(async (id: string) => ({
+        id,
+        archivedAt: undefined,
+      }));
+      const { result } = renderControls(manager);
+      await act(async () => {
+        await result.current.loadChatHistory();
+      });
+
+      await act(async () => {
+        await result.current.setChatArchived("old", false);
+      });
+
+      expect(result.current.chatHistoryItems).toEqual([{ id: "old", archivedAt: undefined }]);
+      expect(result.current.archivedChatItems).toEqual([]);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 returns the same empty lists on every render while no chat is archived or listed", async () => {
+      const manager = makeManager();
+      manager.getChatHistoryItems.mockResolvedValue([]);
+      const { result, rerender } = renderControls(manager);
+      await act(async () => {
+        await result.current.loadChatHistory();
+      });
+      const { chatHistoryItems, archivedChatItems } = result.current;
+
+      rerender({ s: undefined });
+
+      expect(result.current.chatHistoryItems).toBe(chatHistoryItems);
+      expect(result.current.archivedChatItems).toBe(archivedChatItems);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 shows a notice and leaves every row as it was when archiving fails", async () => {
+      const manager = makeManager();
+      manager.setChatArchived.mockRejectedValue(new Error("Chat note not found"));
+      const { result } = renderControls(manager);
+      await act(async () => {
+        await result.current.loadChatHistory();
+      });
+      (Notice as unknown as jest.Mock).mockClear();
+
+      await act(async () => {
+        await expect(result.current.setChatArchived("a", true)).rejects.toThrow(
+          "Chat note not found"
+        );
+      });
+
+      expect(Notice).toHaveBeenCalledWith("Failed to archive chat.");
+      expect(result.current.chatHistoryItems).toEqual([item("a"), item("b")]);
     });
 
     it("shows a notice and leaves every row as it was when pinning fails", async () => {
@@ -625,7 +816,7 @@ describe("useAgentHistoryControls", () => {
       const copyChatLink = jest.fn(async (resolveNotePath: () => Promise<string>) => {
         linkedNotePath = await resolveNotePath();
       });
-      const linkingPlugin = { copyChatLink } as unknown as CopilotPlugin;
+      const linkingPlugin = { app: plugin.app, copyChatLink } as unknown as CopilotPlugin;
       const { result } = renderHook(() => useAgentHistoryControls(makeManager(), linkingPlugin));
 
       await act(async () => {
@@ -641,7 +832,7 @@ describe("useAgentHistoryControls", () => {
       const copyChatLink = jest.fn(async (resolveNotePath: () => Promise<string>) => {
         linkedNotePath = await resolveNotePath();
       });
-      const linkingPlugin = { copyChatLink } as unknown as CopilotPlugin;
+      const linkingPlugin = { app: plugin.app, copyChatLink } as unknown as CopilotPlugin;
       const manager = makeManager();
       manager.getChatHistoryItems.mockResolvedValue([{ id: NATIVE_ID }]);
       manager.ensureChatNote.mockResolvedValue("chats/saved.md");

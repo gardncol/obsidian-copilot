@@ -1,4 +1,4 @@
-import { AI_SENDER, USER_SENDER } from "@/constants";
+import { AI_SENDER } from "@/constants";
 import { logInfo, logWarn } from "@/logger";
 import { AgentMessageStore } from "@/agentMode/session/AgentMessageStore";
 import { GLOBAL_SCOPE, type ProjectScopeId } from "@/agentMode/session/scope";
@@ -39,7 +39,10 @@ import {
 } from "@/agentMode/session/types";
 import { MessageContext } from "@/types/message";
 import { err2String, formatDateTime } from "@/utils";
-import { ensureMultiAgentEntitlement, showMultiAgentUpgradePrompt } from "@/plusUtils";
+import {
+  ensureMultiAgentEntitlement,
+  showMultiAgentUpgradePrompt,
+} from "@/agentMode/session/fanout/multiAgentEntitlement";
 import type { App, DataAdapter } from "obsidian";
 import { MethodUnsupportedError } from "@/agentMode/session/errors";
 import {
@@ -101,8 +104,20 @@ import { SessionHistoryReplay } from "@/agentMode/session/SessionHistoryReplay";
 import { InteractiveRequests } from "@/agentMode/session/InteractiveRequests";
 import { UsageTracker } from "@/agentMode/session/UsageTracker";
 import { replayPersistedMode } from "@/agentMode/session/replayPersistedMode";
-import type { FeedbackDraft, FeedbackOfferResult } from "@/agentMode/session/copilotMcpServer";
-import type { FeedbackEvidence, FeedbackOffer } from "@/agentMode/session/feedback/feedbackOffer";
+import type { FeedbackEvidence } from "@/agentMode/session/feedback/feedbackOffer";
+import {
+  EMPTY_CHAT_EXTENSIONS,
+  EMPTY_CHAT_STATES,
+  readChatState,
+  withChatState,
+  type ChatExtension,
+  type ChatStateHost,
+  type ChatStateKey,
+  type ChatStates,
+  type ChatView,
+  type PromptNote,
+  type TurnFailure,
+} from "@/agentMode/session/chatExtension";
 
 export type RunFanoutTurn = (input: FanoutRunInput) => Promise<FanoutTurn>;
 
@@ -177,6 +192,7 @@ export interface AgentSessionListener {
   onNeedsAttentionChanged?(needsAttention: boolean): void;
   onTasksChanged?(): void;
   onQueuedPromptsChanged?(): void;
+  onPromptSent?(): void;
   onDisconnected?(): void;
 }
 
@@ -205,6 +221,7 @@ export interface AgentSessionStartOptions extends ProjectContextUpdatesHooks {
   getApp?: () => App;
   getProjectContextBlock?: () => string;
   mcpServers?: ReadonlyArray<AgentMcpServer>;
+  chatExtensions?: readonly ChatExtension<unknown>[];
 }
 
 export interface AgentSessionStateOptions extends ProjectContextUpdatesHooks {
@@ -221,9 +238,10 @@ export interface AgentSessionStateOptions extends ProjectContextUpdatesHooks {
   runFanoutTurn?: RunFanoutTurn;
   getDisplayName?: (backendId: BackendId) => string;
   getApp?: () => App;
+  chatExtensions?: readonly ChatExtension<unknown>[];
 }
 
-export class AgentSession {
+export class AgentSession implements ChatStateHost, ChatView {
   readonly store = new AgentMessageStore();
   readonly internalId: string;
   readonly chatInputId: string;
@@ -244,8 +262,10 @@ export class AgentSession {
   private readonly getProjectContextUpdatesFn: (() => ProjectContextUpdates | null) | null;
   private readonly markProjectContextUpdatesDeliveredFn: ((epoch: number) => void) | null;
   private cachedStatus: AgentSessionStatus = "starting";
+  private cachedReplyRunning = false;
   private startupFailed = false;
   private startupSettled = false;
+  private agentBusy = false;
   private lastMentionedAgents: ReadonlyArray<BackendId> = EMPTY_BACKEND_IDS;
   private pendingFanoutContext: PendingFanoutContext[] = [];
   private resendSavedHistory = false;
@@ -270,7 +290,8 @@ export class AgentSession {
   });
   private readonly requests: InteractiveRequests;
   private readonly usageTracker: UsageTracker;
-  private feedbackOffer: FeedbackOffer | null = null;
+  private chatStates: ChatStates = EMPTY_CHAT_STATES;
+  private readonly chatExtensions: readonly ChatExtension<unknown>[];
 
   private needsAttention = false;
   private notifyScheduled = false;
@@ -304,6 +325,7 @@ export class AgentSession {
       captureFileChanges: (files, messageId, turnDiff) =>
         this.finalizeFileChanges(files, this.store, messageId, turnDiff),
       onTurnCompleted: () => void this.pollSessionTitle(),
+      onTurnFailed: (errorText, error) => this.applyTurnFailure({ errorText, error }),
     });
     this.planFeedbackDelivery = opts.getDescriptor?.()?.planFeedbackDelivery ?? "permission";
     this.projectId = opts.projectId ?? GLOBAL_SCOPE;
@@ -314,6 +336,7 @@ export class AgentSession {
     this.getApp = opts.getApp ?? null;
     this.getProjectContextUpdatesFn = opts.getProjectContextUpdates ?? null;
     this.markProjectContextUpdatesDeliveredFn = opts.markProjectContextUpdatesDelivered ?? null;
+    this.chatExtensions = opts.chatExtensions ?? EMPTY_CHAT_EXTENSIONS;
     this.getProjectContextBlockFn =
       "getProjectContextBlock" in opts ? (opts.getProjectContextBlock ?? null) : null;
     this.requests = new InteractiveRequests({
@@ -428,7 +451,7 @@ export class AgentSession {
       sessionId: this.backendSessionId,
       modelId,
     });
-    this.usageTracker.dropUsageWindowOnModelChange(next);
+    void this.usageTracker.dropUsageWindowOnModelChange(next);
     this.currentState = next;
     this.notifyModelChanged();
   }
@@ -528,7 +551,7 @@ export class AgentSession {
       configId,
       value,
     });
-    this.usageTracker.dropUsageWindowOnModelChange(next);
+    void this.usageTracker.dropUsageWindowOnModelChange(next);
     this.currentState = next;
     this.notifyModelChanged();
     this.clearCurrentPlanIfModeLeft();
@@ -588,12 +611,13 @@ export class AgentSession {
     if (this.disposed) return "closed";
     if (this.startupFailed) return "error";
     if (this.backendSessionId === null || !this.startupSettled) return "starting";
-    const mainTurnRunning = this.turns.isMainTurnRunning();
-    // A background task can ask while the main agent is idle; its request must not hold the composer or show Stop. https://github.com/Brevilabs/obsidian-copilot-private/issues/175
-    if (mainTurnRunning && this.requests.hasPending()) {
+    // The chat is not finished while its subagents work, although the agent's replies end between them. https://github.com/Brevilabs/obsidian-copilot-private/issues/757
+    const working = this.turns.isMainTurnRunning() || this.agentBusy;
+    // A background task can ask while the agent is idle; its request must not hold the composer or show Stop. https://github.com/Brevilabs/obsidian-copilot-private/issues/175
+    if (working && this.requests.hasPending()) {
       return "awaiting_permission";
     }
-    if (mainTurnRunning) return "running";
+    if (working) return "running";
     if (this.turns.hasLastTurnFailed()) return "error";
     return "idle";
   }
@@ -690,8 +714,7 @@ export class AgentSession {
     displayText: string,
     context?: MessageContext,
     promptContent?: PromptContent[],
-    mentionedAgents?: ReadonlyArray<BackendId>,
-    options: { interrupt?: boolean } = {}
+    mentionedAgents?: ReadonlyArray<BackendId>
   ): { userMessageId: string; turn: Promise<StopReason> } {
     // Agents only compact when /compact is the whole prompt, so nothing rides along with it.
     // https://github.com/Brevilabs/obsidian-copilot-private/issues/634
@@ -722,13 +745,16 @@ export class AgentSession {
       ) {
         throw new Error("Session already has a turn in flight");
       }
-      return this.queuePrompt(displayText, context, promptContent, options.interrupt === true);
+      const queued = this.queuePrompt(displayText, context, promptContent);
+      this.notifyPromptSent();
+      return queued;
     }
 
     const promptId = uuidv4();
     const userMessageId = this.store.addMessage(
       buildUserMessage(promptId, displayText, context, promptContent)
     );
+    this.notifyPromptSent();
     this.turns.openReply();
 
     if (this.label === null && !this.backendSummarizesTitle()) {
@@ -788,11 +814,10 @@ export class AgentSession {
   private queuePrompt(
     text: string,
     context: MessageContext | undefined,
-    promptContent: PromptContent[] | undefined,
-    interrupt: boolean
+    promptContent: PromptContent[] | undefined
   ): { userMessageId: string; turn: Promise<StopReason> } {
     const prompt: QueuedPrompt = { id: uuidv4(), text, context, promptContent };
-    const turn = this.turns.queue(prompt, interrupt, async () => {
+    const turn = this.turns.queue(prompt, async () => {
       const webTabBlock =
         (context?.webTabs?.length ?? 0) > 0 ? await serializeWebTabContext(context) : "";
       return () => {
@@ -810,6 +835,16 @@ export class AgentSession {
       };
     });
     return { userMessageId: prompt.id, turn };
+  }
+
+  private notifyPromptSent(): void {
+    for (const l of this.listeners) {
+      try {
+        l.onPromptSent?.();
+      } catch (e) {
+        logWarn(`[AgentMode] prompt sent listener threw`, e);
+      }
+    }
   }
 
   private notifyQueuedPromptsChanged(): void {
@@ -907,9 +942,16 @@ export class AgentSession {
             CONVERSATION_HISTORY_MAX_CHARS
           )
         : null;
+      // A feature card's tool call returns before the user answers it, so the answer rides their next message.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/860
+      const promptNotes = sendsCompact ? [] : this.takePromptNotes();
       const leadingContextBlock = sendsCompact
         ? null
-        : [historyBlock, buildPriorFanoutContextBlock(this.pendingFanoutContext)]
+        : [
+            historyBlock,
+            buildPriorFanoutContextBlock(this.pendingFanoutContext),
+            ...promptNotes.map(({ note }) => note.note),
+          ]
             .filter(Boolean)
             .join("\n\n") || null;
       // The agent keeps every earlier turn, so resending an unchanged page fills its context
@@ -933,6 +975,11 @@ export class AgentSession {
       if (outcome.error !== undefined) return outcome;
       if (leadingContextBlock !== null && outcome.stopReason !== "cancelled") {
         this.pendingFanoutContext = [];
+      }
+      // A note counts as told only once the backend accepts the prompt.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/860
+      for (const { extension, note } of promptNotes) {
+        this.updateChatState(extension.key, note.delivered);
       }
       if (sendsSavedHistory && outcome.stopReason !== "cancelled") {
         this.resendSavedHistory = false;
@@ -1025,31 +1072,36 @@ export class AgentSession {
     return this.getDisplayName?.(backendId) ?? backendId;
   }
 
-  async cancel(): Promise<void> {
+  // Stop ends only the main reply; each background task is stopped from the running-tasks list. https://github.com/Brevilabs/obsidian-copilot-private/issues/788
+  async cancel(options: { keepUnread?: boolean } = {}): Promise<void> {
     const status = this.getStatus();
     if (status !== "running" && status !== "awaiting_permission") return;
     if (!this.backendSessionId) return;
-    this.turns.stop(this.canWithdrawPrompts());
-    // Stop ends the main agent's turn only, so a background task's request stays answerable. https://github.com/Brevilabs/obsidian-copilot-private/issues/175
+    const keepUnread = options.keepUnread === true;
+    this.turns.stop(!keepUnread && this.canWithdrawPrompts());
     this.requests.rejectToolRequestsFrom("main");
     this.requests.withdrawQuestions();
-    try {
-      await this.backend.cancel({ sessionId: this.backendSessionId });
-    } catch (e) {
-      logWarn(`[AgentMode] cancel notification failed`, e);
-    }
+    await this.backend
+      .cancel({ sessionId: this.backendSessionId, ...(keepUnread ? { keepUnread } : {}) })
+      .catch((e: unknown) => {
+        logWarn(`[AgentMode] cancel notification failed`, e);
+      });
+  }
+
+  isReplyRunning(): boolean {
+    return this.turns.isMainTurnRunning();
   }
 
   async releaseBackendSession(): Promise<void> {
     const backendSessionId = this.backendSessionId;
     if (!backendSessionId || !this.backend.closeSession) {
-      throw new Error("This agent does not support closing individual sessions.");
+      throw new Error("This agent can't shut down a single chat.");
     }
     try {
       await this.backend.closeSession({ sessionId: backendSessionId });
     } catch (error) {
       if (error instanceof MethodUnsupportedError) {
-        throw new Error("This agent does not support closing individual sessions.");
+        throw new Error("This agent can't shut down a single chat.");
       }
       throw error;
     }
@@ -1099,39 +1151,52 @@ export class AgentSession {
     };
   }
 
-  getFeedbackOffer(): FeedbackOffer | null {
-    return this.feedbackOffer;
+  getDisplayMessages(): readonly AgentChatMessage[] {
+    return this.store.getDisplayMessages();
   }
 
-  // One card per session, whatever became of it, so a frustrated user is never nagged.
-  // https://github.com/Brevilabs/obsidian-copilot-private/issues/672
-  offerFeedback(draft: FeedbackDraft): FeedbackOfferResult {
-    if (this.feedbackOffer) return "already_offered";
-    const userMessages = this.store
-      .getDisplayMessages()
-      .filter((message) => message.sender === USER_SENDER);
-    this.feedbackOffer = {
-      draft,
-      evidence: this.getReportEvidence(),
-      afterUserMessageId: userMessages[userMessages.length - 1]?.id ?? null,
-      status: "open",
-    };
-    this.notifyMessages();
-    return "shown";
+  getChatStates(): ChatStates {
+    return this.chatStates;
   }
 
-  dismissFeedbackOffer(): void {
-    if (this.feedbackOffer?.status !== "open") return;
-    this.feedbackOffer = { ...this.feedbackOffer, status: "dismissed" };
+  readChatState<S>(key: ChatStateKey<S>): S {
+    return readChatState(this.chatStates, key);
+  }
+
+  updateChatState<S>(key: ChatStateKey<S>, change: (state: S, chat: ChatView) => S): void {
+    const next = withChatState(this.chatStates, key, change(this.readChatState(key), this));
+    if (next === this.chatStates) return;
+    this.chatStates = next;
     this.notifyMessages();
   }
 
-  markFeedbackReported(report: { reportId: string; issueUrl: string }): void {
-    // An upload can land after the user closed the dialog and dismissed the card, which must stay dismissed.
-    // https://github.com/Brevilabs/obsidian-copilot-private/issues/672
-    if (this.feedbackOffer?.status !== "open") return;
-    this.feedbackOffer = { ...this.feedbackOffer, status: "reported", report };
+  private applyTurnFailure(failure: TurnFailure): void {
+    for (const extension of this.chatExtensions) {
+      if (!extension.onTurnFailed) continue;
+      const state = extension.onTurnFailed(this.readChatState(extension.key), this, failure);
+      this.chatStates = withChatState(this.chatStates, extension.key, state);
+    }
+  }
+
+  getReloadableChatStates(): ChatStates {
+    return this.chatExtensions
+      .filter((extension) => extension.keepOnReload)
+      .reduce(
+        (states, { key }) => withChatState(states, key, this.readChatState(key)),
+        EMPTY_CHAT_STATES
+      );
+  }
+
+  restoreChatStates(states: ChatStates): void {
+    this.chatStates = states;
     this.notifyMessages();
+  }
+
+  private takePromptNotes(): { extension: ChatExtension<unknown>; note: PromptNote<unknown> }[] {
+    return this.chatExtensions.flatMap((extension) => {
+      const note = extension.beforePrompt?.(this.readChatState(extension.key));
+      return note ? [{ extension, note }] : [];
+    });
   }
 
   getSessionUsage(): SessionUsage | null {
@@ -1231,6 +1296,10 @@ export class AgentSession {
       case "turn_ended":
         this.turns.endTurn(update);
         return;
+      case "busy_changed":
+        this.agentBusy = update.busy;
+        this.recomputeStatusIfChanged();
+        return;
     }
     const toolOwnerMessageId =
       update.sessionUpdate === "tool_call_update"
@@ -1279,7 +1348,7 @@ export class AgentSession {
       return;
     }
     if (update.sessionUpdate === "state_changed") {
-      this.usageTracker.dropUsageWindowOnModelChange(update.state);
+      void this.usageTracker.dropUsageWindowOnModelChange(update.state);
       this.currentState = update.state;
       this.notifyModelChanged();
       this.clearCurrentPlanIfModeLeft();
@@ -1397,6 +1466,7 @@ export class AgentSession {
     for (const task of this.tasks.values()) {
       if (task.taskId === undefined && task.status === "running") this.endTask(task, "stopped");
     }
+    this.agentBusy = false;
     this.turns.disconnect(error);
     for (const l of this.listeners) {
       try {
@@ -1449,9 +1519,11 @@ export class AgentSession {
     this.publishTasks();
   }
 
+  // A resumed subagent runs again under its earlier task id, listed under the resuming call, so the task's updates belong to its latest run. https://github.com/logancyang/obsidian-copilot/issues/3842
   private taskWithId(taskId: string): AgentTask | undefined {
-    for (const task of this.tasks.values()) if (task.taskId === taskId) return task;
-    return undefined;
+    let latest: AgentTask | undefined;
+    for (const task of this.tasks.values()) if (task.taskId === taskId) latest = task;
+    return latest;
   }
 
   // A launch that settles before the agent names its task never became one: it was denied, failed or stopped. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
@@ -1718,8 +1790,11 @@ export class AgentSession {
 
   private recomputeStatusIfChanged(): void {
     const next = this.getStatus();
-    if (next === this.cachedStatus) return;
+    const replyRunning = this.isReplyRunning();
+    // A reply can end while subagents keep the chat running; the composer must still swap Stop for Send. https://github.com/Brevilabs/obsidian-copilot-private/issues/788
+    if (next === this.cachedStatus && replyRunning === this.cachedReplyRunning) return;
     this.cachedStatus = next;
+    this.cachedReplyRunning = replyRunning;
     for (const l of this.listeners) {
       try {
         l.onStatusChanged(next);

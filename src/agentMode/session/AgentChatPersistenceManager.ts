@@ -23,6 +23,7 @@ import {
   patchFrontmatter,
   trashFile,
 } from "@/utils/vaultAdapterUtils";
+import { formatChatNoteMessage } from "@/utils/chatHistoryUtils";
 import { joinPosix } from "@/utils/pathUtils";
 import { TFile, type App } from "obsidian";
 import {
@@ -63,7 +64,6 @@ function parseUsageJson(raw: unknown): SessionUsage | undefined {
 export interface LoadedAgentChat {
   messages: AgentChatMessage[];
   backendId: BackendId;
-  topic?: string;
   label?: string;
   sessionId?: string;
   projectId: string;
@@ -193,8 +193,9 @@ export class AgentChatPersistenceManager {
     if (!backendId) {
       throw new Error(`Missing backendId in agent chat frontmatter: ${file.path}`);
     }
-    const topic = frontmatter.topic?.trim() || undefined;
-    const label = frontmatter.agentLabel?.trim() || undefined;
+    // A chat has one title, in topic; notes saved before kept the agent's title only in agentLabel.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/815
+    const label = frontmatter.topic?.trim() || frontmatter.agentLabel?.trim() || undefined;
     const sessionId = frontmatter.sessionId?.trim() || undefined;
     const projectId = frontmatter.projectId?.trim() || GLOBAL_SCOPE;
     const usage = parseUsageJson(frontmatter.usage);
@@ -203,7 +204,7 @@ export class AgentChatPersistenceManager {
     logInfo(
       `[AgentChatPersistenceManager] Loaded ${messages.length} messages from ${file.path} (backend=${backendId}, sessionId=${sessionId ?? "none"}, projectId=${projectId})`
     );
-    return { messages, backendId, topic, label, sessionId, projectId, usage };
+    return { messages, backendId, label, sessionId, projectId, usage };
   }
 
   async getAgentChatHistoryFiles(): Promise<TFile[]> {
@@ -212,16 +213,43 @@ export class AgentChatPersistenceManager {
   }
 
   async updateTopic(fileId: string, newTopic: string): Promise<void> {
-    await patchFrontmatter(this.app, fileId, { topic: newTopic.trim() });
+    const topic = newTopic.trim();
+    const file = this.resolveExistingFile(fileId);
+    if (!file) return;
+    // Recent Chats reloads as soon as the rename resolves, and showed the old title while
+    // Obsidian was still re-reading the note. https://github.com/logancyang/obsidian-copilot/issues/3555
+    const { metadataCache } = this.app;
+    let markReread!: () => void;
+    const reread = new Promise<void>((resolve) => (markReread = resolve));
+    const ref = metadataCache.on("changed", (changed) => {
+      if (changed.path === file.path) markReread();
+    });
+    try {
+      await patchFrontmatter(this.app, fileId, { topic });
+      if (metadataCache.getFileCache(file)?.frontmatter?.topic !== topic) await reread;
+    } finally {
+      metadataCache.offref(ref);
+    }
   }
 
   async setPinnedAt(fileId: string, pinnedAt: number | null): Promise<void> {
-    // A row whose note was moved or deleted must fail the pin instead of showing a pin that was never written.
+    await this.patchExistingNote(fileId, { pinnedAt });
+  }
+
+  async setArchivedAt(fileId: string, archivedAt: number | null): Promise<void> {
+    await this.patchExistingNote(fileId, { archivedAt });
+  }
+
+  private async patchExistingNote(
+    fileId: string,
+    updates: Record<string, number | null>
+  ): Promise<void> {
+    // A row whose note was moved or deleted must fail a pin or archive instead of showing a flag that was never written.
     // https://github.com/logancyang/obsidian-copilot/issues/3195
     if (!(this.app.vault.getAbstractFileByPath(fileId) instanceof TFile)) {
       throw new Error(`Chat note not found: ${fileId}`);
     }
-    await patchFrontmatter(this.app, fileId, { pinnedAt });
+    await patchFrontmatter(this.app, fileId, updates);
   }
 
   async deleteFile(fileId: string): Promise<void> {
@@ -243,7 +271,7 @@ export class AgentChatPersistenceManager {
           m.message.length === 0 && m.fanout
             ? serializeFanoutComposite(m.fanout, (id) => id)
             : m.message;
-        return `**${m.sender}**: ${body}\n[Timestamp: ${ts}]`;
+        return `${formatChatNoteMessage(m.sender, body)}\n[Timestamp: ${ts}]`;
       })
       .join("\n\n");
   }
@@ -409,7 +437,7 @@ export class AgentChatPersistenceManager {
       ["backendId", `backendId: ${args.backendId}`],
       ["projectId", projectId === GLOBAL_SCOPE ? null : quoted("projectId", projectId)],
       ["sessionId", quoted("sessionId", args.sessionId)],
-      ["agentLabel", quoted("agentLabel", args.label)],
+      ["topic", quoted("topic", args.label)],
       ["modelKey", quoted("modelKey", args.modelKey)],
       ["usage", args.usage ? `usage: '${JSON.stringify(args.usage)}'` : undefined],
       ["tags", `tags:\n  - ${COPILOT_CONVERSATION_TAG}`],

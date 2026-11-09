@@ -2,6 +2,8 @@
 
 Context is the material Copilot gives an AI with your request. Choose the shortest lifetime that fits the job:
 
+Clicking a PDF page citation in a chat opens the target page at its top while keeping your current zoom. Citations to selected text, annotations, or an explicit position keep their original destination.
+
 | Context type                     | How long it lasts                                 |
 | -------------------------------- | ------------------------------------------------- |
 | Agent Chat attachment or mention | The next message                                  |
@@ -47,7 +49,7 @@ The manual selection command is available from the command palette or an assigne
 
 For text selected in the Web Viewer, run **Add web selection to chat context**. Copilot sends the selected excerpt together with the active web tab it came from.
 
-Selected text in notes is automatically added to chat context as you select it in Reading or Edit view, and stays attached when you move to chat. Reading view selections show the note path without line numbers. On desktop, this also works with Web Viewer selections. Review or remove the selection badge before sending.
+Selected text in notes is automatically added to chat context as you select it in Reading or Edit view, and stays attached when you move to chat. Reading view selections show the note path without line numbers. On desktop, this also works with Web Viewer selections. Text selected in a PDF or in an agent turn's diff tab, and shapes selected in an Excalidraw drawing, are attached the same way. Review or remove the selection badge before sending.
 
 ## Mention other agents
 

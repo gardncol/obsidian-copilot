@@ -9,24 +9,22 @@ function skillMd(name: string): string {
 
 describe("obsidianSkills", () => {
   describe("OBSIDIAN_SKILLS", () => {
-    it("offers the four skills to every agent but defaults them to OpenCode, and Bases also to Codex, the agents the eval showed they help (https://github.com/Brevilabs/obsidian-copilot-private/issues/726)", () => {
+    it("offers the three skills to every agent but defaults Markdown to every agent, Bases to Codex and OpenCode, and Canvas to OpenCode, the agents the eval showed they help; Claude broke Mermaid semicolons without Markdown (https://github.com/Brevilabs/obsidian-copilot-private/issues/726, https://github.com/logancyang/obsidian-copilot/issues/3868)", () => {
       expect(OBSIDIAN_SKILLS.map((skill) => [skill.name, skill.defaultPreference])).toEqual([
-        ["obsidian-markdown", { disabledAgents: ["claude", "codex"] }],
+        ["obsidian-markdown", undefined],
         ["obsidian-bases", { disabledAgents: ["claude"] }],
         ["json-canvas", { disabledAgents: ["claude", "codex"] }],
-        ["obsidian-cli", { disabledAgents: ["claude", "codex"] }],
       ]);
       for (const skill of OBSIDIAN_SKILLS) {
         expect(skill.skillMd).toContain(`copilot-builtin-version: "${skill.version}"`);
       }
     });
 
-    it("bumps the Markdown and CLI skill versions so existing vaults reseed their corrected guidance (https://github.com/Brevilabs/obsidian-copilot-private/issues/726)", () => {
+    it("bumps every skill whose guidance or description changed so existing vaults reseed it (https://github.com/Brevilabs/obsidian-copilot-private/issues/726, https://github.com/logancyang/obsidian-copilot/issues/3868, https://github.com/logancyang/obsidian-copilot/issues/3666, https://github.com/logancyang/obsidian-copilot/issues/3980)", () => {
       expect(OBSIDIAN_SKILLS.map((skill) => [skill.name, skill.version])).toEqual([
-        ["obsidian-markdown", 2],
-        ["obsidian-bases", 2],
-        ["json-canvas", 2],
-        ["obsidian-cli", 3],
+        ["obsidian-markdown", 5],
+        ["obsidian-bases", 3],
+        ["json-canvas", 3],
       ]);
     });
 
@@ -81,26 +79,41 @@ describe("obsidianSkills", () => {
       );
     });
 
-    it("names the Markdown syntax that should trigger the skill and puts a list's block ID between blank lines (https://github.com/Brevilabs/obsidian-copilot-private/issues/726)", () => {
+    it("names the Markdown syntax that should trigger the skill and puts a list's block ID between blank lines (https://github.com/Brevilabs/obsidian-copilot-private/issues/726, https://github.com/logancyang/obsidian-copilot/issues/3980)", () => {
       const md = skillMd("obsidian-markdown");
-      expect(md).toMatch(
-        /description:[^\n]*block IDs[^\n]*Load before adding or changing any of these in a note\./
-      );
+      const { description } = parseSkillFile(md, "obsidian-markdown").frontmatter;
+      for (const job of [
+        "wikilinks",
+        "block IDs (^id) with block and list embeds",
+        "heading embeds",
+        "callouts",
+        "properties and frontmatter",
+        "Load before adding or changing any of these in a note",
+      ]) {
+        expect(description).toContain(job);
+      }
       expect(md).not.toContain("ordinary Markdown is assumed knowledge");
       expect(md).toContain(
         "Put a block ID on its own line after a list or quote block, with a blank line\nbefore and after it; without the line before it marks only the last item."
       );
     });
 
-    it("explains how template insertion fills the title and date placeholders (https://github.com/Brevilabs/obsidian-copilot-private/issues/726)", () => {
-      const md = skillMd("obsidian-cli");
-      expect(md).toContain("<code>create path=&lt;new note&gt; template=&lt;name&gt;</code>");
+    it("escapes pipes inside table math and keeps scripted $$ replacements literal, the two math forms agents still broke on current text (https://github.com/logancyang/obsidian-copilot/issues/3868)", () => {
+      const md = skillMd("obsidian-markdown");
       expect(md).toContain(
-        "<code>{{title}}</code> becomes the new note's full file name without\n  extension"
+        "In a table, write a pipe inside math as <code>\\lvert</code>/<code>\\rvert</code>\n  and anywhere else as <code>\\|</code>; a bare <code>|</code> starts a new column."
       );
+      expect(md).toContain("| Absolute value | $\\lvert x \\rvert$ |");
       expect(md).toContain(
-        "<code>{{date}}</code> and <code>{{time}}</code> become the\n  current date and time"
+        "(JavaScript <code>replace</code> turns <code>$$</code> into <code>$</code>)"
       );
+    });
+
+    it("writes a semicolon in a Mermaid message as #59; and loads before any Mermaid diagram, since a bare one ends the statement (https://github.com/logancyang/obsidian-copilot/issues/3868)", () => {
+      const md = skillMd("obsidian-markdown");
+      const { description } = parseSkillFile(md, "obsidian-markdown").frontmatter;
+      expect(description).toContain("before drawing a Mermaid diagram in a note or a reply");
+      expect(md).toContain("Copilot->>Vault: Write the TL#59;DR");
     });
 
     it("keeps example wikilinks inside code fences so installed skills add no unresolved links to the vault (https://github.com/Brevilabs/obsidian-copilot-private/issues/726)", () => {
@@ -121,8 +134,12 @@ describe("obsidianSkills", () => {
       }
     });
 
-    it("documents that Bases sorts only by properties listed in the view's order, and rounds day counts (https://github.com/Brevilabs/obsidian-copilot-private/issues/726)", () => {
+    it("documents that Bases sorts only by properties listed in the view's order, and rounds day counts (https://github.com/Brevilabs/obsidian-copilot-private/issues/726, https://github.com/logancyang/obsidian-copilot/issues/3980)", () => {
       const md = skillMd("obsidian-bases");
+      const { description } = parseSkillFile(md, "obsidian-bases").frontmatter;
+      expect(description).toContain("formulas");
+      expect(description).toContain("the columns a view shows (order) and its row sorting (sort)");
+      expect(description).toContain("Load before writing or changing any .base file");
       expect(md).toContain("    sort:\n      - property: due\n        direction: ASC");
       expect(md).toContain(
         "Obsidian sorts only by properties that are also listed in\n<code>order</code>, so include every sort property there."
@@ -161,76 +178,14 @@ describe("obsidianSkills", () => {
       );
     });
 
-    it("uses the CLI only for Obsidian runtime, index, and developer capabilities", () => {
-      const md = skillMd("obsidian-cli");
-      expect(md).toMatch(/description:[^\n]*currently open notes and tabs/);
-      expect(md).toContain("COPILOT_OBSIDIAN_CLI");
-      expect(md).toContain('obsidian_cli="${COPILOT_OBSIDIAN_CLI:-obsidian}"');
-      expect(md).toContain('"$obsidian_cli" version');
-      expect(md).toContain("& $obsidianCli version");
-      expect(md).toContain("always invoke it as a quoted executable");
-      expect(md).toContain("Use the selected executable in place");
-      expect(md).toContain("probe must exit\nsuccessfully");
-      expect(md).toContain("obsidian help <command>");
-      expect(md).toContain("Settings → General → Command line\ninterface");
-      expect(md).toContain('obsidian vault="My Vault"');
-      expect(md).toContain("property:set");
-      expect(md).toContain("base:query");
-      expect(md).toContain("template:read ... resolve title=");
-      expect(md).toContain('obsidian vault="My Vault" tabs ids');
-      expect(md).toContain('obsidian vault="My Vault" workspace ids');
-      expect(md).toContain("Keep entries\nverbatim");
-      expect(md).toContain("a Markdown note has an explicit vault path ending");
-      expect(md).toContain("another file-backed tab has an explicit vault path");
-      expect(md).toContain("a non-file view, such as search, graph, settings, or a plugin view");
-      expect(md).toContain("Do not infer a path from a display title, view type, or tab ID");
-      expect(md).toContain("do not\ndiscard entries that cannot be classified");
-      expect(md).toContain("app.workspace.iterateAllLeaves");
-      expect(md).toContain("app.workspace.getMostRecentLeaf()");
-      expect(md).toContain("leaf.getDisplayText()");
-      expect(md).toContain("leaf.view.getViewType()");
-      expect(md).toContain('endsWith(".md")');
-      expect(md).toContain("Only call an entry\nan open tab when its ID appears");
-      expect(md).toContain("sidebar and floating leaves");
-      expect(md).toContain("Preserve tab entries that have no\nmatching workspace entry");
-      expect(md).toContain("getMostRecentLeaf()?.view.file?.path");
-      expect(md).toContain("substitute <code>recents</code>");
-      expect(md).toContain(
-        "Use normal filesystem tools only for explicit paths returned by Obsidian"
+    it("triggers the Canvas skill for any .canvas file, including file cards that show one section or block of a note (https://github.com/logancyang/obsidian-copilot/issues/3980)", () => {
+      const md = skillMd("json-canvas");
+      const { description } = parseSkillFile(md, "json-canvas").frontmatter;
+      expect(description).toContain(
+        "file cards that show one section or block of a note (subpath)"
       );
-      expect(md).toContain("commands filter=");
-      expect(md).toContain("plugin:reload");
-      expect(md).toContain("For a plugin other than Copilot");
-      expect(md).toContain("Never reload the\n   Copilot plugin");
-      expect(md).toContain("dev:errors");
-      expect(md).toContain("dev:screenshot");
-      expect(md).toContain("dev:dom");
-      expect(md).toContain("dev:css");
-      expect(md).toContain("dev:mobile");
-      expect(md).toContain("Preserve the host session");
-      expect(md).toContain("any CLI command that reloads or restarts the app");
-      expect(md).toContain("any plugin reload, disable, or uninstall operation targeting Copilot");
-      expect(md).toContain("any restricted-mode change");
-      expect(md).toContain("command ID, JavaScript expression, or CDP call");
-      expect(md).toContain("hard prohibition, not a confirmation-gated operation");
-      expect(md).toContain("manually after the agent session has ended");
-      expect(md).toContain("Risky operations require explicit intent");
-      expect(md).toContain("permanent deletion");
-      expect(md).toContain("mutating JavaScript evaluation or CDP calls");
-      expect(md).toContain("Explicit intent does not override the host-session prohibition");
-      expect(md).not.toContain("- restarting Obsidian");
-      expect(md).not.toContain("- changing restricted mode");
-      expect(md).not.toContain("obsidian reload");
-      expect(md).not.toContain("obsidian restart");
-      expect(md).not.toContain("plugin:reload id=copilot");
-      expect(md).not.toContain("plugin:disable id=copilot");
-      expect(md).not.toContain("plugin:uninstall id=copilot");
-      expect(md).not.toContain("plugins:restrict on");
-      expect(md).toContain("Use normal shell\nfilesystem tools");
-      expect(md).not.toContain("obsidian read file=");
-      expect(md).not.toContain("obsidian create name=");
-      expect(md).not.toContain("obsidian search query=");
-      expect(md).not.toContain(" silent ");
+      expect(description).toContain("Load before writing or changing any .canvas file");
+      expect(md).toContain("Vault file; optional <code>subpath</code>");
     });
   });
 });

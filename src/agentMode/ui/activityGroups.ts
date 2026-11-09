@@ -1,6 +1,9 @@
+import type React from "react";
+import type { App } from "obsidian";
 import type { RenderNode, ThoughtPart, ToolCallPart } from "@/agentMode/ui/agentTrail";
+import type { AgentTasksContextValue } from "@/agentMode/ui/AgentTasksContext";
+import { TOOL_CARD_KINDS } from "@/agentMode/ui/toolCardKinds";
 import { pluralize } from "@/agentMode/ui/toolSummaries";
-import { miyoSearchRun } from "@/miyo/agentMode/miyoSearchRun";
 import { formatDuration } from "@/lib/duration";
 
 export type ActivityMember =
@@ -13,34 +16,60 @@ export interface ActivityGroupNode {
   members: ActivityMember[];
 }
 
-export type GroupedTrailNode = RenderNode | ActivityGroupNode;
-
-function isInteractive(part: ToolCallPart): boolean {
-  // A submitted response must remain visible after its action card closes.
-  // https://github.com/Brevilabs/obsidian-copilot-private/issues/551
-  if (part.userResponse) return true;
-  if (part.mcpServer) return false;
-  const name = part.vendorToolName;
-  return (
-    part.toolKind === "switch_mode" ||
-    name === "AskUserQuestion" ||
-    name === "ExitPlanMode" ||
-    name === "EnterPlanMode"
-  );
+export interface ToolCardContext {
+  tasks: AgentTasksContextValue | null;
 }
+
+export interface ToolCardRenderContext extends ToolCardContext {
+  app: App;
+  open: boolean;
+  onToggle: () => void;
+  renderCall: (part: ToolCallPart) => React.ReactNode;
+}
+
+export interface ToolCardPlacement {
+  joinKey: string | null;
+}
+
+export interface ToolCardKind {
+  place: (part: ToolCallPart, ctx: ToolCardContext) => ToolCardPlacement | null;
+  render: (members: readonly ToolCallPart[], ctx: ToolCardRenderContext) => React.ReactNode;
+}
+
+export interface ToolCardNode {
+  type: "toolCard";
+  kind: ToolCardKind;
+  members: ToolCallPart[];
+}
+
+export type GroupedTrailNode = RenderNode | ActivityGroupNode | ToolCardNode;
 
 const EMPTY_GROUPED_TRAIL = Object.freeze([]) as unknown as GroupedTrailNode[];
 
-const NEVER_STANDALONE = () => false;
+const NO_TOOL_CARD_CONTEXT: ToolCardContext = Object.freeze({ tasks: null });
+
+function placeToolCard(
+  part: ToolCallPart,
+  ctx: ToolCardContext,
+  kinds: readonly ToolCardKind[]
+): { kind: ToolCardKind; joinKey: string | null } | null {
+  for (const kind of kinds) {
+    const placement = kind.place(part, ctx);
+    if (placement) return { kind, joinKey: placement.joinKey };
+  }
+  return null;
+}
 
 export function foldActivityGroups(
   nodes: RenderNode[],
-  isStandalone: (part: ToolCallPart) => boolean = NEVER_STANDALONE
+  ctx: ToolCardContext = NO_TOOL_CARD_CONTEXT,
+  kinds: readonly ToolCardKind[] = TOOL_CARD_KINDS
 ): GroupedTrailNode[] {
   if (nodes.length === 0) return EMPTY_GROUPED_TRAIL;
   const out: GroupedTrailNode[] = [];
   let run: ActivityMember[] = [];
   let groupCount = 0;
+  let openCard: { node: ToolCardNode; joinKey: string } | null = null;
 
   const flush = () => {
     if (run.length === 0) return;
@@ -52,24 +81,32 @@ export function foldActivityGroups(
     run = [];
   };
 
+  // Two calls share a card only when the second's kind gives it the open card's join key before the open card ends.
+  // Plain calls and thoughts fold into the activity group and leave it open; every other node ends it: a message, plan,
+  // compaction, sub-agent, or another tool card. https://github.com/Brevilabs/obsidian-copilot-private/issues/793
+  const endOpenCard = () => {
+    openCard = null;
+  };
+
   for (const node of nodes) {
-    switch (node.type) {
-      case "reasoning":
-        run.push(node);
-        break;
-      case "action":
-        // A grouped Miyo search would be hidden behind "Ran N commands".
-        // https://github.com/Brevilabs/obsidian-copilot-private/issues/718
-        if (isInteractive(node.part) || miyoSearchRun(node.part) || isStandalone(node.part)) {
-          flush();
-          out.push(node);
-        } else {
-          run.push(node);
-        }
-        break;
-      default:
-        flush();
-        out.push(node);
+    const call = node.type === "action" ? node.part : node.type === "subagent" ? node.parent : null;
+    const placed = call && placeToolCard(call, ctx, kinds);
+    if (call && placed) {
+      if (openCard?.node.kind === placed.kind && openCard.joinKey === placed.joinKey) {
+        openCard.node.members.push(call);
+        continue;
+      }
+      flush();
+      endOpenCard();
+      const card: ToolCardNode = { type: "toolCard", kind: placed.kind, members: [call] };
+      out.push(card);
+      if (placed.joinKey !== null) openCard = { node: card, joinKey: placed.joinKey };
+    } else if (node.type === "action" || node.type === "reasoning") {
+      run.push(node);
+    } else {
+      flush();
+      endOpenCard();
+      out.push(node);
     }
   }
   flush();

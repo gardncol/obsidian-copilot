@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowUpRight,
   Check,
   Edit2,
+  FileText,
   LoaderCircle,
   MessageCircle,
   Power,
@@ -33,6 +33,7 @@ export interface ChatHistoryItem {
   projectId?: string;
   needsAttention?: boolean;
   pinnedAt?: number;
+  archivedAt?: number;
 }
 
 type ChatHistoryIconResolver = (
@@ -505,8 +506,8 @@ function ChatHistoryItem({
                   size="sm"
                   variant="ghost"
                   className="tw-size-5 tw-p-0"
-                  aria-label="Close chat"
-                  title="Close chat"
+                  aria-label="Shut down"
+                  title="Shut down"
                   onClick={(event) => {
                     event.stopPropagation();
                     safeAsyncHandler(onCloseSession)(chat.id);
@@ -525,9 +526,9 @@ function ChatHistoryItem({
                   }
                 }}
                 className="tw-size-5 tw-p-0"
-                title="Open the source file"
+                title="Open chat note"
               >
-                <ArrowUpRight className="tw-size-4" />
+                <FileText className="tw-size-3.5" />
               </Button>
 
               <Button

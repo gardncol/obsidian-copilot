@@ -7,7 +7,7 @@ import type {
   PermissionPrompt,
   QueuedPrompt,
 } from "@/agentMode/session/types";
-import type { FeedbackOffer } from "@/agentMode/session/feedback/feedbackOffer";
+import type { ChatStates } from "@/agentMode/session/chatExtension";
 import type { AgentTask } from "@/agentMode/session/AgentSession";
 import { useEffect, useRef, useState } from "react";
 
@@ -15,12 +15,13 @@ export interface AgentChatRuntimeState {
   messages: AgentChatMessage[];
   isStarting: boolean;
   isTurnInFlight: boolean;
+  isReplyRunning: boolean;
   hasPendingPlanPermission: boolean;
   currentPlan: CurrentPlan | null;
   currentTodoList: AgentTodoListEntry[] | null;
   pendingToolPermissions: PermissionPrompt[];
   pendingAskUserQuestions: AskUserQuestionPrompt[];
-  feedbackOffer: FeedbackOffer | null;
+  chatStates: ChatStates;
   queuedPrompts: readonly QueuedPrompt[];
   tasks: readonly AgentTask[];
 }
@@ -37,12 +38,13 @@ function readBackendRuntimeSnapshot(backend: AgentChatBackend): BackendRuntimeSn
       messages: backend.getMessages(),
       isStarting: backend.isStarting(),
       isTurnInFlight: backend.isTurnInFlight(),
+      isReplyRunning: backend.isReplyRunning(),
       hasPendingPlanPermission: backend.hasPendingPlanPermission(),
       currentPlan: backend.getCurrentPlan(),
       currentTodoList: backend.getCurrentTodoList(),
       pendingToolPermissions: backend.getPendingToolPermissions(),
       pendingAskUserQuestions: backend.getPendingAskUserQuestions(),
-      feedbackOffer: backend.getFeedbackOffer(),
+      chatStates: backend.getChatStates(),
       queuedPrompts: backend.getQueuedPrompts(),
       tasks: backend.getTasks(),
     },

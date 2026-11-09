@@ -30,7 +30,11 @@ jest.mock("@/services/settingsPersistence", () => ({
   resetPersistenceState: jest.fn(),
 }));
 jest.mock("@/logFileManager", () => ({
-  logFileManager: { flush: jest.fn().mockResolvedValue(undefined), setApp: jest.fn() },
+  logFileManager: {
+    clear: jest.fn().mockResolvedValue(undefined),
+    flush: jest.fn().mockResolvedValue(undefined),
+    setApp: jest.fn(),
+  },
 }));
 jest.mock("@/settings/migrations", () => ({ runSettingsMigrations: jest.fn() }));
 jest.mock("@/settings/migrations/legacyIndexRemovalMigration", () => ({
@@ -71,31 +75,37 @@ jest.mock("@/agentMode", () => ({
   registerTurnDiffCommands: jest.fn(),
   acpFrameSink: { narrowLegacyLogs: jest.fn(async () => undefined) },
   createAgentSessionManager: jest.fn(() => ({})),
+  MAX_PROVIDED_TOOL_NAME_LENGTH: 41,
 }));
 jest.mock("@/agentMode/agentModelDiscovery", () => ({ wireAgentModelDiscovery: jest.fn() }));
+jest.mock("@/connectors/connectionManager");
+jest.mock("@/connectors/custom/customConnectors");
 
 import CopilotPlugin from "@/main";
+import { BrevilabsClient } from "@/LLMProviders/brevilabsClient";
+import * as obsidianModule from "obsidian";
 import CopilotView from "@/components/CopilotView";
-import { getSelectedTextContexts, setSelectedTextContexts } from "@/aiParams";
-import { DEFAULT_SETTINGS } from "@/constants";
+import { getSelectedTextContexts } from "@/selection/selectionStore";
+import { DEFAULT_SETTINGS, EVENT_NAMES } from "@/constants";
 import {
   APPLY_VIEW_TYPE,
   CHAT_AGENT_VIEWTYPE,
   CHAT_VIEWTYPE,
   PLAN_PREVIEW_VIEW_TYPE,
   RELEVANT_NOTES_VIEWTYPE,
+  SESSIONS_SIDEBAR_VIEWTYPE,
   TURN_DIFF_VIEW_TYPE,
 } from "@/constants";
 import { StartupLoadingView } from "@/components/StartupLoadingView";
 import { settingsAtom, settingsStore } from "@/settings/model";
 import type { WebSelectionTrackingOptions } from "@/services/webViewerService/webViewerServiceSelection";
-import { EditorView } from "@codemirror/view";
-import type { Extension, StateField } from "@codemirror/state";
-import { editorInfoField, type MarkdownFileInfo } from "obsidian";
 
 const mockStartSelectionTracker = jest.fn();
 const mockSelectionTrackerOptions = jest.fn();
 jest.mock("@/services/webViewerService/webViewerServiceSelection", () => ({
+  ...jest.requireActual<typeof import("@/services/webViewerService/webViewerServiceSelection")>(
+    "@/services/webViewerService/webViewerServiceSelection"
+  ),
   WebSelectionTracker: class {
     constructor(options: WebSelectionTrackingOptions) {
       mockSelectionTrackerOptions(options);
@@ -114,6 +124,9 @@ import { isDesktopRuntime } from "@/utils/desktopRuntime";
 import { disposeNotificationSound } from "@/utils/notificationSound";
 import { findChatFileByDeepLinkId } from "@/utils/chatDeepLink";
 import { Notice, TFile, type WorkspaceLeaf } from "obsidian";
+import { ConnectionManager } from "@/connectors/connectionManager";
+import { ConnectorTools } from "@/connectors/connectorTools";
+import { CustomConnectors } from "@/connectors/custom/customConnectors";
 
 function createPluginUnderTest(calls: string[]) {
   const plugin = Object.create(CopilotPlugin.prototype) as CopilotPlugin;
@@ -237,151 +250,6 @@ describe("main", () => {
       });
     });
 
-    describe("initSelectionHandler()", () => {
-      beforeEach(() => {
-        jest.useFakeTimers();
-        setSelectedTextContexts([]);
-      });
-      afterEach(() => {
-        jest.useRealTimers();
-        setSelectedTextContexts([]);
-      });
-
-      it("attaches Reading view text after the debounce even when chat takes the selection first, then clears it in the note (https://github.com/Brevilabs/obsidian-copilot-private/issues/597)", () => {
-        const preview = document.createElement("div");
-        preview.textContent = "Excerpt from the note";
-        const chat = document.createElement("div");
-        chat.textContent = "Chat input";
-        document.body.append(preview, chat);
-        const noteView = {
-          file: { path: "Research.md", basename: "Research" },
-          getMode: () => "preview",
-          previewMode: { containerEl: preview },
-        };
-        const cleanups: Array<() => void> = [];
-        const plugin = Object.create(CopilotPlugin.prototype) as CopilotPlugin;
-        Object.assign(plugin, {
-          registerEditorExtension: jest.fn(),
-          registerDomEvent: (doc: Document, event: string, handler: EventListener) => {
-            doc.addEventListener(event, handler);
-            cleanups.push(() => doc.removeEventListener(event, handler));
-          },
-          registerEvent: jest.fn(),
-          app: { workspace: { getActiveViewOfType: () => noteView, on: jest.fn() } },
-        });
-        const select = (node: Node, end: number) => {
-          const range = document.createRange();
-          range.setStart(node, 0);
-          range.setEnd(node, end);
-          const selection = document.getSelection()!;
-          selection.removeAllRanges();
-          selection.addRange(range);
-          document.dispatchEvent(new Event("selectionchange"));
-        };
-
-        plugin.initSelectionHandler();
-        select(preview.firstChild!, 7);
-        select(chat.firstChild!, 0);
-        expect(getSelectedTextContexts()).toEqual([]);
-        jest.advanceTimersByTime(500);
-        expect(getSelectedTextContexts()).toEqual([
-          expect.objectContaining({
-            content: "Excerpt",
-            notePath: "Research.md",
-            startLine: 0,
-            endLine: 0,
-          }),
-        ]);
-
-        select(preview.firstChild!, 0);
-        jest.advanceTimersByTime(500);
-        expect(getSelectedTextContexts()).toEqual([]);
-
-        document.getSelection()!.removeAllRanges();
-        cleanups.forEach((cleanup) => cleanup());
-        preview.remove();
-        chat.remove();
-      });
-
-      it("attaches and clears a note excerpt from the focused editor's own note after the debounce (https://github.com/Brevilabs/obsidian-copilot-private/issues/597)", () => {
-        let extension: Extension | undefined;
-        const plugin = Object.create(CopilotPlugin.prototype) as CopilotPlugin;
-        Object.assign(plugin, {
-          registerEditorExtension: (value: Extension) => {
-            extension = value;
-          },
-          registerDomEvent: jest.fn(),
-          registerEvent: jest.fn(),
-          app: { workspace: { on: jest.fn() } },
-        });
-        plugin.initSelectionHandler();
-        const noteInfo = {
-          file: { path: "Research.md", basename: "Research" },
-          editor: {
-            listSelections: () => [
-              {
-                anchor: { line: 0, ch: cm.state.selection.main.anchor },
-                head: { line: 0, ch: cm.state.selection.main.head },
-              },
-            ],
-            getSelection: () =>
-              cm.state.sliceDoc(cm.state.selection.main.from, cm.state.selection.main.to),
-          },
-        } as unknown as MarkdownFileInfo;
-        const cm = new EditorView({
-          doc: "Excerpt from the note",
-          parent: document.body,
-          extensions: [
-            extension!,
-            (editorInfoField as unknown as StateField<unknown>).init(() => noteInfo),
-          ],
-        });
-
-        cm.focus();
-        cm.dispatch({ selection: { anchor: 0, head: 3 } });
-        cm.dispatch({ selection: { anchor: 0, head: 7 } });
-        jest.advanceTimersByTime(500);
-        expect(getSelectedTextContexts()).toEqual([
-          expect.objectContaining({ content: "Excerpt", notePath: "Research.md" }),
-        ]);
-
-        cm.dispatch({ selection: { anchor: 7 } });
-        jest.advanceTimersByTime(500);
-        expect(getSelectedTextContexts()).toEqual([]);
-        cm.destroy();
-      });
-    });
-
-    describe("handleSelectionChange()", () => {
-      it("automatically attaches a note excerpt even when the retired preferences were saved as false", () => {
-        settingsStore.set(settingsAtom, {
-          ...DEFAULT_SETTINGS,
-          ...{ autoAddSelectionToContext: false, autoIncludeTextSelection: false },
-        });
-        setSelectedTextContexts([]);
-        const plugin = Object.create(CopilotPlugin.prototype) as CopilotPlugin;
-
-        plugin.handleSelectionChange({
-          file: { path: "Research.md", basename: "Research" },
-          editor: {
-            listSelections: () => [{ anchor: { line: 1, ch: 0 }, head: { line: 2, ch: 7 } }],
-            getSelection: () => "An excerpt from the note.",
-          },
-        } as unknown as MarkdownFileInfo);
-
-        expect(getSelectedTextContexts()).toEqual([
-          expect.objectContaining({
-            content: "An excerpt from the note.",
-            sourceType: "note",
-            notePath: "Research.md",
-            startLine: 2,
-            endLine: 3,
-          }),
-        ]);
-        setSelectedTextContexts([]);
-      });
-    });
-
     describe("initWebSelectionWatcher()", () => {
       it("enables desktop web selection tracking even when the retired preference was saved as false", () => {
         settingsStore.set(settingsAtom, {
@@ -400,6 +268,82 @@ describe("main", () => {
         expect(options.isEnabled()).toBe(true);
         expect(mockStartSelectionTracker).toHaveBeenCalled();
         (isDesktopRuntime as jest.Mock).mockReturnValue(false);
+      });
+
+      it("attaches a web tab's selection and clears it once the tab deselects it", () => {
+        (isDesktopRuntime as jest.Mock).mockReturnValue(true);
+        const plugin = Object.create(CopilotPlugin.prototype) as CopilotPlugin;
+        Object.assign(plugin, { app: {} });
+        plugin.initWebSelectionWatcher();
+        const options = mockSelectionTrackerOptions.mock.calls.at(
+          -1
+        )![0] as WebSelectionTrackingOptions;
+        const quote = {
+          id: "web-1",
+          content: "Quote",
+          sourceType: "web" as const,
+          title: "Page",
+          url: "https://example.com/",
+        };
+
+        options.onSelectionChange(quote);
+        expect(getSelectedTextContexts()).toEqual([quote]);
+
+        options.onSelectionClear({ url: quote.url, reason: "selection-cleared" });
+        expect(getSelectedTextContexts()).toEqual([]);
+        (isDesktopRuntime as jest.Mock).mockReturnValue(false);
+      });
+    });
+
+    describe("newChat()", () => {
+      function createNewChatPlugin(leaf: WorkspaceLeaf) {
+        const plugin = createPluginUnderTest([]);
+        const revealLeaf = jest.fn();
+        const chatUIState = { clearMessages: jest.fn() };
+        Object.assign(plugin, {
+          chatUIState,
+          app: { workspace: { getLeavesOfType: jest.fn(() => [leaf]), revealLeaf } },
+        });
+        return { plugin, revealLeaf, chatUIState };
+      }
+
+      beforeEach(() => {
+        jest.clearAllMocks();
+        settingsStore.set(settingsAtom, {
+          ...DEFAULT_SETTINGS,
+          autosaveChat: true,
+          enableRecentConversations: false,
+        });
+      });
+
+      it("saves the open Quick Chat, stops its stream, clears it, and shows the empty chat", async () => {
+        const view = Object.assign(Object.create(CopilotView.prototype) as CopilotView, {
+          saveChat: jest.fn().mockResolvedValue(undefined),
+          updateView: jest.fn(),
+          eventTarget: { dispatchEvent: jest.fn() },
+        });
+        const leaf = { view } as unknown as WorkspaceLeaf;
+        const { plugin, revealLeaf, chatUIState } = createNewChatPlugin(leaf);
+
+        await plugin.newChat();
+
+        expect(view.saveChat).toHaveBeenCalled();
+        expect(view.eventTarget.dispatchEvent).toHaveBeenCalledWith(
+          expect.objectContaining({ type: EVENT_NAMES.ABORT_STREAM })
+        );
+        expect(chatUIState.clearMessages).toHaveBeenCalled();
+        expect(view.updateView).toHaveBeenCalled();
+        expect(revealLeaf).toHaveBeenCalledWith(leaf);
+      });
+
+      it("shows a Quick Chat tab restored in the background, whose view is still deferred, instead of failing https://github.com/logancyang/obsidian-copilot/issues/3543", async () => {
+        const leaf = { view: { getViewType: () => CHAT_VIEWTYPE } } as unknown as WorkspaceLeaf;
+        const { plugin, revealLeaf, chatUIState } = createNewChatPlugin(leaf);
+
+        await expect(plugin.newChat()).resolves.toBeUndefined();
+
+        expect(chatUIState.clearMessages).toHaveBeenCalled();
+        expect(revealLeaf).toHaveBeenCalledWith(leaf);
       });
     });
 
@@ -621,6 +565,48 @@ describe("main", () => {
         return { promise, resolve };
       }
 
+      it.each([
+        ["Unknown", "4.0.16"],
+        ["4.0.15", "4.0.17-beta.2+build.42"],
+      ])(
+        "sends the manifest version %s → %s before async startup completes",
+        async (previous, version) => {
+          const client = BrevilabsClient.getInstance();
+          client.setPluginVersion(previous);
+          const settings = deferred();
+          const { plugin, finishStartup } = createLoadingPlugin(() => settings.promise);
+          plugin.manifest.version = version;
+          const request = jest.fn().mockResolvedValue({
+            status: 503,
+            headers: {},
+            text: "",
+            json: null,
+            arrayBuffer: new ArrayBuffer(0),
+          });
+
+          const { __setRequestUrlImpl: setRequestUrlImpl } = obsidianModule as unknown as {
+            __setRequestUrlImpl: (impl: unknown) => void;
+          };
+          setRequestUrlImpl(request);
+
+          try {
+            plugin.onload();
+            await client.getModels();
+
+            expect(request).toHaveBeenCalledWith(
+              expect.objectContaining({
+                method: "GET",
+                headers: { "X-Client-Version": version },
+              })
+            );
+          } finally {
+            settings.resolve();
+            await finishStartup();
+            setRequestUrlImpl(jest.fn().mockResolvedValue({ status: 200 }));
+          }
+        }
+      );
+
       it("returns before settings load so Obsidian can open the vault without waiting for Copilot https://github.com/logancyang/obsidian-copilot/issues/3518", () => {
         const settings = deferred();
         const { plugin, registrations } = createLoadingPlugin(() => settings.promise);
@@ -652,7 +638,7 @@ describe("main", () => {
         expect(openRegisteredView(CHAT_VIEWTYPE)).toBeInstanceOf(StartupLoadingView);
       });
 
-      it("also registers the Agent Chat, plan preview, and turn diff views up front on desktop https://github.com/logancyang/obsidian-copilot/issues/3518", () => {
+      it("also registers the Agent Chat, sessions sidebar, plan preview, and turn diff views up front on desktop https://github.com/logancyang/obsidian-copilot/issues/3518", () => {
         (isDesktopRuntime as jest.Mock).mockReturnValue(true);
         const settings = deferred();
         const { plugin, registrations } = createLoadingPlugin(() => settings.promise);
@@ -664,6 +650,7 @@ describe("main", () => {
           APPLY_VIEW_TYPE,
           RELEVANT_NOTES_VIEWTYPE,
           CHAT_AGENT_VIEWTYPE,
+          SESSIONS_SIDEBAR_VIEWTYPE,
           PLAN_PREVIEW_VIEW_TYPE,
           TURN_DIFF_VIEW_TYPE,
         ]);
@@ -696,6 +683,57 @@ describe("main", () => {
         expect(startActiveWebTabTracking).toHaveBeenCalledWith(plugin.app, {
           preserveOnViewTypes: [CHAT_VIEWTYPE, CHAT_AGENT_VIEWTYPE],
         });
+      });
+
+      it("starts the connection manager and its connector tools on desktop, checks connector logins once, and disposes the manager with the plugin", async () => {
+        (isDesktopRuntime as jest.Mock).mockReturnValue(true);
+        (startActiveWebTabTracking as jest.Mock).mockReturnValue({
+          activeLeafRef: {},
+          layoutRef: {},
+        });
+        const { plugin, registrations, finishStartup } = createLoadingPlugin();
+
+        plugin.onload();
+        await finishStartup();
+
+        const manager = jest.mocked(ConnectionManager).mock.instances[0];
+        expect(plugin.connectionManager).toBe(manager);
+        expect(plugin.connectorTools).toBeInstanceOf(ConnectorTools);
+        expect(manager.checkStatus).toHaveBeenCalledTimes(1);
+        expect(manager.dispose).not.toHaveBeenCalled();
+        for (const [cleanup] of registrations.register.mock.calls) (cleanup as () => void)();
+        expect(manager.dispose).toHaveBeenCalledTimes(1);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/862 gives the plugin custom connectors on desktop and stops their servers when the plugin unloads", async () => {
+        (isDesktopRuntime as jest.Mock).mockReturnValue(true);
+        (startActiveWebTabTracking as jest.Mock).mockReturnValue({
+          activeLeafRef: {},
+          layoutRef: {},
+        });
+        const { plugin, registrations, finishStartup } = createLoadingPlugin();
+
+        plugin.onload();
+        await finishStartup();
+
+        const custom = jest.mocked(CustomConnectors).mock.instances[0];
+        expect(plugin.customConnectors).toBe(custom);
+        expect(jest.mocked(ConnectionManager).mock.calls[0][0].custom).toBe(custom);
+        expect(custom.dispose).not.toHaveBeenCalled();
+        for (const [cleanup] of registrations.register.mock.calls) (cleanup as () => void)();
+        expect(custom.dispose).toHaveBeenCalledTimes(1);
+      });
+
+      it("starts no connection manager on mobile, where connector logins cannot run", async () => {
+        const { plugin, finishStartup } = createLoadingPlugin();
+
+        plugin.onload();
+        await finishStartup();
+
+        expect(ConnectionManager).not.toHaveBeenCalled();
+        expect(plugin.connectionManager).toBeUndefined();
+        expect(plugin.connectorTools).toBeUndefined();
+        expect(plugin.customConnectors).toBeUndefined();
       });
 
       it.each([

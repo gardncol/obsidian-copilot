@@ -12,12 +12,13 @@ import type { ResizeDirection } from "@/hooks/use-resizable";
 
 const PANEL_MARGIN = 12;
 const PANEL_OFFSET_Y = 6;
-const PANEL_DEFAULT_WIDTH_RATIO = 0.83;
-const PANEL_MAX_WIDTH_RATIO = 0.9;
-const PANEL_DEFAULT_WIDTH_MAX = 420;
-const PANEL_MAX_WIDTH_MAX = 560;
+const PANEL_DEFAULT_WIDTH = 420;
 const PANEL_MIN_WIDTH = 300;
 const PANEL_MIN_HEIGHT = 200;
+
+export function getDefaultPanelWidth(hostWidth: number): number {
+  return Math.min(PANEL_DEFAULT_WIDTH, hostWidth - PANEL_MARGIN * 2);
+}
 
 interface AnchorRect {
   left: number;
@@ -64,7 +65,7 @@ export class QuickAskOverlay {
   private isResizing = false;
   private resizeDirection: ResizeDirection | null = null;
   private resizeStartRect: DOMRect | null = null;
-  private resizeStartMouse: { x: number; y: number } | null = null;
+  private resizeStartMouse: { x: number; y: number; pointerId: number } | null = null;
   private resizeRafId: number | null = null;
 
   constructor(private readonly options: QuickAskOverlayOptions) {}
@@ -445,14 +446,7 @@ export class QuickAskOverlay {
 
     const { bottomRect, topRect, focusRect } = this.resolveVisibleAnchors(hostRect, scrollRect);
 
-    const defaultWidth = Math.min(
-      PANEL_DEFAULT_WIDTH_MAX,
-      viewportWidth * PANEL_DEFAULT_WIDTH_RATIO
-    );
-    const maxWidth = Math.min(PANEL_MAX_WIDTH_MAX, viewportWidth * PANEL_MAX_WIDTH_RATIO);
-    const minWidth = Math.min(PANEL_MIN_WIDTH, viewportWidth - PANEL_MARGIN * 2);
-    const panelWidth =
-      this.resizeSize?.width ?? Math.max(minWidth, Math.min(defaultWidth, maxWidth));
+    const panelWidth = this.resizeSize?.width ?? getDefaultPanelWidth(viewportWidth);
     const panelHeight = this.resizeSize?.height;
 
     const contentLeft =
@@ -537,7 +531,7 @@ export class QuickAskOverlay {
 
   private handleResizeStart = (
     direction: ResizeDirection,
-    start: { x: number; y: number }
+    start: { x: number; y: number; pointerId: number }
   ): void => {
     if (this.isResizing) return;
 
@@ -561,12 +555,15 @@ export class QuickAskOverlay {
     body.setCssProps({ "--copilot-resize-cursor": cursorMap[direction] ?? "default" });
     body.classList.add("tw-select-none", "tw-cursor-[var(--copilot-resize-cursor)]");
 
-    doc.addEventListener("mousemove", this.handleResizeMove, true);
-    doc.addEventListener("mouseup", this.handleResizeEnd, true);
+    doc.addEventListener("pointermove", this.handleResizeMove, true);
+    doc.addEventListener("pointerup", this.handleResizeEnd, true);
+    doc.addEventListener("pointercancel", this.handleResizeEnd, true);
   };
 
-  private handleResizeMove = (e: MouseEvent): void => {
+  private handleResizeMove = (e: PointerEvent): void => {
     if (!this.isResizing || !this.resizeStartRect || !this.resizeStartMouse) return;
+    // Ignore other touches so a second finger cannot move, resize, or release the panel. https://github.com/Brevilabs/obsidian-copilot-private/issues/798
+    if (e.pointerId !== this.resizeStartMouse.pointerId) return;
 
     const win = this.ownerWindow ?? window;
 
@@ -580,7 +577,8 @@ export class QuickAskOverlay {
     });
   };
 
-  private handleResizeEnd = (): void => {
+  private handleResizeEnd = (e: PointerEvent): void => {
+    if (e.pointerId !== this.resizeStartMouse?.pointerId) return;
     this.cleanupResize();
     this.renderPanel();
   };
@@ -596,8 +594,9 @@ export class QuickAskOverlay {
     if (this.isResizing) {
       const doc = this.ownerDocument ?? activeDocument;
       const body = doc.body;
-      doc.removeEventListener("mousemove", this.handleResizeMove, true);
-      doc.removeEventListener("mouseup", this.handleResizeEnd, true);
+      doc.removeEventListener("pointermove", this.handleResizeMove, true);
+      doc.removeEventListener("pointerup", this.handleResizeEnd, true);
+      doc.removeEventListener("pointercancel", this.handleResizeEnd, true);
       body.classList.remove("tw-select-none", "tw-cursor-[var(--copilot-resize-cursor)]");
       body.setCssProps({ "--copilot-resize-cursor": "" });
     }
@@ -710,17 +709,7 @@ export class QuickAskOverlay {
     const doc = this.ownerDocument ?? activeDocument;
     const hostRect = this.overlayHost?.getBoundingClientRect() ?? doc.body.getBoundingClientRect();
 
-    const viewportWidth = hostRect.width;
-
-    const defaultWidth = Math.min(
-      PANEL_DEFAULT_WIDTH_MAX,
-      viewportWidth * PANEL_DEFAULT_WIDTH_RATIO
-    );
-    const maxWidth = Math.min(PANEL_MAX_WIDTH_MAX, viewportWidth * PANEL_MAX_WIDTH_RATIO);
-    const minWidth = Math.min(PANEL_MIN_WIDTH, viewportWidth - PANEL_MARGIN * 2);
-
-    const panelWidth =
-      this.resizeSize?.width ?? Math.max(minWidth, Math.min(defaultWidth, maxWidth));
+    const panelWidth = this.resizeSize?.width ?? getDefaultPanelWidth(hostRect.width);
     const panelHeight = this.resizeSize?.height;
 
     updateDynamicStyleClass(this.overlayContainer, "copilot-quick-ask-overlay-pos", {

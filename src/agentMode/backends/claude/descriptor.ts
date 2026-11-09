@@ -212,7 +212,6 @@ export const ClaudeBackendDescriptor: ClaudeDescriptor = {
   midTurnDelivery: true,
   withdraw: true,
   stopTask: true,
-  processPerChat: true,
   agentProductName: "Claude Code",
   wire: claudeWire,
   showModelDescriptions: true,
@@ -352,7 +351,7 @@ export const ClaudeBackendDescriptor: ClaudeDescriptor = {
         assertClaudeVersionSupported(claudePath, claudeChildEnv(getSettings())),
       isPlanModePlanFilePath: isClaudePlanModePlanFilePath,
       getDefaultModelId: () => getSettings().agentMode?.backends?.claude?.defaultModel?.baseModelId,
-      getSystemPromptAppend: () => buildAgentSystemPrompt("claude"),
+      getSystemPromptAppend: () => buildAgentSystemPrompt("claude", args.app),
     });
   },
 
@@ -366,6 +365,8 @@ export const ClaudeBackendDescriptor: ClaudeDescriptor = {
         plan: "plan",
         auto: resolveClaudeAutoModePermission(getSettings()),
       },
+      // A mode Claude switches to on its own, such as accepting edits after an "Allow always", has no picker choice and shows as Auto rather than as no mode. https://github.com/Brevilabs/obsidian-copilot-private/issues/870
+      unlistedModeShowsAs: "auto",
     };
   },
 

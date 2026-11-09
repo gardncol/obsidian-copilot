@@ -25,10 +25,6 @@ export function isSelfHostModeValid(): boolean {
   return getSettings().enableSelfHostMode === true && hasVerifiedFeature("self_host");
 }
 
-export function isPreviewEnabled(): boolean {
-  return hasVerifiedFeature("preview");
-}
-
 function isPlusModel(modelKey: string): boolean {
   const settings = getSettings();
   const configuredModel = settings.configuredModels.find(
@@ -55,7 +51,7 @@ export function isUsingLicensedModels(settings: CopilotSettings): boolean {
   });
 }
 
-function isEntitlementExpired(settings: CopilotSettings): boolean {
+export function isEntitlementExpired(settings: CopilotSettings): boolean {
   return settings.entitlementExpiresAt > 0 && Date.now() >= settings.entitlementExpiresAt;
 }
 
@@ -92,15 +88,13 @@ function setVerified(next: VerifiedEntitlement): void {
   verifiedListeners.forEach((listener) => listener());
 }
 
-function subscribeToVerifiedEntitlement(listener: () => void): () => void {
+export function subscribeToEntitlementChange(listener: () => void): () => void {
   verifiedListeners.add(listener);
+  const unsubscribeSettings = subscribeToSettingsChange(listener);
   return () => {
     verifiedListeners.delete(listener);
+    unsubscribeSettings();
   };
-}
-
-function getVerifiedEntitlement(): VerifiedEntitlement {
-  return verified;
 }
 
 function hasLiveEntitlement(): boolean {
@@ -112,50 +106,33 @@ function hasLiveEntitlement(): boolean {
   );
 }
 
-function hasVerifiedFeature(feature: EntitlementFeature): boolean {
+export function hasVerifiedFeature(feature: EntitlementFeature): boolean {
   return hasLiveEntitlement() && verified.features.has(feature);
 }
 
-export function isPlusEnabled(): boolean {
-  const settings = getSettings();
-  if (settings.entitlementExpiresAt > 0) {
-    return hasVerifiedFeature("multi_agent");
-  }
-  return settings.isPlusUser === true;
+export function isEntitlementVerificationPending(): boolean {
+  const { entitlementToken } = getSettings();
+  return entitlementToken !== "" && verified.token !== entitlementToken;
 }
 
 export function useIsPaidUser(): boolean | undefined {
   return useSettingsValue().isPaidUser;
 }
 
-function useIsPlusUser(): boolean | undefined {
-  const settings = useSettingsValue();
-  if (isEntitlementExpired(settings)) {
-    return false;
-  }
-  return settings.isPlusUser;
-}
-
-export async function ensureMultiAgentEntitlement(app?: App): Promise<boolean> {
-  if (isPlusEnabled()) {
-    return true;
-  }
-  await BrevilabsClient.getInstance().validateLicenseKey(app, {
-    trigger: "multi_agent_per_turn",
-  });
-  return isPlusEnabled();
-}
-
-export function showMultiAgentUpgradePrompt(): void {
-  new Notice(
-    "Multi-agent answers (@-mentioning more than one agent in a message) are a Copilot Plus feature. Opening the upgrade page…",
-    8000
-  );
-  navigateToPlusPage("multi_agent");
-}
-
-export function useCanUseMultiAgent(): boolean {
-  return useIsPlusUser() === true;
+export async function ensureEntitlement(
+  app: App | undefined,
+  feature: EntitlementFeature,
+  isGranted: () => boolean
+): Promise<boolean> {
+  const granted = isGranted();
+  const check = BrevilabsClient.getInstance()
+    .validateLicenseKey(app, { trigger: feature })
+    .catch((error) => logInfo(`License check for ${feature} unreachable:`, error));
+  // Every use checks the license so usage is counted and the token renewed; only a missing grant waits for the fresh token.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/834
+  if (granted) return true;
+  await check;
+  return isGranted();
 }
 
 export async function checkIsPaidUser(
@@ -203,12 +180,6 @@ export function useLicenseState(): LicenseState {
   return settings.isPaidUser === true && !isEntitlementExpired(settings)
     ? UNNAMED_ACTIVE_LICENSE
     : INACTIVE_LICENSE;
-}
-
-export function useIsPreviewEnabled(): boolean {
-  useSettingsValue();
-  React.useSyncExternalStore(subscribeToVerifiedEntitlement, getVerifiedEntitlement);
-  return isPreviewEnabled();
 }
 
 export function useIsSelfHostEligible(): boolean | undefined {

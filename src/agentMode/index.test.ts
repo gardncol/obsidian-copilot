@@ -4,10 +4,13 @@ import type { CopilotSettings } from "@/settings/model";
 import type { InstallState } from "./session/types";
 import type { BuiltinSkillRuntime } from "./skills/SkillManager";
 import { createAgentSessionManager, isCopilotToolOn } from "./index";
+import { trackTabStripShown } from "./ui/trackTabStripShown";
 import { AgentSessionManager } from "./session/AgentSessionManager";
 import { reconcileBuiltinSkills } from "./skills/builtin/reconcileBuiltinSkills";
 import { BackendConfigRegistry } from "@/modelManagement";
 import { isObsidianCliEnabled } from "@/services/obsidianCli/ObsidianCliClient";
+import { createCopilotMcpServer } from "./session/copilotMcpServer";
+import { isConnectorsEnabled } from "@/connectors/connectorsEntitlement";
 
 jest.mock("@/constants", () => ({}));
 jest.mock("@/logger", () => ({ logError: jest.fn() }));
@@ -35,8 +38,8 @@ jest.mock("@/utils/appPaths", () => ({
   getVaultId: () => "test-vault",
 }));
 jest.mock("./backends/shared/agentSystemPrompt", () => ({
-  buildAgentSystemPrompt: (id: string) =>
-    `prompt:${id}:${JSON.stringify(mockSettings.agentMode.skills.builtinPreferences ?? {})}:${mockSettings.agentMode.offerFeedbackCards}:${mockSettings.enableMiyoSearchSkill}:${mockSettings.enableMiyoDocumentProcessing}`,
+  buildAgentSystemPrompt: (id: string, app: { plugins?: { getPlugin(id: string): unknown } }) =>
+    `prompt:${id}:${JSON.stringify(mockSettings.agentMode.skills.builtinPreferences ?? {})}:${mockSettings.agentMode.offerFeedbackCards}:${mockSettings.enableMiyoSearchSkill}:${mockSettings.enableMiyoDocumentProcessing}:${app.plugins?.getPlugin("obsidian-excalidraw-plugin") != null}:${jest.requireMock<typeof import("@/services/obsidianCli/ObsidianCliClient")>("@/services/obsidianCli/ObsidianCliClient").isObsidianCliEnabled()}`,
 }));
 jest.mock("./backends/shared/builtinSkillEnv", () => ({
   getBuiltinSkillEnvRestartPolicy: () => "none",
@@ -55,6 +58,10 @@ jest.mock("./session/AgentSessionManager", () => ({
   AgentSessionManager: jest.fn(() => mockManager),
 }));
 jest.mock("./session/copilotDefaultModel", () => ({ seedCopilotDefaultModel: jest.fn() }));
+jest.mock("./session/copilotMcpServer", () => {
+  const actual = jest.requireActual("./session/copilotMcpServer");
+  return { ...actual, createCopilotMcpServer: jest.fn(actual.createCopilotMcpServer) };
+});
 jest.mock("./skills", () => ({
   SkillManager: {
     initialize: (_app: App, _dirs: unknown, runtime: BuiltinSkillRuntime) => {
@@ -76,7 +83,10 @@ jest.mock("./ui/permissionPrompter", () => ({
   createDefaultAskUserQuestionPrompter: jest.fn(),
 }));
 jest.mock("./ui/CopilotAgentView", () => ({}));
+jest.mock("./navigator/openSessionsSidebar", () => ({}));
+jest.mock("./navigator/ui/SessionsSidebarView", () => ({}));
 jest.mock("./ui/useBackendDescriptor", () => ({}));
+jest.mock("./ui/trackTabStripShown", () => ({ trackTabStripShown: jest.fn() }));
 jest.mock("./backends/opencode/opencodeProbePartition", () => ({}));
 jest.mock("./backends/opencode/opencodeModelResolve", () => ({}));
 jest.mock("./ui/AgentDefaultModelSetting", () => ({}));
@@ -86,8 +96,21 @@ jest.mock("./ui/ReportIssueModal", () => ({}));
 jest.mock("./session/debugSink", () => ({}));
 jest.mock("./backends/shared/ui/AgentBackendHeader", () => ({}));
 jest.mock("./session/useBackendAuthState", () => ({}));
+jest.mock("@/connectors/connectorsEntitlement", () => ({ isConnectorsEnabled: jest.fn() }));
 
 const ISSUE = "https://github.com/logancyang/obsidian-copilot/issues/3022";
+
+function connectorCardsExtension() {
+  return jest
+    .mocked(AgentSessionManager)
+    .mock.calls[0][2].chatExtensions?.find(({ key }) => key.id === "connector-cards");
+}
+
+function connectorCardNote(serviceId: string): string | undefined {
+  return connectorCardsExtension()?.beforePrompt?.([
+    { serviceId, afterUserTurn: 1, dismissed: false, reported: null },
+  ])?.note;
+}
 const LINEUP_ISSUE = "https://github.com/Brevilabs/obsidian-copilot-private/issues/319";
 const RELOAD_ISSUE = "https://github.com/Brevilabs/obsidian-copilot-private/issues/475";
 type SettingsSubscriber = (prev: CopilotSettings, next: CopilotSettings) => void;
@@ -169,6 +192,7 @@ describe("agentMode", () => {
       mockSettingsSubscribers.length = 0;
       mockSettings = settingsWith({ reasoning: true });
       plugin = {
+        manifest: { id: "copilot" },
         modelManagement: {
           providerRegistry: { subscribe: jest.fn() },
           backendConfigRegistry: new BackendConfigRegistry(
@@ -177,6 +201,12 @@ describe("agentMode", () => {
           ),
         },
       } as unknown as CopilotPlugin;
+    });
+
+    it("tells the manager whether a tab strip holds its chats as the workspace layout changes for https://github.com/Brevilabs/obsidian-copilot-private/issues/849", () => {
+      const manager = createAgentSessionManager({} as App, plugin);
+
+      expect(trackTabStripShown).toHaveBeenCalledWith(plugin, manager);
     });
 
     it("waits for each backend upgrade before preloading while other agents remain usable (https://github.com/Brevilabs/obsidian-copilot-private/issues/530)", async () => {
@@ -192,14 +222,43 @@ describe("agentMode", () => {
       expect(mockManager.preloadModels).toHaveBeenCalledWith("opencode");
     });
 
-    it("does not restart a backend for installation writes while its upgrade owns startup (https://github.com/Brevilabs/obsidian-copilot-private/issues/530)", async () => {
+    it("links skills for an agent its startup upgrade makes ready, without restarting it while the upgrade owns startup (https://github.com/Brevilabs/obsidian-copilot-private/issues/530, https://github.com/Brevilabs/obsidian-copilot-private/issues/830)", async () => {
       const upgrade = deferred();
+      mockStates.opencode = {
+        kind: "incompatible",
+        source: "managed",
+        currentVersion: "1",
+        minVersion: "2",
+        message: "Upgrade required",
+      };
       mockDescriptors[1].onPluginLoad.mockReturnValueOnce(upgrade.promise);
       createAgentSessionManager({} as App, plugin);
+      expect(reconcile).toHaveBeenLastCalledWith(
+        expect.objectContaining({ availableAgents: ["claude"] })
+      );
+      mockStates.opencode = { kind: "ready", source: "managed" };
       mockInstallListeners.opencode();
+      expect(reconcile).toHaveBeenLastCalledWith(
+        expect.objectContaining({ availableAgents: ["claude", "opencode"] })
+      );
       upgrade.resolve();
       await mockManager.registerPreload.mock.calls.find(([id]) => id === "opencode")![1];
       expect(mockManager.onInstallStateChanged).not.toHaveBeenCalled();
+    });
+    it("preloads an agent its startup upgrade makes ready only after that agent's skills are linked, while other agents preload without waiting (https://github.com/Brevilabs/obsidian-copilot-private/issues/830)", async () => {
+      const linked = deferred();
+      mockDescriptors[1].onPluginLoad.mockImplementationOnce(async () => {
+        mockStates.opencode = { kind: "ready", source: "managed" };
+        reconcile.mockReturnValueOnce(linked.promise);
+        mockInstallListeners.opencode();
+      });
+      createAgentSessionManager({} as App, plugin);
+      await mockManager.registerPreload.mock.calls.find(([id]) => id === "claude")![1];
+      expect(mockManager.preloadModels).toHaveBeenCalledWith("claude");
+      expect(mockManager.preloadModels).not.toHaveBeenCalledWith("opencode");
+      linked.resolve();
+      await mockManager.registerPreload.mock.calls.find(([id]) => id === "opencode")![1];
+      expect(mockManager.preloadModels).toHaveBeenCalledWith("opencode");
     });
     it("preloads a repaired installation after the upgrade makes it ready (https://github.com/Brevilabs/obsidian-copilot-private/issues/530)", async () => {
       mockStates.opencode = {
@@ -241,25 +300,42 @@ describe("agentMode", () => {
       }
     );
 
-    it("re-reconciles skills before an agent starts only when Obsidian's command line interface toggle changed since the last pass, and still starts the agent if that pass fails https://github.com/Brevilabs/obsidian-copilot-private/issues/726", async () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/833 offers a reload when Obsidian's command line interface is turned on between agent starts, so new chats gain the obsidian_cli steering, without re-reconciling skills", async () => {
       createAgentSessionManager({} as App, plugin);
       await mockManager.registerPreload.mock.calls[0][1];
       const { beforeBackendStart } = jest.mocked(AgentSessionManager).mock.calls[0][2];
       const passes = reconcile.mock.calls.length;
 
       await beforeBackendStart!("claude");
-      expect(reconcile).toHaveBeenCalledTimes(passes);
+      expect(mockManager.noteSpawnConfigChanged).not.toHaveBeenCalled();
 
       jest.mocked(isObsidianCliEnabled).mockReturnValue(true);
       await beforeBackendStart!("claude");
-      expect(reconcile).toHaveBeenCalledTimes(passes + 1);
+      expect(mockManager.noteSpawnConfigChanged).toHaveBeenCalledWith(
+        "opencode",
+        "system prompt changed"
+      );
+      expect(reconcile).toHaveBeenCalledTimes(passes);
+    });
 
-      await beforeBackendStart!("opencode");
-      expect(reconcile).toHaveBeenCalledTimes(passes + 1);
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/787 offers a reload when the Excalidraw plugin is turned on between agent starts, so new chats gain the Excalidraw steering, without re-reconciling skills", async () => {
+      let excalidraw: unknown = null;
+      const app = { plugins: { getPlugin: () => excalidraw } } as unknown as App;
+      createAgentSessionManager(app, plugin);
+      await mockManager.registerPreload.mock.calls[0][1];
+      const { beforeBackendStart } = jest.mocked(AgentSessionManager).mock.calls[0][2];
+      const passes = reconcile.mock.calls.length;
 
-      mockRefresh.mockRejectedValueOnce(new Error("Disk unavailable"));
-      jest.mocked(isObsidianCliEnabled).mockReturnValue(false);
-      await expect(beforeBackendStart!("opencode")).resolves.toBeUndefined();
+      await beforeBackendStart!("claude");
+      expect(mockManager.noteSpawnConfigChanged).not.toHaveBeenCalled();
+
+      excalidraw = { ea: { executeCLI: jest.fn() } };
+      await beforeBackendStart!("claude");
+      expect(mockManager.noteSpawnConfigChanged).toHaveBeenCalledWith(
+        "opencode",
+        "system prompt changed"
+      );
+      expect(reconcile).toHaveBeenCalledTimes(passes);
     });
 
     it(`settles new-agent skills before refreshing that agent's installation ${ISSUE}`, async () => {
@@ -377,6 +453,17 @@ describe("agentMode", () => {
       createAgentSessionManager({} as App, plugin);
 
       emitSettingsChange(settingsWith({ toolCall: true }), settingsWith({ toolCall: false }));
+
+      expect(mockManager.noteSpawnConfigChanged).toHaveBeenCalledWith(
+        "opencode",
+        "model config changed"
+      );
+    });
+
+    it("https://github.com/logancyang/obsidian-copilot/issues/3840 offers an OpenCode reload when an enabled model's context window changes", () => {
+      createAgentSessionManager({} as App, plugin);
+
+      emitSettingsChange(settingsWith({}), settingsWith({ limits: { context: 262144 } }));
 
       expect(mockManager.noteSpawnConfigChanged).toHaveBeenCalledWith(
         "opencode",
@@ -521,6 +608,76 @@ describe("agentMode", () => {
       );
     });
 
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/857 offers a reload to each agent the connector change affects, so its open chats can pick up the new tools", () => {
+      const toolSetListeners: Array<(affectsBackend: (backendId: string) => boolean) => void> = [];
+      createAgentSessionManager(
+        {} as App,
+        {
+          ...plugin,
+          connectorTools: {
+            subscribeToToolSetChange: (listener: (typeof toolSetListeners)[number]) => {
+              toolSetListeners.push(listener);
+              return () => {};
+            },
+          },
+        } as unknown as CopilotPlugin
+      );
+
+      toolSetListeners.forEach((listener) => listener((backendId) => backendId === "opencode"));
+
+      expect(mockManager.noteSpawnConfigChanged.mock.calls).toEqual([
+        ["opencode", "connectors changed"],
+      ]);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/860 offers agents suggest_connector on a device with connectors, and reports connected services in a chat's card outcomes", () => {
+      jest.mocked(isConnectorsEnabled).mockReturnValue(true);
+      createAgentSessionManager(
+        {} as App,
+        {
+          ...plugin,
+          connectionManager: {
+            getSnapshot: () => ({
+              connections: [
+                { id: "c1", serviceId: "notion", status: "connected" },
+                { id: "c2", serviceId: "linear", status: "needs-login" },
+              ],
+            }),
+          },
+        } as unknown as CopilotPlugin
+      );
+
+      const hosted = jest.mocked(createCopilotMcpServer).mock.calls[0][1];
+      expect(hosted.map(({ definition }) => definition.name)).toContain("suggest_connector");
+      expect(connectorCardNote("notion")).toContain("The user connected Notion.");
+      expect(connectorCardNote("linear")).toContain("without connecting Linear");
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/860 reports no service connected in a chat's card outcomes while the connectors entitlement is off, even with a stored login", () => {
+      jest.mocked(isConnectorsEnabled).mockReturnValue(false);
+      createAgentSessionManager(
+        {} as App,
+        {
+          ...plugin,
+          connectionManager: {
+            getSnapshot: () => ({
+              connections: [{ id: "c1", serviceId: "notion", status: "connected" }],
+            }),
+          },
+        } as unknown as CopilotPlugin
+      );
+
+      expect(connectorCardNote("notion")).toContain("without connecting Notion");
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/860 offers no suggest_connector or connector cards where connectors aren't available, such as mobile", () => {
+      createAgentSessionManager({} as App, plugin);
+
+      const hosted = jest.mocked(createCopilotMcpServer).mock.calls[0][1];
+      expect(hosted.map(({ definition }) => definition.name)).not.toContain("suggest_connector");
+      expect(connectorCardsExtension()).toBeUndefined();
+    });
+
     it(`retains only previously ready agents during compatibility checks ${ISSUE}`, async () => {
       createAgentSessionManager({} as App, plugin);
       await mockManager.registerPreload.mock.calls[0][1];
@@ -538,6 +695,13 @@ describe("agentMode", () => {
 });
 
 describe("isCopilotToolOn()", () => {
+  const appWith = (excalidraw: unknown): App =>
+    ({
+      plugins: {
+        getPlugin: (id: string) => (id === "obsidian-excalidraw-plugin" ? excalidraw : null),
+      },
+    }) as unknown as App;
+  const noExcalidraw = appWith(null);
   const off = (update: Partial<CopilotSettings>): CopilotSettings =>
     ({
       agentMode: { offerFeedbackCards: false },
@@ -549,10 +713,11 @@ describe("isCopilotToolOn()", () => {
     expect(
       isCopilotToolOn(
         "send_feedback",
-        off({ agentMode: { offerFeedbackCards: true } as CopilotSettings["agentMode"] })
+        off({ agentMode: { offerFeedbackCards: true } as CopilotSettings["agentMode"] }),
+        noExcalidraw
       )
     ).toBe(true);
-    expect(isCopilotToolOn("send_feedback", off({}))).toBe(false);
+    expect(isCopilotToolOn("send_feedback", off({}), noExcalidraw)).toBe(false);
   });
 
   it.each([
@@ -562,7 +727,9 @@ describe("isCopilotToolOn()", () => {
   ])(
     "https://github.com/Brevilabs/obsidian-copilot-private/issues/736 offers miyo_search when %s",
     (_state, enableMiyo, enableMiyoSearchSkill, on) => {
-      expect(isCopilotToolOn("miyo_search", off({ enableMiyo, enableMiyoSearchSkill }))).toBe(on);
+      expect(
+        isCopilotToolOn("miyo_search", off({ enableMiyo, enableMiyoSearchSkill }), noExcalidraw)
+      ).toBe(on);
     }
   );
 
@@ -573,13 +740,43 @@ describe("isCopilotToolOn()", () => {
   ])(
     "https://github.com/Brevilabs/obsidian-copilot-private/issues/740 offers miyo_parse when %s",
     (_state, enableMiyo, enableMiyoDocumentProcessing, on) => {
-      expect(isCopilotToolOn("miyo_parse", off({ enableMiyo, enableMiyoDocumentProcessing }))).toBe(
-        on
-      );
+      expect(
+        isCopilotToolOn(
+          "miyo_parse",
+          off({ enableMiyo, enableMiyoDocumentProcessing }),
+          noExcalidraw
+        )
+      ).toBe(on);
     }
   );
 
   it("https://github.com/Brevilabs/obsidian-copilot-private/issues/746 offers the OpenArtifacts tools to every user", () => {
-    expect(isCopilotToolOn("openartifacts_publish", off({ plusLicenseKey: "" }))).toBe(true);
+    expect(
+      isCopilotToolOn("openartifacts_publish", off({ plusLicenseKey: "" }), noExcalidraw)
+    ).toBe(true);
   });
+
+  it.each([
+    ["on", true],
+    ["off", false],
+  ])(
+    "https://github.com/Brevilabs/obsidian-copilot-private/issues/833 offers obsidian_cli only while Obsidian's command line interface is %s",
+    (_state, on) => {
+      jest.mocked(isObsidianCliEnabled).mockReturnValue(on);
+      expect(isCopilotToolOn("obsidian_cli", off({}), noExcalidraw)).toBe(on);
+    }
+  );
+
+  it.each([
+    ["Excalidraw 2.29 or later is enabled", { ea: { executeCLI: jest.fn() } }, true],
+    ["an Excalidraw older than 2.29 has no executeCLI", { ea: {} }, false],
+    ["Excalidraw is not enabled", null, false],
+  ])(
+    "https://github.com/Brevilabs/obsidian-copilot-private/issues/787 offers the Excalidraw tools when %s",
+    (_state, excalidraw, on) => {
+      for (const name of ["excalidraw_read", "excalidraw_render", "excalidraw_write"]) {
+        expect(isCopilotToolOn(name, off({}), appWith(excalidraw))).toBe(on);
+      }
+    }
+  );
 });

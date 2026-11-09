@@ -6,6 +6,8 @@ import type {
   SessionId,
 } from "@/agentMode/session/types";
 import AgentChatMessages from "@/agentMode/ui/AgentChatMessages";
+import type { ChatStates } from "@/agentMode/session/chatExtension";
+import type { FeedbackOffer } from "@/agentMode/session/feedback/feedbackOffer";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useApp } from "@/context";
 import type { Meta, StoryObj } from "@/lib/story";
@@ -65,6 +67,12 @@ const tallQuestion: AskUserQuestionPrompt = {
   ],
 };
 
+const NO_CHAT_STATES: ChatStates = new Map();
+
+function chatStatesWithOffer(offer: FeedbackOffer): ChatStates {
+  return new Map([["feedback-offer", offer]]);
+}
+
 const QueuedActionsDemo: React.FC<AgentChatMessagesProps> = (props) => {
   const app = useApp();
   const [pendingToolPermissions, setPendingToolPermissions] = useState(
@@ -95,7 +103,7 @@ const QueuedActionsDemo: React.FC<AgentChatMessagesProps> = (props) => {
       <div className="tw-h-96 tw-overflow-hidden">
         <AgentChatMessages
           {...props}
-          plugin={{ app, manifest: props.plugin.manifest }}
+          plugin={{ ...props.plugin, app } as AgentChatMessagesProps["plugin"]}
           pendingToolPermissions={pendingToolPermissions}
           pendingAskUserQuestions={pendingAskUserQuestions}
           chatBackend={chatBackend}
@@ -107,16 +115,13 @@ const QueuedActionsDemo: React.FC<AgentChatMessagesProps> = (props) => {
 
 const actionRailArgs: AgentChatMessagesProps = {
   messages: [message],
-  plugin: {
-    app: {} as AgentChatMessagesProps["plugin"]["app"],
-    manifest: { version: "4.1.0" } as AgentChatMessagesProps["plugin"]["manifest"],
-  },
+  plugin: { manifest: { version: "4.1.0" } } as AgentChatMessagesProps["plugin"],
   currentPlan: null,
   pendingToolPermissions: permissions,
   pendingAskUserQuestions: questions,
   chatBackend: {} as AgentChatBackend,
   isLoading: true,
-  feedbackOffer: null,
+  chatStates: NO_CHAT_STATES,
 };
 
 const meta = {
@@ -224,6 +229,95 @@ export const StoppedCommand: StoryObj<AgentChatMessagesProps> = {
       },
     ],
     isLoading: false,
+  },
+  render: (props) => <QueuedActionsDemo {...actionRailArgs} {...props} />,
+};
+
+export const AgentStoppedAfterDeclinedPermission: StoryObj<AgentChatMessagesProps> = {
+  args: {
+    ...actionRailArgs,
+    pendingToolPermissions: [],
+    pendingAskUserQuestions: [],
+    messages: [
+      {
+        ...message,
+        id: "hardware-request",
+        sender: "user",
+        message: "Save this Mac's hardware info to hardware.txt.",
+      },
+      {
+        ...message,
+        id: "declined-command",
+        message: "",
+        turnStopReason: "cancelled",
+        agentCancelCause: "permission_declined",
+        turnDurationMs: 24000,
+        parts: [
+          { kind: "text", text: "I'll ask for approval to write the report in the vault." },
+          {
+            kind: "tool_call",
+            id: "hardware-report",
+            title: "Run system_profiler SPHardwareDataType > hardware.txt",
+            status: "failed",
+            vendorToolName: "Bash",
+            input: { command: "system_profiler SPHardwareDataType > hardware.txt" },
+          },
+        ],
+      },
+    ],
+    isLoading: false,
+  },
+  render: (props) => <QueuedActionsDemo {...actionRailArgs} {...props} />,
+};
+
+export const AgentStoppedBeforeReplying: StoryObj<AgentChatMessagesProps> = {
+  args: {
+    ...actionRailArgs,
+    pendingToolPermissions: [],
+    pendingAskUserQuestions: [],
+    messages: [
+      {
+        ...message,
+        id: "summary-request",
+        sender: "user",
+        message: "Summarize this week's meeting notes.",
+      },
+      {
+        ...message,
+        id: "empty-cancelled-reply",
+        message: "",
+        turnStopReason: "cancelled",
+        agentCancelCause: "unspecified",
+        turnDurationMs: 3000,
+      },
+    ],
+    isLoading: false,
+  },
+  render: (props) => <QueuedActionsDemo {...actionRailArgs} {...props} />,
+};
+
+export const FinishedReplyWhileSubagentsRun: StoryObj<AgentChatMessagesProps> = {
+  args: {
+    ...actionRailArgs,
+    pendingToolPermissions: [],
+    pendingAskUserQuestions: [],
+    messages: [
+      {
+        ...message,
+        id: "launch-request",
+        sender: "user",
+        message: "Research both vendors in parallel and compare them when you're done.",
+      },
+      {
+        ...message,
+        id: "launch-reply",
+        message:
+          "I started two subagents, one per vendor. I'll compare them once both report back.",
+        turnStopReason: "end_turn",
+        turnDurationMs: 13_000,
+      },
+    ],
+    isLoading: true,
   },
   render: (props) => <QueuedActionsDemo {...actionRailArgs} {...props} />,
 };
@@ -386,7 +480,8 @@ export const FeedbackAfterFileChanges: StoryObj<AgentChatMessagesProps> = {
         ],
       },
     ],
-    feedbackOffer: {
+    chatStates: chatStatesWithOffer({
+      trigger: "agent",
       draft: {
         title: "Deleted a section when asked to tidy a note",
         whatHappened: "Asked to tidy a note, the agent removed its whole second section.",
@@ -401,7 +496,7 @@ export const FeedbackAfterFileChanges: StoryObj<AgentChatMessagesProps> = {
       },
       afterUserMessageId: "complaint",
       status: "open",
-    },
+    }),
     isLoading: false,
   },
   render: (props) => <QueuedActionsDemo {...actionRailArgs} {...props} />,

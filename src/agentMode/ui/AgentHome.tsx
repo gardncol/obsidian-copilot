@@ -9,6 +9,7 @@ import AgentContextSection, { buildContextSummary } from "@/agentMode/ui/AgentCo
 import { AgentLandingStack } from "@/agentMode/ui/AgentLandingStack";
 import { CreateProjectPanel } from "@/agentMode/ui/CreateProjectPanel";
 import { AgentModeStatus } from "@/agentMode/ui/AgentModeStatus";
+import { ConnectorsAttentionBanner } from "@/agentMode/ui/ConnectorsAttentionBanner";
 import { AgentProjectHeader } from "@/agentMode/ui/AgentProjectHeader";
 import { ProjectInfoPopover } from "@/agentMode/ui/ProjectInfoPopover";
 import { AgentTabStrip } from "@/agentMode/ui/AgentTabStrip";
@@ -17,22 +18,29 @@ import { QueuedMessageList } from "@/agentMode/ui/QueuedMessageList";
 import { RunningTasksIndicator } from "@/agentMode/ui/RunningTasksIndicator";
 import { TaskDetailView } from "@/agentMode/ui/TaskDetailView";
 import { taskDisplayStatus } from "@/agentMode/ui/taskDisplay";
-import { AgentWelcomeCard } from "@/agentMode/ui/AgentWelcomeCard";
 import { AgentHomeReleaseUpdate } from "@/components/release-update/AgentHomeReleaseUpdate";
 import { RelevantNotes } from "@/components/chat-components/RelevantNotes";
 import { CopilotBrandIcon } from "@/components/ui/CopilotBrandIcon";
+import {
+  nextProjectLandingPlacement,
+  type ProjectLandingPlacement,
+} from "@/agentMode/ui/projectLandingPlacement";
 import { AgentHomeShelf, type AgentHomeShelfSection } from "@/agentMode/ui/AgentHomeShelf";
+import { ArchivedChatsModal, createProjectArchiveActions } from "@/agentMode/ui/ArchivedChatsModal";
 import { GlobalRecentChatsSection } from "@/agentMode/ui/GlobalRecentChatsSection";
 import {
   getHomeShelfTab,
   setHomeShelfTab,
   HOME_SHELF_TAB_STORAGE_KEY,
 } from "@/agentMode/ui/homeShelfPrefs";
+import { leaveDeletedProject } from "@/agentMode/ui/AgentProjectRowActions";
 import { ProjectPickerList } from "@/agentMode/ui/ProjectPickerList";
 import { RelevantNotesShelfPanel } from "@/agentMode/ui/RelevantNotesShelfPanel";
 import { useRelevantNotesPaneOpen } from "@/agentMode/ui/useRelevantNotesPaneOpen";
 import { useAgentChatRuntimeState } from "@/agentMode/ui/hooks/useAgentChatRuntimeState";
 import { useManagerSetSnapshot } from "@/agentMode/ui/hooks/useManagerSetSnapshot";
+import { openSessionsSidebar } from "@/agentMode/navigator/openSessionsSidebar";
+import { useSessionsSidebarOpen } from "@/agentMode/navigator/hooks/useSessionsSidebarOpen";
 import { useAgentHistoryControls } from "@/agentMode/ui/hooks/useAgentHistoryControls";
 import { useAgentInputDrafts } from "@/agentMode/ui/hooks/useAgentInputDrafts";
 import { useAttentionChatIds } from "@/agentMode/ui/hooks/useAttentionChatIds";
@@ -48,7 +56,7 @@ import type { AgentChatBackend } from "@/agentMode/session/AgentChatBackend";
 import type { AgentSessionManager } from "@/agentMode/session/AgentSessionManager";
 import { GLOBAL_SCOPE } from "@/agentMode/session/scope";
 import { type ProjectConfig } from "@/aiParams";
-import { makeNewProjectConfig } from "@/agentMode/ui/AgentProjectCreateForm";
+import { createProjectAndEnter } from "@/agentMode/ui/AgentProjectCreateForm";
 import { TruncatedText } from "@/components/TruncatedText";
 import { AppContext } from "@/context";
 import { ChatInputProvider } from "@/context/ChatInputContext";
@@ -58,8 +66,13 @@ import { logError, logWarn } from "@/logger";
 import type CopilotPlugin from "@/main";
 import { ProjectFileManager } from "@/projects/ProjectFileManager";
 import { getProjectLandingCaptureSignature } from "@/projects/projectContextSignature";
-import { getCachedProjectRecordById, useProjects } from "@/projects/state";
-import { getSettings, updateSetting, useSettingsValue } from "@/settings/model";
+import {
+  getCachedProjectRecordById,
+  useActiveProjects,
+  useArchivedProjects,
+  useProjects,
+} from "@/projects/state";
+import { useSettingsValue } from "@/settings/model";
 import { FileSearch, Files, Folder, MessageSquare } from "lucide-react";
 import { Notice } from "obsidian";
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
@@ -90,6 +103,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
   const app = plugin.app || appContext;
   const settings = useSettingsValue();
   const isRelevantNotesPaneOpen = useRelevantNotesPaneOpen(app);
+  const sidebarOpen = useSessionsSidebarOpen(app);
   const draft = useAgentInputDrafts({ store: manager.drafts, chatInputId });
 
   useChatInputAutoFocus();
@@ -103,11 +117,13 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     currentTodoList,
     pendingToolPermissions,
     pendingAskUserQuestions,
-    feedbackOffer,
+    chatStates,
     queuedPrompts,
     tasks,
+    isReplyRunning,
   } = useAgentChatRuntimeState(backend);
   const isLoading = draft.loading || isTurnInFlight;
+  const replyRunning = draft.loading || isReplyRunning;
 
   const [rootEl, setRootEl] = useState<HTMLDivElement | null>(null);
   const [openedTask, setOpenedTask] = useState<{ sessionId: string; toolCallId: string } | null>(
@@ -161,7 +177,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     const oldId = active.internalId;
     void (async () => {
       try {
-        await manager.replaceSessionInPlace(oldId, active.backendId);
+        await manager.startNewChatInPlace(oldId, active.backendId);
       } catch (e) {
         logError("[AgentMode] new chat failed", e);
         new Notice("Failed to start a new chat. Please try again.");
@@ -175,6 +191,9 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
   }, [descriptor, plugin]);
 
   const projects = useProjects();
+  const activeProjects = useActiveProjects();
+  const archivedProjects = useArchivedProjects();
+  const archivedProjectKey = archivedProjects.map((project) => project.id).join("\n");
   const projectNamesById = useMemo<Readonly<Record<string, string>>>(() => {
     if (projects.length === 0) return EMPTY_PROJECT_NAMES_BY_ID;
     return Object.fromEntries(projects.map((project) => [project.id, project.name]));
@@ -205,12 +224,14 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
 
   const {
     chatHistoryItems,
+    archivedChatItems,
     chatHistorySettled,
     loadChatHistory: handleLoadChatHistory,
     loadChat: handleLoadChat,
     updateChatTitle: handleUpdateChatTitle,
     deleteChat: handleDeleteChat,
     setChatPinned: handleSetChatPinned,
+    setChatArchived: handleSetChatArchived,
     openSourceFile: handleOpenSourceFile,
     copyChatLink: handleCopyHistoryChatLink,
     getChatBookmarkState,
@@ -225,7 +246,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       } catch (error) {
         logError("[AgentMode] close chat session failed", error);
         new Notice(
-          `Could not close chat: ${error instanceof Error ? error.message : "Try again."}`
+          `Could not shut down chat: ${error instanceof Error ? error.message : "Try again."}`
         );
       }
     },
@@ -234,9 +255,31 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
 
   const handleLoadChatHistorySafely = safeAsyncHandler(handleLoadChatHistory);
 
+  const handleViewArchived = useCallback(
+    () =>
+      new ArchivedChatsModal(app, archivedChatItems, isProjectScope ? [] : archivedProjects, {
+        onUnarchive: (id) => handleSetChatArchived(id, false),
+        onOpen: handleLoadChat,
+        ...createProjectArchiveActions(app, manager),
+      }).open(),
+    [
+      app,
+      manager,
+      isProjectScope,
+      archivedChatItems,
+      archivedProjects,
+      handleSetChatArchived,
+      handleLoadChat,
+    ]
+  );
+
   const openChatIds = useManagerSetSnapshot(manager, (m) => m.getOpenChatIds());
   const runningChatIds = useRunningChatIds(manager);
   const attentionChatIds = useAttentionChatIds(manager);
+
+  const handleOpenSessionsSidebar = useCallback(() => {
+    openSessionsSidebar(plugin).catch((e) => logError("[AgentMode] open sidebar failed", e));
+  }, [plugin]);
 
   const handleExitProject = useCallback(() => {
     manager.exitProject().catch((e) => {
@@ -246,13 +289,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
   }, [manager]);
 
   const handleProjectDeleted = useCallback(
-    (deletedId: string) => {
-      if (manager.getActiveProjectId() === deletedId) {
-        manager.exitProject().catch((e) => {
-          logError("[AgentMode] exit after delete failed", e);
-        });
-      }
-    },
+    (deletedId: string) => leaveDeletedProject(manager, deletedId),
     [manager]
   );
 
@@ -273,22 +310,11 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
 
   const persistCreateProject = useCallback(
     async ({ name }: { name: string }) => {
-      const project = makeNewProjectConfig(name);
-      try {
-        await ProjectFileManager.getInstance(app).createProject(project);
-        await manager.enterProject(project.id);
-      } catch (e) {
-        logError("[AgentMode] create project failed", e);
-        throw e;
-      }
+      await createProjectAndEnter(app, manager, name);
       setCreateAnchor(null);
     },
     [app, manager]
   );
-
-  const handleDismissWelcome = useCallback(() => {
-    updateSetting("agentMode", { ...getSettings().agentMode, welcomeDismissed: true });
-  }, []);
 
   useEffect(() => {
     if (isOrphanedProject) new Notice("This project no longer exists.");
@@ -330,9 +356,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       draft.queue.length === 0;
     if (!draftEmpty) return false;
     try {
-      await manager.replaceSessionInPlace(active.internalId, active.backendId, {
-        preserveChatInput: true,
-      });
+      await manager.replaceSessionInPlace(active.internalId, active.backendId);
       return true;
     } catch (e) {
       logError("[AgentMode] refresh landing context failed", e);
@@ -360,20 +384,14 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
   });
 
   const landingVisitKey = isProjectLanding ? `${activeProjectId}\0${sessionId}` : null;
-  const placementRef = useRef<{ key: string; standalone: boolean } | null>(null);
-  if (landingVisitKey === null) {
-    placementRef.current = null;
-  } else if (chatHistorySettled) {
-    const hasChats = chatHistoryItems.length > 0;
-    if (placementRef.current?.key !== landingVisitKey) {
-      placementRef.current = { key: landingVisitKey, standalone: !hasChats };
-    } else if (placementRef.current.standalone && hasChats) {
-      placementRef.current = { key: landingVisitKey, standalone: false };
-    }
-  } else if (placementRef.current?.key !== landingVisitKey) {
-    placementRef.current = null;
-  }
+  const placementRef = useRef<ProjectLandingPlacement | null>(null);
+  placementRef.current = nextProjectLandingPlacement(placementRef.current, landingVisitKey, {
+    settled: chatHistorySettled,
+    chatCount: chatHistoryItems.length,
+    archivedChatCount: archivedChatItems.length,
+  });
   const projectPlacement = placementRef.current;
+  const isProjectContextInline = sidebarOpen || projectPlacement?.standalone === true;
 
   const mainAgentId =
     manager.getActiveSession()?.backendId ?? manager.getStartingBackendId() ?? null;
@@ -383,7 +401,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
 
   useEffect(() => {
     if (isLanding) void handleLoadChatHistory();
-  }, [isLanding, handleLoadChatHistory]);
+  }, [isLanding, handleLoadChatHistory, archivedProjectKey]);
 
   const [globalShelfTab, setGlobalShelfTabState] = useState<string | null>(() =>
     getHomeShelfTab(app, HOME_SHELF_TAB_STORAGE_KEY)
@@ -413,6 +431,8 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
             onOpenSourceFile={handleOpenSourceFile}
             onCopyChatLink={handleCopyHistoryChatLink}
             onSetChatPinned={handleSetChatPinned}
+            onSetChatArchived={handleSetChatArchived}
+            onViewArchived={handleViewArchived}
             getChatBookmarkState={getChatBookmarkState}
             onSetChatBookmarked={handleSetChatBookmarked}
             onLoadHistory={handleLoadChatHistorySafely}
@@ -444,10 +464,10 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
         id: "projects",
         icon: <Folder className="tw-size-4" />,
         title: "Projects",
-        count: projects.length,
+        count: activeProjects.length,
         renderBody: () => (
           <ProjectPickerList
-            projects={projects}
+            projects={activeProjects}
             onSelect={handleSelectProject}
             onCreate={handleCreateProject}
             app={app}
@@ -458,7 +478,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       },
     ],
     [
-      projects,
+      activeProjects,
       projectNamesById,
       chatHistoryItems,
       app,
@@ -470,6 +490,8 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       handleUpdateChatTitle,
       handleDeleteChat,
       handleSetChatPinned,
+      handleSetChatArchived,
+      handleViewArchived,
       handleOpenSourceFile,
       handleCopyHistoryChatLink,
       getChatBookmarkState,
@@ -483,6 +505,17 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       plugin,
       settings.chatHistorySortStrategy,
     ]
+  );
+
+  // The sessions sidebar already lists chats and projects, so the landing keeps only Relevant Notes and shows the
+  // project context inline instead of a shelf.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/804
+  const globalShelfSections = useMemo(
+    () =>
+      sidebarOpen
+        ? landingSections.filter((section) => section.id === "relevant-notes")
+        : landingSections,
+    [sidebarOpen, landingSections]
   );
 
   const contextSummary = useMemo(() => buildContextSummary(activeProject), [activeProject]);
@@ -505,6 +538,8 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
             onOpenSourceFile={handleOpenSourceFile}
             onCopyChatLink={handleCopyHistoryChatLink}
             onSetChatPinned={handleSetChatPinned}
+            onSetChatArchived={handleSetChatArchived}
+            onViewArchived={handleViewArchived}
             getChatBookmarkState={getChatBookmarkState}
             onSetChatBookmarked={handleSetChatBookmarked}
             onLoadHistory={handleLoadChatHistorySafely}
@@ -534,6 +569,8 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       handleUpdateChatTitle,
       handleDeleteChat,
       handleSetChatPinned,
+      handleSetChatArchived,
+      handleViewArchived,
       handleOpenSourceFile,
       handleCopyHistoryChatLink,
       getChatBookmarkState,
@@ -558,6 +595,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       updateUserMessageHistory={updateUserMessageHistory}
       isStarting={isStarting}
       isLoading={isLoading}
+      isReplyRunning={replyRunning}
       queuedPrompts={queuedPrompts}
       acceptsMidTurnMessages={backend.acceptsMidTurnMessages()}
       hasPendingPlanPermission={hasPendingPlanPermission}
@@ -579,6 +617,9 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     },
     [backend]
   );
+  const handleSendWaitingNow = useCallback(() => {
+    backend.sendWaitingNow().catch((e: unknown) => logError("[AgentMode] send now failed", e));
+  }, [backend]);
   // The controls bar sits directly above the composer, so pending messages list above both. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
   const queuedMessagesNode =
     queuedPrompts.length > 0 || heldMessages.length > 0 ? (
@@ -587,6 +628,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
         held={heldMessages}
         onRemove={handleRemoveHeldMessage}
         onWithdraw={backend.canWithdrawMessages() ? handleWithdrawMessage : undefined}
+        onSendNow={replyRunning ? handleSendWaitingNow : undefined}
       />
     ) : null;
 
@@ -609,11 +651,23 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     () => getChatBookmarkState(manager.getSessionSourcePath(sessionId)),
     [getChatBookmarkState, manager, sessionId]
   );
+  const activeSourcePath = manager.getSessionSourcePath(sessionId);
+  const handleOpenChatNote = activeSourcePath
+    ? () => handleOpenSourceFile(activeSourcePath)
+    : undefined;
   const handleCopyChatLink = () =>
     plugin.copyChatLink(async () => {
       // A native session link only opens on this device: https://github.com/Brevilabs/obsidian-copilot-private/issues/601
       return (await manager.saveActiveSession())?.path ?? "";
     });
+
+  const showHeader = isProjectScope;
+  const collapsibleHeaderRef = useRef<HTMLDivElement>(null);
+  // The collapsed header stays mounted for its animation, so it is made inert to keep its buttons out of the tab order.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/804
+  useEffect(() => {
+    if (collapsibleHeaderRef.current) collapsibleHeaderRef.current.inert = !showHeader;
+  }, [showHeader]);
 
   const handleReportError = () => {
     const evidence = activeSession?.getReportEvidence();
@@ -629,17 +683,21 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       <div
         className={cn(
           "tw-grid tw-shrink-0 tw-transition-[grid-template-rows,opacity] tw-duration-200 tw-ease-out motion-reduce:tw-transition-none",
-          isProjectScope
+          showHeader
             ? "tw-grid-rows-[1fr] tw-opacity-100"
             : "tw-pointer-events-none tw-grid-rows-[0fr] tw-opacity-0"
         )}
-        aria-hidden={!isProjectScope}
+        aria-hidden={!showHeader}
+        ref={collapsibleHeaderRef}
       >
         <div className="tw-min-h-0 tw-overflow-hidden">
           <AgentProjectHeader
             projectName={headerName}
             onExit={handleExitProject}
             orphaned={headerOrphaned}
+            // The open sessions sidebar is the navigation, so the header offers no way back out of a project.
+            // https://github.com/Brevilabs/obsidian-copilot-private/issues/804
+            canLeaveProject={!sidebarOpen}
             menu={
               activeProject ? (
                 <ProjectInfoPopover
@@ -653,7 +711,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
           />
         </div>
       </div>
-      <AgentTabStrip manager={manager} />
+      <AgentTabStrip manager={manager} onOpenSidebar={handleOpenSessionsSidebar} />
       {createAnchor && (
         <CreateProjectPanel
           anchorEl={createAnchor}
@@ -685,6 +743,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                 }
               >
                 <AgentModeStatus manager={manager} plugin={plugin} onInstallClick={handleInstall} />
+                <ConnectorsAttentionBanner manager={plugin.connectionManager} />
                 {isLanding ? (
                   <AgentLandingStack
                     hero={hero}
@@ -694,18 +753,8 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                         {composerNode}
                       </>
                     }
-                    floating={
-                      !isProjectLanding &&
-                      projects.length === 0 &&
-                      !settings.agentMode.welcomeDismissed ? (
-                        <AgentWelcomeCard
-                          onCreate={handleCreateProject}
-                          onDismiss={handleDismissWelcome}
-                        />
-                      ) : undefined
-                    }
                     context={
-                      isProjectLanding && !isOrphanedProject && projectPlacement?.standalone ? (
+                      isProjectLanding && !isOrphanedProject && isProjectContextInline ? (
                         <div className="tw-px-2 tw-pb-1 tw-pt-3">
                           <AgentContextSection
                             app={app}
@@ -717,16 +766,16 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                     }
                     shelf={
                       isProjectLanding ? (
-                        projectPlacement && !projectPlacement.standalone ? (
+                        projectPlacement && !isProjectContextInline ? (
                           <AgentHomeShelf key={activeProjectId} sections={projectLandingSections} />
                         ) : null
-                      ) : (
+                      ) : globalShelfSections.length > 0 ? (
                         <AgentHomeShelf
-                          sections={landingSections}
+                          sections={globalShelfSections}
                           activeSectionId={globalShelfTab}
                           onSectionSelect={setGlobalShelfTab}
                         />
-                      )
+                      ) : null
                     }
                   />
                 ) : (
@@ -751,7 +800,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                       )}
                     >
                       <AgentChatMessages
-                        sourcePath={manager.getSessionSourcePath(sessionId)}
+                        sourcePath={activeSourcePath}
                         key={sessionId}
                         messages={messages}
                         plugin={plugin}
@@ -760,7 +809,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                         pendingAskUserQuestions={pendingAskUserQuestions}
                         chatBackend={backend}
                         isLoading={isLoading}
-                        feedbackOffer={feedbackOffer}
+                        chatStates={chatStates}
                       />
                       {queuedMessagesNode}
                       <AgentChatControls
@@ -773,6 +822,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                             : undefined
                         }
                         onSetChatBookmarked={handleSetActiveChatBookmarked}
+                        onOpenChatNote={handleOpenChatNote}
                         onReportError={handleReportError}
                         onNewChat={handleNewChat}
                         onSaveAsNote={handleSaveAsNote}

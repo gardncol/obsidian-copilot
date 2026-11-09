@@ -1,8 +1,7 @@
 import { ChatSendButton } from "@/components/ui/ChatSendButton";
-import { useChainType, useModelKey } from "@/aiParams";
+import { useChainType } from "@/aiParams";
 import { Button } from "@/components/ui/button";
 import { ModelSelector, type ModelSelectorEntry } from "@/components/ui/ModelSelector";
-import { useSettingsValue } from "@/settings/model";
 import type { CopilotMode } from "@/agentMode";
 import { isPlusChain } from "@/utils";
 import {
@@ -54,6 +53,10 @@ import { $createAgentPillNode } from "./pills/AgentPillNode";
 const ACCENT_CIRCLE_BUTTON_CLASS =
   "tw-rounded-full tw-bg-interactive-accent tw-text-on-accent hover:tw-bg-interactive-accent-hover";
 
+const NO_MODELS: ModelSelectorEntry[] = [];
+
+const NOOP = () => {};
+
 const DEFAULT_PLACEHOLDER =
   "Your AI assistant for Obsidian • @ to add context • / for custom prompts";
 
@@ -67,10 +70,8 @@ export interface ChatInputProps {
     contextNotes?: TFile[];
     contextFolders?: string[];
     webTabs?: WebTabContext[];
-    interrupt?: boolean;
   }) => void;
   isGenerating: boolean;
-  canInterruptAndSend?: boolean;
   onStopGenerating: () => void;
   app: App;
   contextNotes: TFile[];
@@ -166,7 +167,6 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
     setInputMessage,
     handleSendMessage,
     isGenerating,
-    canInterruptAndSend = false,
     onStopGenerating,
     app,
     contextNotes,
@@ -205,8 +205,6 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
   const [contextWebTabs, setContextWebTabs] = useState<WebTabContext[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
   const lexicalEditorRef = useRef<LexicalEditorType | null>(null);
-  const [currentModelKey, setCurrentModelKey] = useModelKey();
-  const settings = useSettingsValue();
   const [currentChain] = useChainType();
   const [currentActiveNote, setCurrentActiveNote] = useState<TFile | null>(() => {
     const activeFile = app.workspace.getActiveFile();
@@ -239,7 +237,11 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
     });
   };
 
-  const onSendMessage = (interrupt = false) => {
+  // A phone may have no Enter key, so a draft turns Stop into a Send that does what Enter does. https://github.com/Brevilabs/obsidian-copilot-private/issues/788
+  const showsStop =
+    isGenerating && !(isAgentMode && (inputMessage.trim().length > 0 || selectedImages.length > 0));
+
+  const onSendMessage = () => {
     if (editMode && onEditSave) {
       onEditSave(inputMessage, {
         notes: contextNotes,
@@ -252,12 +254,8 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
     const webTabsFromEditor = getWebTabsFromEditorSnapshot();
     const allWebTabs = mergeWebTabContexts([...contextWebTabs, ...webTabsFromEditor]);
 
-    const interruptMeta = interrupt ? { interrupt } : {};
     if (!isCopilotPlus) {
-      handleSendMessage({
-        webTabs: allWebTabs,
-        ...interruptMeta,
-      });
+      handleSendMessage({ webTabs: allWebTabs });
       return;
     }
 
@@ -266,7 +264,6 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
       urls: contextUrls,
       contextFolders,
       webTabs: allWebTabs,
-      ...interruptMeta,
     });
   };
 
@@ -755,14 +752,17 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
               className="tw-min-w-0 tw-max-w-full tw-truncate"
             />
           ) : (
+            // Agent Mode has no model list until its session manager exists, so the slot stays empty and disabled.
+            // https://github.com/Brevilabs/obsidian-copilot-private/issues/761
             <ModelSelector
               variant="ghost2"
               size="fit"
-              disabled={modelPickerOverride?.disabled ?? disableModelSwitch}
-              value={modelPickerOverride?.value ?? currentModelKey}
-              models={modelPickerOverride?.models ?? settings.activeModels}
-              apiKeySettings={modelPickerOverride ? undefined : settings}
-              onChange={modelPickerOverride?.onChange ?? setCurrentModelKey}
+              disabled={
+                modelPickerOverride?.disabled ?? (disableModelSwitch || !modelPickerOverride)
+              }
+              value={modelPickerOverride?.value ?? ""}
+              models={modelPickerOverride?.models ?? NO_MODELS}
+              onChange={modelPickerOverride?.onChange ?? NOOP}
               className="tw-min-w-0 tw-max-w-full tw-truncate"
             />
           )}
@@ -771,30 +771,15 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
         <div className="tw-flex tw-items-center tw-gap-1">
           {!isGenerating && toolControls}
           {modePickerOverride && <ModePicker override={modePickerOverride} />}
-          {isGenerating ? (
-            <>
-              {canInterruptAndSend && (inputMessage.trim() || selectedImages.length > 0) && (
-                <Button
-                  variant="ghost2"
-                  size="fit"
-                  className="tw-text-muted"
-                  aria-label="Interrupt and send"
-                  title="Stop the agent at its next step and send this now"
-                  onClick={() => onSendMessage(true)}
-                >
-                  <CornerDownLeft className="!tw-size-3" />
-                  <span>Send now</span>
-                </Button>
-              )}
-              <Button
-                size="icon"
-                className={cn(ACCENT_CIRCLE_BUTTON_CLASS)}
-                aria-label="Stop generating"
-                onClick={() => onStopGenerating()}
-              >
-                <Square className="tw-size-3 tw-fill-current" />
-              </Button>
-            </>
+          {showsStop ? (
+            <Button
+              size="icon"
+              className={cn(ACCENT_CIRCLE_BUTTON_CLASS)}
+              aria-label="Stop generating"
+              onClick={() => onStopGenerating()}
+            >
+              <Square className="tw-size-3 tw-fill-current" />
+            </Button>
           ) : (
             <>
               {editMode && onEditCancel && (

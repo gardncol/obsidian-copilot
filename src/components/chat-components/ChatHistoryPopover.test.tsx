@@ -7,11 +7,12 @@ jest.mock("@/settings/model", () => ({
 }));
 
 const issue = "https://github.com/Brevilabs/obsidian-copilot-private/issues/429";
+const usedAt = new Date("2026-01-01T00:00:00Z");
 const history = ["Open research", "Saved research"].map((title) => ({
   id: title,
   title,
-  createdAt: new Date(),
-  lastAccessedAt: new Date(),
+  createdAt: usedAt,
+  lastAccessedAt: usedAt,
 }));
 
 describe("ChatHistoryPopover", () => {
@@ -40,6 +41,27 @@ describe("ChatHistoryPopover", () => {
 
       expect(screen.getAllByText(/^Summary for/)).toHaveLength(1);
     });
+    it("opens the chosen chat's saved note from its Open chat note button without loading the chat", async () => {
+      const onOpenSourceFile = jest.fn(async () => {});
+      const onLoadChat = jest.fn(async () => {});
+      render(
+        <ChatHistoryPopover
+          chatHistory={history}
+          onUpdateTitle={jest.fn()}
+          onDeleteChat={async () => {}}
+          onLoadChat={onLoadChat}
+          onOpenSourceFile={onOpenSourceFile}
+        >
+          <button type="button">History</button>
+        </ChatHistoryPopover>
+      );
+      fireEvent.click(screen.getByText("History"));
+
+      await act(async () => fireEvent.click(screen.getAllByTitle("Open chat note")[1]));
+
+      expect(onOpenSourceFile).toHaveBeenCalledWith(history[1].id);
+      expect(onLoadChat).not.toHaveBeenCalled();
+    });
     it(`${issue} closes an open session while preserving its saved history and leaving the popover open`, async () => {
       const onCloseSession = jest.fn(async () => {});
       const onLoadChat = jest.fn(async () => {});
@@ -57,8 +79,8 @@ describe("ChatHistoryPopover", () => {
         </ChatHistoryPopover>
       );
       fireEvent.click(screen.getByText("History"));
-      expect(screen.getAllByLabelText("Session live")).toHaveLength(1);
-      const button = screen.getByRole("button", { name: "Close chat" });
+      expect(screen.getAllByLabelText("Running")).toHaveLength(1);
+      const button = screen.getByRole("button", { name: "Shut down" });
       fireEvent.keyDown(button, { key: "Enter" });
       await act(async () => fireEvent.click(button));
       expect(onCloseSession).toHaveBeenCalledWith(history[0].id);
@@ -69,8 +91,8 @@ describe("ChatHistoryPopover", () => {
           <button type="button">History</button>
         </ChatHistoryPopover>
       );
-      expect(screen.queryByLabelText("Session live")).toBeNull();
-      expect(screen.queryByRole("button", { name: "Close chat" })).toBeNull();
+      expect(screen.queryByLabelText("Running")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Shut down" })).toBeNull();
       expect(screen.getByText("Open research")).toBeTruthy();
       expect(screen.getByText("Saved research")).toBeTruthy();
       await act(async () =>
@@ -96,7 +118,7 @@ describe("ChatHistoryPopover", () => {
 
       fireEvent.click(screen.getByText("History"));
       expect(screen.getByLabelText("Responding")).toBeTruthy();
-      expect(screen.getAllByLabelText("Session live")).toHaveLength(2);
+      expect(screen.getAllByLabelText("Running")).toHaveLength(2);
     });
   });
 });

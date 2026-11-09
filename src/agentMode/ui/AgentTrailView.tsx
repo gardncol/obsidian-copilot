@@ -1,6 +1,11 @@
 import React, { useMemo } from "react";
 import { agentResponseText, buildAgentTrail } from "@/agentMode/ui/agentTrail";
-import type { AgentMessagePart, StopReason, TurnFileChange } from "@/agentMode/session/types";
+import type {
+  AgentCancelCause,
+  AgentMessagePart,
+  StopReason,
+  TurnFileChange,
+} from "@/agentMode/session/types";
 import { ActionCard } from "@/agentMode/ui/ActionCard";
 import { FilesChangedCard } from "@/agentMode/ui/FilesChangedCard";
 import { ActivityGroupCard } from "@/agentMode/ui/ActivityGroupCard";
@@ -17,16 +22,13 @@ import { ReasoningBlock } from "@/agentMode/ui/ReasoningBlock";
 import { AgentMarkdownText } from "@/agentMode/ui/AgentMarkdownText";
 import { planEntryClass, planEntryIcon } from "@/agentMode/ui/planEntryStyles";
 import type { ToolSummaryContext } from "@/agentMode/ui/toolSummaries";
-import { miyoResultPaths, miyoSearchRun } from "@/miyo/agentMode/miyoSearchRun";
-import { MiyoSearchCard } from "@/miyo/agentMode/ui/MiyoSearchCard";
+import { miyoResultPaths } from "@/miyo/agentMode/miyoSearchRun";
 import { useThinkingClock } from "@/agentMode/ui/useThinkingClock";
 import { useTrailExpansion, type TrailExpansion } from "@/agentMode/ui/useTrailExpansion";
 import { AgentTurnDurationIndicator } from "@/agentMode/ui/AgentTurnDurationIndicator";
 import { useAgentTasks, type AgentTasksContextValue } from "@/agentMode/ui/AgentTasksContext";
-import { TaskCard } from "@/agentMode/ui/TaskCard";
 import { AssistantResponseFooter } from "@/components/ui/AssistantResponseFooter";
 import { getVaultBase } from "@/utils/vaultPath";
-import { openVaultPath } from "@/utils/openVaultPath";
 import { App } from "obsidian";
 
 interface AgentTrailProps {
@@ -37,6 +39,7 @@ interface AgentTrailProps {
   timestamp?: string;
   app: App;
   turnStopReason?: StopReason;
+  agentCancelCause?: AgentCancelCause;
   errorText?: string;
   fileChanges?: TurnFileChange[];
   onOpenFileChange?: (change: TurnFileChange) => void;
@@ -51,7 +54,18 @@ const EARLY_STOP_CAUSES: Partial<Record<StopReason, string>> = {
   refusal: "the model's safety system stopped it",
 };
 
-function stopReasonNotice(stopReason: StopReason | undefined): string | undefined {
+// A turn the agent ended on its own leaves the chat silent, as if it froze. https://github.com/logancyang/obsidian-copilot/issues/4062
+const AGENT_CANCEL_NOTICES: Record<AgentCancelCause, string> = {
+  permission_declined:
+    "**Stopped:** the agent ended its turn after you declined a permission. Send a message to tell it what to do next.",
+  unspecified: "**Stopped:** the agent ended its turn early. Send a message to continue.",
+};
+
+function stopReasonNotice(
+  stopReason: StopReason | undefined,
+  agentCancelCause: AgentCancelCause | undefined
+): string | undefined {
+  if (agentCancelCause) return AGENT_CANCEL_NOTICES[agentCancelCause];
   const cause = stopReason && EARLY_STOP_CAUSES[stopReason];
   return (
     cause &&
@@ -67,6 +81,7 @@ export const AgentTrail: React.FC<AgentTrailProps> = ({
   timestamp,
   app,
   turnStopReason,
+  agentCancelCause,
   errorText,
   fileChanges,
   onOpenFileChange = noopOpenFileChange,
@@ -74,7 +89,10 @@ export const AgentTrail: React.FC<AgentTrailProps> = ({
   const answer = agentResponseText(parts);
   // A failed turn's error is stored as message text, which a reply with parts never shows.
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/633
-  const notice = errorText && answer.length === 0 ? errorText : stopReasonNotice(turnStopReason);
+  const notice =
+    errorText && answer.length === 0
+      ? errorText
+      : stopReasonNotice(turnStopReason, agentCancelCause);
   const hasRunningDuration = isStreaming && turnStartedAtMs !== undefined;
   // A compaction row reports its own progress and is not a reply to time or copy.
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/633
@@ -135,10 +153,6 @@ const LinearTrail: React.FC<{
   const expansion = useTrailExpansion();
   const tasks = useAgentTasks();
   const summaryCtx = useMemo(() => ({ vaultBase: getVaultBase(app) }), [app]);
-  // A task's launching card must stay visible, not folded into "Ran N commands". https://github.com/Brevilabs/obsidian-copilot-private/issues/749
-  const nodes = foldActivityGroups(buildAgentTrail(parts), (part) =>
-    Boolean(tasks?.tasks.some((task) => task.toolCallId === part.id))
-  );
   const ctx: TrailContext = {
     app,
     lastPart: parts.length > 0 ? parts[parts.length - 1] : undefined,
@@ -147,6 +161,7 @@ const LinearTrail: React.FC<{
     miyoPaths: miyoResultPaths(parts),
     tasks,
   };
+  const nodes = foldActivityGroups(buildAgentTrail(parts), ctx);
   return (
     <div className="tw-flex tw-flex-col tw-gap-1">
       {nodes.map((node, i) =>
@@ -163,25 +178,9 @@ function renderNode(
   atLiveEdge: boolean,
   trailId: string
 ): React.ReactNode {
-  // A task's work is shown in its own view, so its launching call is only a link there. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
-  const launch = node.type === "action" ? node.part : node.type === "subagent" ? node.parent : null;
-  const task = launch && ctx.tasks?.tasks.find((t) => t.toolCallId === launch.id);
-  if (task && ctx.tasks) return <TaskCard key={key} task={task} onOpen={ctx.tasks.openTask} />;
   switch (node.type) {
     case "action": {
       const expansionId = actionExpansionId(trailId, node.part.id);
-      const miyoSearch = miyoSearchRun(node.part);
-      if (miyoSearch) {
-        return (
-          <MiyoSearchCard
-            key={key}
-            {...miyoSearch}
-            open={ctx.expansion.isOpen(expansionId)}
-            onToggle={() => ctx.expansion.toggle(expansionId)}
-            onOpenNote={(path) => openVaultPath(ctx.app, path, { newLeaf: true })}
-          />
-        );
-      }
       return (
         <ActionCard
           key={key}
@@ -189,6 +188,21 @@ function renderNode(
           open={ctx.expansion.isOpen(expansionId)}
           onToggle={() => ctx.expansion.toggle(expansionId)}
         />
+      );
+    }
+    case "toolCard": {
+      const expansionId = `${trailId}/card:${node.members[0].id}`;
+      return (
+        <React.Fragment key={key}>
+          {node.kind.render(node.members, {
+            app: ctx.app,
+            tasks: ctx.tasks,
+            open: ctx.expansion.isOpen(expansionId),
+            onToggle: () => ctx.expansion.toggle(expansionId),
+            renderCall: (part) =>
+              renderNode({ type: "action", part }, part.id, ctx, false, trailId),
+          })}
+        </React.Fragment>
       );
     }
     case "activityGroup":
@@ -202,7 +216,9 @@ function renderNode(
         />
       );
     case "subagent": {
-      const children = foldActivityGroups(node.children);
+      // A sub-agent's calls get the same tool cards as the top level, so a task it launches keeps its card.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/793
+      const children = foldActivityGroups(node.children, ctx);
       const lastChild = children[children.length - 1];
       const childTrailId = `${trailId}/subagent:${node.parent.id}`;
       return (
@@ -229,6 +245,7 @@ function renderNode(
         <AgentMarkdownText
           key={key}
           text={node.part.text}
+          streaming={atLiveEdge}
           app={ctx.app}
           miyoPaths={ctx.miyoPaths}
         />

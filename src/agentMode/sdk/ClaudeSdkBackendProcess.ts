@@ -44,6 +44,7 @@ import type {
 import type { ProjectScopeId } from "@/agentMode/session/scope";
 import { AuthRequiredError, MethodUnsupportedError } from "@/agentMode/session/errors";
 import { requireNodeModule } from "@/utils/desktopRuntime";
+import { agentShellPath } from "@/utils/loginShellPath";
 import { createClaudeTaskPlanState, type ClaudeTaskPlanState } from "./claudeTodoPlan";
 import { ClaudeLiveQuery } from "./claudeLiveQuery";
 import {
@@ -265,11 +266,10 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
       {
         promptId: params.promptId,
         prompt: summarizePromptContent(messageContent),
-        ...(params.interrupt ? { interrupt: true } : {}),
       },
       params.sessionId
     );
-    live.push(params.promptId, messageContent, params.interrupt === true);
+    live.push(params.promptId, messageContent);
   }
 
   // One query serves the whole chat, so background tasks outlive the turn that launched them.
@@ -299,6 +299,7 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
   ): Promise<ClaudeLiveQuery> {
     // Settings are read after the last await, so a change made while the query starts still reaches it. https://github.com/Brevilabs/obsidian-copilot-private/issues/175
     const managedEnv = (await this.opts.getManagedEnv?.()) ?? {};
+    const shellPath = await agentShellPath();
     const permissionBridge = new PermissionBridge(sessionId, {
       getPrompter: () => this.permissionPrompter,
       getAskUserQuestionPrompter: () => this.askUserQuestionPrompter,
@@ -337,7 +338,8 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
       options.sessionId = sessionId;
     }
     if (session.model) options.model = session.model;
-    if (session.permissionMode) options.permissionMode = session.permissionMode;
+    // Without an explicit mode Claude starts in its settings' defaultMode, not the one the picker shows. https://github.com/Brevilabs/obsidian-copilot-private/issues/870
+    options.permissionMode = session.permissionMode ?? "default";
     if (session.effort) options.effort = session.effort;
     if (session.mcpServers?.length) {
       options.mcpServers = Object.fromEntries(
@@ -346,9 +348,13 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
           { type: "http" as const, url: server.url, headers: { ...server.headers } },
         ])
       );
+      // Only read-only tools skip the prompt, so Claude asks before a Copilot tool writes a drawing or publishes a page.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/807
       options.allowedTools = [
         ...(options.allowedTools ?? []),
-        ...session.mcpServers.map((server) => `mcp__${server.name}`),
+        ...session.mcpServers.flatMap((server) =>
+          server.readOnlyToolNames.map((tool) => `mcp__${server.name}__${tool}`)
+        ),
       ];
     }
     session.thinking = Boolean(this.opts.getEnableThinking?.());
@@ -356,10 +362,14 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
       ? { type: "adaptive", display: "summarized" }
       : { type: "disabled" };
     const envOverrides = this.opts.getEnvOverrides?.();
-    const extraEnv = { ...managedEnv, ...envOverrides };
-    if (Object.keys(extraEnv).length > 0) {
-      options.env = { ...process.env, ...extraEnv };
-    }
+    options.env = {
+      ...process.env,
+      PATH: shellPath,
+      // Claude reports when it has finished its subagents and its replies about them only when asked. https://github.com/Brevilabs/obsidian-copilot-private/issues/757
+      CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
+      ...managedEnv,
+      ...envOverrides,
+    };
 
     if (this.sessions.get(sessionId) !== session) {
       throw new Error(`Session ${sessionId} closed before its prompt was sent`);
@@ -385,6 +395,10 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
       onSignedOut: () => {
         this.authConfirmed = false;
       },
+      onPermissionModeChanged: (mode) => {
+        session.permissionMode = mode;
+        this.dispatchStateChanged(sessionId, this.computeState(sessionId));
+      },
       onEnded: () => {
         if (session.live === live) session.live = undefined;
       },
@@ -407,7 +421,7 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
     const live = session?.live ?? (await session?.starting?.catch(() => undefined));
     if (!live) return;
     try {
-      await live.interrupt();
+      await live.interrupt(params.keepUnread !== true);
     } catch (e) {
       logWarn("[AgentMode] SDK query.interrupt() threw", e);
       logSdkError("→", "interrupt", { error: err2String(e) }, params.sessionId);

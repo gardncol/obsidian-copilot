@@ -8,7 +8,6 @@ import {
 } from "@/constants";
 import { logInfo, logWarn } from "@/logger";
 import { formatUsageCapError } from "@/utils/usageCapError";
-import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { MemoryVariables } from "@langchain/core/memory";
 import { DateTime } from "luxon";
 import { App, MarkdownView, Notice, TFile, Vault, normalizePath, requestUrl } from "obsidian";
@@ -751,60 +750,6 @@ export async function checkLatestVersion(): Promise<{
   }
 }
 
-export function isOSeriesModel(model: BaseChatModel | string): boolean {
-  if (typeof model === "string") {
-    return model.startsWith("o1") || model.startsWith("o3") || model.startsWith("o4");
-  }
-
-  const m = model as unknown as Record<string, unknown>;
-  const modelName: string = (m.modelName as string) || (m.model as string) || "";
-  return modelName.startsWith("o1") || modelName.startsWith("o3") || modelName.startsWith("o4");
-}
-
-function isGPT5Model(model: BaseChatModel | string): boolean {
-  if (typeof model === "string") {
-    return model.startsWith("gpt-5");
-  }
-
-  const m = model as unknown as Record<string, unknown>;
-  const modelName: string = (m.modelName as string) || (m.model as string) || "";
-  return modelName.startsWith("gpt-5");
-}
-
-export interface ModelInfo {
-  isOSeries: boolean;
-  isGPT5: boolean;
-  isThinkingEnabled: boolean;
-  usesAdaptiveThinking: boolean;
-}
-
-export function getModelInfo(model: BaseChatModel | string): ModelInfo {
-  const m = model as unknown as Record<string, unknown>;
-  const modelName: string =
-    typeof model === "string" ? model : (m.modelName as string) || (m.model as string) || "";
-
-  const isOSeries = isOSeriesModel(modelName);
-  const isGPT5 = isGPT5Model(modelName);
-  const isThinkingEnabled =
-    modelName.startsWith("claude-3-7-sonnet") ||
-    modelName.startsWith("claude-sonnet-4") ||
-    modelName.startsWith("claude-opus-4");
-
-  const opusMinorMatch = modelName.match(/^claude-opus-4-(\d{1,2})(?:[-.]|$)/);
-  const usesAdaptiveThinking = opusMinorMatch ? parseInt(opusMinorMatch[1], 10) >= 7 : false;
-
-  return {
-    isOSeries,
-    isGPT5,
-    isThinkingEnabled,
-    usesAdaptiveThinking,
-  };
-}
-
-export function getMessageRole(model: BaseChatModel | string): "system" | "human" {
-  return isOSeriesModel(model) ? "human" : "system";
-}
-
 export function extractTextFromChunk(content: unknown): string {
   if (typeof content === "string") {
     return content;
@@ -948,29 +893,4 @@ export function sanitizeFilePath(filePath: string): string {
   }
 
   return parts.join("/");
-}
-
-export async function openFileInWorkspace(app: App, file: TFile): Promise<void> {
-  let existingLeaf = null;
-  app.workspace.iterateAllLeaves((leaf) => {
-    if (
-      leaf.view.getViewType() === "markdown" ||
-      leaf.view.getViewType() === "pdf" ||
-      leaf.view.getViewType() === "canvas"
-    ) {
-      const viewFile = (leaf.view as unknown as Record<string, unknown>).file as
-        | { path: string }
-        | undefined;
-      if (viewFile && viewFile.path === file.path) {
-        existingLeaf = leaf;
-      }
-    }
-  });
-
-  if (existingLeaf) {
-    app.workspace.setActiveLeaf(existingLeaf, { focus: true });
-  } else {
-    const leaf = app.workspace.getLeaf("tab");
-    await leaf.openFile(file);
-  }
 }

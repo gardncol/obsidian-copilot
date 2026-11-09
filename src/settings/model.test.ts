@@ -4,7 +4,6 @@ import {
   DEFAULT_QA_EXCLUSIONS_SETTING,
   DEFAULT_SETTINGS,
   SEND_SHORTCUT,
-  BUILTIN_CHAT_MODELS,
 } from "@/constants";
 import {
   normalizeMiyoFolderNames,
@@ -19,7 +18,6 @@ import {
   toVisibleCopilotFolder,
   validateCopilotFolder,
   CopilotSettings,
-  getModelKeyFromModel,
 } from "@/settings/model";
 import { CustomModel } from "@/aiParams";
 
@@ -129,16 +127,13 @@ describe("model", () => {
         offerFeedbackCards: true,
         notificationSound: true,
         notificationSoundId: "piano",
-        welcomeDismissed: false,
         skills: {
           folder: "copilot/skills",
           builtinPreferences: {
             "copilot-web-search": { disabled: true },
             "copilot-web-fetch": { disabled: true },
-            "obsidian-markdown": { disabledAgents: ["claude", "codex"] },
             "obsidian-bases": { disabledAgents: ["claude"] },
             "json-canvas": { disabledAgents: ["claude", "codex"] },
-            "obsidian-cli": { disabledAgents: ["claude", "codex"] },
           },
         },
       });
@@ -306,36 +301,6 @@ describe("model", () => {
       });
     });
 
-    it("defaults agentMode.welcomeDismissed to false when absent", () => {
-      const sanitized = sanitizeSettings({
-        ...DEFAULT_SETTINGS,
-        agentMode: { byok: {} } as unknown as CopilotSettings["agentMode"],
-      });
-      expect(sanitized.agentMode.welcomeDismissed).toBe(false);
-    });
-
-    it("carries a persisted agentMode.welcomeDismissed=true through sanitize", () => {
-      const sanitized = sanitizeSettings({
-        ...DEFAULT_SETTINGS,
-        agentMode: {
-          byok: {},
-          welcomeDismissed: true,
-        } as unknown as CopilotSettings["agentMode"],
-      });
-      expect(sanitized.agentMode.welcomeDismissed).toBe(true);
-    });
-
-    it("ignores a non-boolean agentMode.welcomeDismissed, falling back to false", () => {
-      const sanitized = sanitizeSettings({
-        ...DEFAULT_SETTINGS,
-        agentMode: {
-          byok: {},
-          welcomeDismissed: "yes",
-        } as unknown as CopilotSettings["agentMode"],
-      });
-      expect(sanitized.agentMode.welcomeDismissed).toBe(false);
-    });
-
     it("drops invalid envOverrides keys from the Claude backend slice while keeping valid ones", () => {
       const settings = {
         ...DEFAULT_SETTINGS,
@@ -465,6 +430,20 @@ describe("model", () => {
       });
 
       expect(settings.miyoExtraSearchFolders).toEqual(["Research", "Archive"]);
+    });
+
+    it("gives an install saved before Miyo search limits existed 20 results and 2 variants, and keeps saved limits — https://github.com/logancyang/obsidian-copilot/issues/3825", () => {
+      const persisted = { ...DEFAULT_SETTINGS } as Partial<CopilotSettings>;
+      delete persisted.miyoSearchMaxResults;
+      delete persisted.miyoSearchMaxVariants;
+
+      expect(sanitizeSettings(persisted as CopilotSettings)).toMatchObject({
+        miyoSearchMaxResults: 20,
+        miyoSearchMaxVariants: 2,
+      });
+      expect(
+        sanitizeSettings({ ...DEFAULT_SETTINGS, miyoSearchMaxResults: 7, miyoSearchMaxVariants: 0 })
+      ).toMatchObject({ miyoSearchMaxResults: 7, miyoSearchMaxVariants: 0 });
     });
 
     it("defaults the startup notice marker without inheriting the Agent Home dismissal", () => {
@@ -709,6 +688,54 @@ describe("model", () => {
         expect(out.copilotPlusCatalog).toEqual({ models: [], defaultEnabledIds: [] });
       }
     );
+
+    it.each([
+      ["a missing list, as every data.json written before connectors has", undefined],
+      ["a non-list value", { id: "c1" }],
+    ])(
+      "loads %s as no connectors (https://github.com/Brevilabs/obsidian-copilot-private/issues/856)",
+      (_case, connectors) => {
+        const out = sanitizeSettings({
+          ...DEFAULT_SETTINGS,
+          connectors,
+        } as unknown as CopilotSettings);
+
+        expect(out.connectors).toEqual([]);
+      }
+    );
+
+    it("drops connector entries without a string id and service id and keeps the rest (https://github.com/Brevilabs/obsidian-copilot-private/issues/856)", () => {
+      const kept = { id: "c1", serviceId: "notion", accountLabel: "Acme" };
+      const connectors = [null, { id: "c2" }, { id: 3, serviceId: "linear" }, kept];
+
+      const out = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        connectors,
+      } as unknown as CopilotSettings);
+
+      expect(out.connectors).toEqual([kept]);
+    });
+
+    it("loads a data.json written before custom connectors, or with a non-list value, as no custom connectors, and drops malformed entries (https://github.com/Brevilabs/obsidian-copilot-private/issues/862)", () => {
+      const kept = { id: "echo", name: "Echo", command: "npx", args: ["echo"], envNames: ["KEY"] };
+
+      const missing = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        customConnectors: undefined,
+      } as unknown as CopilotSettings);
+      const wrongType = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        customConnectors: { echo: kept },
+      } as unknown as CopilotSettings);
+      const mixed = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        customConnectors: [null, { id: "Bad Id", name: "x", command: "x" }, kept],
+      } as unknown as CopilotSettings);
+
+      expect(missing.customConnectors).toEqual([]);
+      expect(wrongType.customConnectors).toEqual([]);
+      expect(mixed.customConnectors).toEqual([kept]);
+    });
 
     it("keeps a well-formed cached Copilot Plus lineup", () => {
       const copilotPlusCatalog = {
@@ -1044,38 +1071,25 @@ describe("model", () => {
       expect(settingsStore.get(settingsAtom).copilotPlusCatalog).toEqual(catalog);
     });
 
-    it.each([false, true])(
-      "preserves a builtin model's credential routing, including enableCors=%s, while resetting its preferences (https://github.com/logancyang/obsidian-copilot-preview/issues/259)",
-      (enableCors) => {
-        const customGpt4: CustomModel = {
-          ...BUILTIN_CHAT_MODELS[0],
-          enabled: false,
-          apiKey: "sk-saved",
-          baseUrl: "https://proxy.example.test/v1",
-          openAIOrgId: "org-model",
-          enableCors,
-          displayName: "My renamed model",
-        };
-        settingsStore.set(settingsAtom, {
-          ...DEFAULT_SETTINGS,
-          activeModels: [customGpt4],
-        });
+    it("preserves the connector list, whose logins stay in the keychain (https://github.com/Brevilabs/obsidian-copilot-private/issues/856)", () => {
+      const connectors = [{ id: "c1", serviceId: "notion" }];
+      settingsStore.set(settingsAtom, { ...DEFAULT_SETTINGS, connectors });
 
-        resetSettings();
+      resetSettings();
 
-        const after = settingsStore.get(settingsAtom);
-        const restored = after.activeModels.find(
-          (m) => getModelKeyFromModel(m) === getModelKeyFromModel(BUILTIN_CHAT_MODELS[0])
-        );
-        expect(restored).toBeDefined();
-        expect(restored!.apiKey).toBe("sk-saved");
-        expect(restored!.baseUrl).toBe("https://proxy.example.test/v1");
-        expect(restored!.openAIOrgId).toBe("org-model");
-        expect(restored!.enableCors).toBe(enableCors);
-        expect(restored!.enabled).toBe(BUILTIN_CHAT_MODELS[0].enabled);
-        expect(restored!.displayName).toBe(BUILTIN_CHAT_MODELS[0].displayName);
-      }
-    );
+      expect(settingsStore.get(settingsAtom).connectors).toEqual(connectors);
+    });
+
+    it("preserves the custom connector list, whose values stay in the keychain (https://github.com/Brevilabs/obsidian-copilot-private/issues/862)", () => {
+      const customConnectors = [
+        { id: "acme", name: "Acme", url: "https://acme.test/mcp", headerNames: ["X-Key"] },
+      ];
+      settingsStore.set(settingsAtom, { ...DEFAULT_SETTINGS, customConnectors });
+
+      resetSettings();
+
+      expect(settingsStore.get(settingsAtom).customConnectors).toEqual(customConnectors);
+    });
 
     it("preserves every custom model, including rows that carry no key (https://github.com/logancyang/obsidian-copilot-preview/issues/259)", () => {
       const withKey: CustomModel = {
@@ -1168,26 +1182,6 @@ describe("model", () => {
       const after = settingsStore.get(settingsAtom);
       expect(after.openAIApiKey).toBe("sk-openai");
       expect(after.openAIOrgId).toBe(DEFAULT_SETTINGS.openAIOrgId);
-    });
-
-    it("filters out null/undefined model secrets", () => {
-      const modelWithNull: CustomModel = {
-        ...BUILTIN_CHAT_MODELS[0],
-        apiKey: null as unknown as string,
-      };
-      settingsStore.set(settingsAtom, {
-        ...DEFAULT_SETTINGS,
-        activeModels: [modelWithNull],
-      });
-
-      resetSettings();
-
-      const after = settingsStore.get(settingsAtom);
-      const restored = after.activeModels.find(
-        (m) => getModelKeyFromModel(m) === getModelKeyFromModel(BUILTIN_CHAT_MODELS[0])
-      );
-      expect(restored).toBeDefined();
-      expect(restored!.apiKey).toBe(BUILTIN_CHAT_MODELS[0].apiKey);
     });
 
     it("preserves configured models belonging to preserved providers (https://github.com/logancyang/obsidian-copilot-preview/issues/259)", () => {

@@ -16,7 +16,6 @@ function model(overrides: Partial<CustomModel>): CustomModel {
     name: "test-model",
     provider: ChatModelProviders.OPENAI,
     enabled: true,
-    isBuiltIn: false,
     ...overrides,
   };
 }
@@ -226,7 +225,6 @@ describe("byokMigration", () => {
             model({
               name: "copilot-plus-flash",
               provider: ChatModelProviders.COPILOT_PLUS,
-              isBuiltIn: true,
             }),
             model({ name: "gpt-5", provider: "github-copilot" }),
           ],
@@ -252,8 +250,6 @@ describe("byokMigration", () => {
             model({
               name: "gpt-5.5",
               provider: ChatModelProviders.OPENAI,
-              isBuiltIn: true,
-              core: true,
             }),
           ],
           { openAIApiKey: "k" }
@@ -287,6 +283,34 @@ describe("byokMigration", () => {
         settingsWith([model({ name: "llama3.2", provider: ChatModelProviders.LM_STUDIO })])
       );
       expect(withoutUrl).toEqual([]);
+    });
+
+    it("adds /v1 to an Ollama root URL so OpenAI-compatible requests reach Ollama's /v1 API, and leaves LM Studio URLs as saved (https://github.com/logancyang/obsidian-copilot/issues/4109)", () => {
+      const plan = planByokMigration(
+        settingsWith([
+          model({
+            name: "llama3.2",
+            provider: ChatModelProviders.OLLAMA,
+            baseUrl: "http://localhost:11434/",
+          }),
+          model({
+            name: "qwen3",
+            provider: ChatModelProviders.OLLAMA,
+            baseUrl: "http://gpu-box:11434/V1",
+          }),
+          model({
+            name: "phi-4",
+            provider: ChatModelProviders.LM_STUDIO,
+            baseUrl: "http://localhost:1234",
+          }),
+        ])
+      );
+
+      expect(plan.map((p) => p.baseUrl)).toEqual([
+        "http://localhost:11434/v1",
+        "http://gpu-box:11434/V1",
+        "http://localhost:1234",
+      ]);
     });
 
     it("requires an API key for key-based providers", () => {

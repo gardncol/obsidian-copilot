@@ -8,18 +8,20 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { useApp } from "@/context";
+import { useSessionsSidebarOpen } from "@/agentMode/navigator/hooks/useSessionsSidebarOpen";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { refreshLatestVersion } from "@/hooks/useLatestVersion";
 import { cn } from "@/lib/utils";
 import { logError } from "@/logger";
 import type { AgentSession, AgentSessionStatus } from "@/agentMode/session/AgentSession";
 import type { AgentSessionManager } from "@/agentMode/session/AgentSessionManager";
 import type { BackendDescriptor } from "@/agentMode/session/types";
-import { Loader2, MoreHorizontal, Plus, X } from "lucide-react";
+import { Loader2, MoreHorizontal, PanelLeft, Plus, X } from "lucide-react";
 import React from "react";
 
 interface Props {
   manager: AgentSessionManager;
+  onOpenSidebar: () => void;
 }
 
 const TAB_GAP_PX = 4;
@@ -94,11 +96,12 @@ function useSessionDisplay(session: AgentSession) {
     label,
     needsAttention: session.getNeedsAttention(),
     descriptor,
-    displayLabel: label ?? descriptor?.displayName ?? "Session",
+    displayLabel: label ?? descriptor?.displayName ?? "Chat",
   };
 }
 
-export const AgentTabStrip: React.FC<Props> = ({ manager }) => {
+export const AgentTabStrip: React.FC<Props> = ({ manager, onOpenSidebar }) => {
+  const isHidden = useSessionsSidebarOpen(useApp());
   const [, setTick] = React.useState(0);
   React.useEffect(() => manager.subscribe(() => setTick((v) => v + 1)), [manager]);
 
@@ -112,7 +115,7 @@ export const AgentTabStrip: React.FC<Props> = ({ manager }) => {
   const [stripWidth, setStripWidth] = React.useState(0);
 
   React.useLayoutEffect(() => {
-    if (sessionCount === 0) return;
+    if (sessionCount === 0 || isHidden) return;
     const strip = stripRef.current;
     if (!strip) return;
 
@@ -127,7 +130,7 @@ export const AgentTabStrip: React.FC<Props> = ({ manager }) => {
     const ro = new ResizeObserver(measure);
     ro.observe(strip);
     return () => ro.disconnect();
-  }, [sessionCount]);
+  }, [sessionCount, isHidden]);
 
   const visibleCount = React.useMemo(
     () => computeVisibleCount(stripWidth, sessionCount),
@@ -141,10 +144,7 @@ export const AgentTabStrip: React.FC<Props> = ({ manager }) => {
 
   const handleNew = React.useCallback(() => {
     if (manager.getIsStarting()) return;
-    manager
-      .createSession()
-      .then(() => refreshLatestVersion())
-      .catch((e) => logError("[AgentMode] createSession failed", e));
+    manager.createSession().catch((e) => logError("[AgentMode] createSession failed", e));
   }, [manager]);
 
   const handleClose = React.useCallback(
@@ -154,54 +154,70 @@ export const AgentTabStrip: React.FC<Props> = ({ manager }) => {
     [manager]
   );
 
-  if (sessionCount === 0) return null;
+  if (sessionCount === 0 || isHidden) return null;
 
   return (
-    <div
-      ref={stripRef}
-      className="tw-relative tw-flex tw-w-full tw-items-stretch tw-gap-1 tw-overflow-hidden tw-px-2"
-    >
-      <div role="tablist" className="tw-flex tw-min-w-0 tw-items-stretch tw-gap-1">
-        {visibleSessions.map((session) => (
-          <SessionTab
-            key={session.internalId}
-            session={session}
-            isActive={session.internalId === activeId}
-            isRenaming={renamingId === session.internalId}
-            onActivate={() => manager.setActiveSession(session.internalId)}
-            onClose={() => handleClose(session.internalId)}
-            onStartRename={() => setRenamingId(session.internalId)}
-            onSubmitRename={(label) => {
-              manager.renameSession(session.internalId, label);
-              setRenamingId(null);
-            }}
-            onCancelRename={() => setRenamingId(null)}
-          />
-        ))}
-      </div>
-      {overflowSessions.length > 0 && (
-        <OverflowMenu
-          sessions={overflowSessions}
-          activeId={activeId}
-          onActivate={(id) => manager.setActiveSession(id)}
-          onClose={handleClose}
-        />
-      )}
+    <div className="tw-flex tw-w-full tw-items-stretch tw-pl-2">
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
             variant="ghost2"
             size="icon"
-            onClick={handleNew}
-            disabled={isCreating}
-            aria-label="New chat"
+            onClick={onOpenSidebar}
+            aria-label="Open Copilot Navigator"
             className="tw-my-1 tw-shrink-0"
           >
-            <Plus className="tw-size-4" />
+            <PanelLeft className="tw-size-4" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>New chat</TooltipContent>
+        <TooltipContent>Open Copilot Navigator</TooltipContent>
       </Tooltip>
+      <div
+        ref={stripRef}
+        className="tw-relative tw-flex tw-min-w-0 tw-flex-1 tw-items-stretch tw-gap-1 tw-overflow-hidden tw-px-2"
+      >
+        <div role="tablist" className="tw-flex tw-min-w-0 tw-items-stretch tw-gap-1">
+          {visibleSessions.map((session) => (
+            <SessionTab
+              key={session.internalId}
+              session={session}
+              isActive={session.internalId === activeId}
+              isRenaming={renamingId === session.internalId}
+              onActivate={() => manager.setActiveSession(session.internalId)}
+              onClose={() => handleClose(session.internalId)}
+              onStartRename={() => setRenamingId(session.internalId)}
+              onSubmitRename={(label) => {
+                manager.renameSession(session.internalId, label);
+                setRenamingId(null);
+              }}
+              onCancelRename={() => setRenamingId(null)}
+            />
+          ))}
+        </div>
+        {overflowSessions.length > 0 && (
+          <OverflowMenu
+            sessions={overflowSessions}
+            activeId={activeId}
+            onActivate={(id) => manager.setActiveSession(id)}
+            onClose={handleClose}
+          />
+        )}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost2"
+              size="icon"
+              onClick={handleNew}
+              disabled={isCreating}
+              aria-label="New chat"
+              className="tw-my-1 tw-shrink-0"
+            >
+              <Plus className="tw-size-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>New chat</TooltipContent>
+        </Tooltip>
+      </div>
     </div>
   );
 };
@@ -253,6 +269,9 @@ const SessionTab: React.FC<TabProps> = ({
             if (e.button !== 2) e.preventDefault();
           }}
           onClick={onActivate}
+          onAuxClick={(e) => {
+            if (e.button === 1) onClose();
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
@@ -370,7 +389,7 @@ const BrandIcon: React.FC<BrandIconProps> = ({
         <Button
           variant="ghost2"
           size="icon"
-          aria-label="Close chat"
+          aria-label="Close tab"
           onClick={(e) => {
             e.stopPropagation();
             onCloseOnHover();
@@ -463,7 +482,7 @@ const OverflowRow: React.FC<OverflowRowProps> = ({ session, isActive, onActivate
       <Button
         variant="ghost2"
         size="icon"
-        aria-label="Close chat"
+        aria-label="Close tab"
         onClick={(e) => {
           e.stopPropagation();
           onClose();

@@ -1,4 +1,5 @@
 import { AI_SENDER, USER_SENDER } from "@/constants";
+import { logError } from "@/logger";
 import { Notice } from "obsidian";
 import { TurnTracker, type TurnOutcome, type TurnSend } from "./TurnTracker";
 import {
@@ -154,7 +155,7 @@ describe("TurnTracker", () => {
         const { tracker } = setup();
         const before = tracker.getQueuedPrompts();
         tracker.startSend();
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
 
         tracker.withdrawPrompts([ALSO.id]);
 
@@ -245,7 +246,7 @@ describe("TurnTracker", () => {
           turnSend.pushed();
         });
 
-        void tracker.queue(ALSO, false, async () => {
+        void tracker.queue(ALSO, async () => {
           order.push("q1 prepared");
           return () => TEXT;
         });
@@ -344,7 +345,7 @@ describe("TurnTracker", () => {
         const { deps, tracker } = setup();
         runningTurn(tracker, "p1", "t1");
 
-        const turn = tracker.queue(ALSO, false, async () => () => TEXT);
+        const turn = tracker.queue(ALSO, async () => () => TEXT);
         expect(tracker.getQueuedPrompts()).toEqual([ALSO]);
         expect(deps.notifyQueuedPrompts).toHaveBeenCalledTimes(1);
         await deps.whenSent(ALSO.id);
@@ -367,11 +368,11 @@ describe("TurnTracker", () => {
         });
         tracker.startSend().pushed();
 
-        void tracker.queue(ALSO, false, () => {
+        void tracker.queue(ALSO, () => {
           events.push("q1 preparing");
           return firstPrepared.promise;
         });
-        void tracker.queue(LATER, false, async () => {
+        void tracker.queue(LATER, async () => {
           events.push("q2 preparing");
           return () => TEXT;
         });
@@ -381,26 +382,12 @@ describe("TurnTracker", () => {
         expect(events).toEqual(["q1 preparing", "q1 sent", "q2 preparing", "q2 sent"]);
       });
 
-      it("asks the backend to interrupt only when the prompt was queued to interrupt", async () => {
-        const { deps, tracker } = setup();
-        tracker.startSend().pushed();
-
-        void tracker.queue(ALSO, true, async () => () => TEXT);
-        void tracker.queue(LATER, false, async () => () => TEXT);
-        await deps.whenSent(LATER.id);
-
-        expect(deps.sentPrompts).toEqual([
-          { promptId: ALSO.id, prompt: TEXT, interrupt: true },
-          { promptId: LATER.id, prompt: TEXT },
-        ]);
-      });
-
       it("resolves as cancelled and never builds or sends a prompt withdrawn while it was being prepared", async () => {
         const { deps, tracker } = setup();
         const prepared = deferred<() => PromptContent[]>();
         const build = jest.fn(() => TEXT);
         tracker.startSend().pushed();
-        const turn = tracker.queue(ALSO, false, () => prepared.promise);
+        const turn = tracker.queue(ALSO, () => prepared.promise);
 
         tracker.withdrawPrompts([ALSO.id]);
         prepared.resolve(build);
@@ -416,7 +403,7 @@ describe("TurnTracker", () => {
         deps.prompt.mockRejectedValueOnce(new Error("not accepting messages"));
         tracker.startSend().pushed();
 
-        const turn = tracker.queue(ALSO, false, async () => () => TEXT);
+        const turn = tracker.queue(ALSO, async () => () => TEXT);
 
         await expect(turn).rejects.toThrow("not accepting messages");
         expect(tracker.takeWithdrawnPrompts()).toEqual([ALSO]);
@@ -426,7 +413,7 @@ describe("TurnTracker", () => {
       it("rejects with the error of the turn that answered the prompt", async () => {
         const { deps, tracker } = setup();
         runningTurn(tracker, "p1", "t1");
-        const turn = tracker.queue(ALSO, false, async () => () => TEXT);
+        const turn = tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
         tracker.deliverPrompt(ALSO.id);
 
@@ -440,7 +427,7 @@ describe("TurnTracker", () => {
       it("withdraws a prompt that has not reached the backend without asking the backend", async () => {
         const { tracker } = setup();
         const turnSend = tracker.startSend();
-        const turn = tracker.queue(ALSO, false, async () => () => TEXT);
+        const turn = tracker.queue(ALSO, async () => () => TEXT);
         const withdrawSent = jest.fn(async () => true);
 
         await tracker.withdrawQueued(ALSO.id, withdrawSent);
@@ -454,7 +441,7 @@ describe("TurnTracker", () => {
       it("leaves a sent prompt queued until the backend reports it withdrawn", async () => {
         const { deps, tracker } = setup();
         runningTurn(tracker, "p1", "t1");
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
         const withdrawSent = jest.fn(async () => true);
 
@@ -468,7 +455,7 @@ describe("TurnTracker", () => {
         const { deps, tracker } = setup();
         const { replyId } = runningTurn(tracker, "p1", "t1");
         deps.store.appendAgentText(replyId, "working");
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
 
         await tracker.withdrawQueued(ALSO.id, async () => false);
@@ -496,7 +483,7 @@ describe("TurnTracker", () => {
       it("returns the withdrawn prompts once and then the same empty list", () => {
         const { tracker } = setup();
         tracker.startSend();
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
         tracker.withdrawPrompts([ALSO.id]);
 
         const first = tracker.takeWithdrawnPrompts();
@@ -542,15 +529,29 @@ describe("TurnTracker", () => {
         const { deps, tracker } = setup();
         const { outcome } = runningTurn(tracker, "p1", "t1");
         deps.store.appendAgentText(tracker.resolveContentTarget("m1")!, "partial");
+        const replyClosed = deps.nextMessagesChange();
 
         tracker.stop(false);
 
         await expect(outcome).resolves.toEqual({ stopReason: "cancelled" });
+        await replyClosed;
         expect(transcript(deps.store)).toEqual([[AI_SENDER, "partial", "cancelled"]]);
         expect(tracker.getReplyId()).toBeNull();
         expect(tracker.resolveContentTarget("m1")).toBeNull();
         expect(tracker.resolveContentTarget(undefined)).toBeNull();
         expect(deps.endLaunches).toHaveBeenCalledWith("stopped");
+      });
+
+      it("https://github.com/logancyang/obsidian-copilot/issues/4062 gives a reply the user stopped no agent cancel cause, even after a declined permission and the agent's own cancelled turn end", async () => {
+        const { deps, tracker } = setup();
+        const { outcome, replyId } = runningTurn(tracker, "p1", "t1");
+        deps.store.markPermissionDeclined(replyId);
+
+        tracker.stop(false);
+        tracker.endTurn({ turnId: "t1", stopReason: "cancelled" });
+        await outcome;
+
+        expect(deps.store.getMessage(replyId)?.agentCancelCause).toBeUndefined();
       });
 
       it("aborts a send that has not reached the backend and closes its reply without waiting for a turn", async () => {
@@ -571,7 +572,7 @@ describe("TurnTracker", () => {
         const { tracker } = setup();
         tracker.openReply();
         tracker.startSend();
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
 
         tracker.stop(true);
 
@@ -583,7 +584,7 @@ describe("TurnTracker", () => {
         const { tracker } = setup();
         tracker.openReply();
         tracker.startSend();
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
 
         tracker.stop(false);
 
@@ -605,6 +606,56 @@ describe("TurnTracker", () => {
           "tc-read": "cancelled",
           "tc-background": "in_progress",
         });
+      });
+      it("shows the stopped turn's file changes on the reply it closes", async () => {
+        const { deps, tracker } = setup();
+        const { outcome, replyId } = runningTurn(tracker, "p1", "t1");
+        deps.captureFileChanges.mockImplementationOnce(async (_files, messageId) =>
+          deps.store.setFileChanges(messageId, [
+            {
+              path: "note.md",
+              status: "modified",
+              before: "a\n",
+              after: "a\nb\n",
+              additions: 1,
+              deletions: 0,
+            },
+          ])
+        );
+        const replyClosed = deps.nextMessagesChange();
+
+        tracker.stop(false);
+        await outcome;
+        await replyClosed;
+
+        expect(deps.captureFileChanges).toHaveBeenCalledWith(expect.any(Map), replyId, undefined);
+        expect(deps.store.getMessage(replyId)?.fileChanges?.map((c) => c.path)).toEqual([
+          "note.md",
+        ]);
+      });
+
+      it("https://github.com/logancyang/obsidian-copilot/issues/4081 resolves the stopped prompt as cancelled and logs the error when closing the reply throws", async () => {
+        const { deps, tracker } = setup();
+        const { outcome } = runningTurn(tracker, "p1", "t1");
+        const failure = new Error("stopToolCalls failed");
+        jest.spyOn(deps.store, "stopToolCalls").mockImplementation(() => {
+          throw failure;
+        });
+
+        tracker.stop(false);
+
+        await expect(outcome).resolves.toEqual({ stopReason: "cancelled" });
+        expect(logError).toHaveBeenCalledWith(expect.any(String), failure);
+      });
+
+      it("https://github.com/logancyang/obsidian-copilot/issues/4081 resolves the stopped prompt as cancelled while the reply's file changes are still being captured", async () => {
+        const { deps, tracker } = setup();
+        const { outcome } = runningTurn(tracker, "p1", "t1");
+        deps.captureFileChanges.mockReturnValueOnce(new Promise<boolean>(() => {}));
+
+        tracker.stop(false);
+
+        await expect(outcome).resolves.toEqual({ stopReason: "cancelled" });
       });
     });
 
@@ -657,7 +708,7 @@ describe("TurnTracker", () => {
       it("resolves every prompt still waiting for its turn as cancelled and empties the queue without notifying", async () => {
         const { deps, tracker } = setup();
         const { outcome } = runningTurn(tracker, "p1", "t1");
-        const queued = tracker.queue(ALSO, false, async () => () => TEXT);
+        const queued = tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
         deps.notifyQueuedPrompts.mockClear();
 
@@ -743,7 +794,7 @@ describe("TurnTracker", () => {
         const { deps, tracker } = setup();
         const { replyId } = runningTurn(tracker, "p1", "t1");
         deps.store.appendAgentText(replyId, "working");
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
 
         tracker.deliverPrompt(ALSO.id);
@@ -760,7 +811,7 @@ describe("TurnTracker", () => {
         const { deps, tracker } = setup();
         const { outcome, replyId } = runningTurn(tracker, "p1", "t1");
         deps.store.appendAgentText(replyId, "Alpha: about A.");
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
         tracker.deliverPrompt(ALSO.id);
         const replyAfterPrompt = tracker.getReplyId()!;
@@ -774,7 +825,7 @@ describe("TurnTracker", () => {
       it("replaces an empty reply with the delivered prompt", async () => {
         const { deps, tracker } = setup();
         runningTurn(tracker, "p1", "t1");
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
 
         tracker.deliverPrompt(ALSO.id);
@@ -789,7 +840,7 @@ describe("TurnTracker", () => {
         const { deps, tracker } = setup();
         runningTurn(tracker, "p1", "t1");
         const turnFiles = tracker.getTurnFiles();
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
 
         tracker.deliverPrompt(ALSO.id);
@@ -800,7 +851,7 @@ describe("TurnTracker", () => {
       it("shows a prompt delivered between turns without opening a reply", async () => {
         const { deps, tracker } = setup();
         const { outcome } = runningTurn(tracker, "p1", "t1");
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
         deps.store.appendAgentText(tracker.getReplyId()!, "done");
         tracker.endTurn({ turnId: "t1", stopReason: "end_turn" });
@@ -820,7 +871,7 @@ describe("TurnTracker", () => {
       it("returns withdrawn queued prompts to the composer, reports them withdrawn and resolves their sends as cancelled", async () => {
         const { deps, tracker } = setup();
         runningTurn(tracker, "p1", "t1");
-        const turn = tracker.queue(ALSO, false, async () => () => TEXT);
+        const turn = tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
 
         tracker.withdrawPrompts([ALSO.id]);
@@ -846,7 +897,7 @@ describe("TurnTracker", () => {
       it("fails the open reply with the connection error and withdraws every sent prompt", async () => {
         const { deps, tracker } = setup();
         const { outcome } = runningTurn(tracker, "p1", "t1");
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
 
         tracker.disconnect(new Error("Claude exited"));
@@ -860,7 +911,7 @@ describe("TurnTracker", () => {
       it("opens a reply to show the error for a sent prompt whose turn never started", async () => {
         const { deps, tracker } = setup();
         const { outcome } = runningTurn(tracker, "p1", "t1");
-        void tracker.queue(ALSO, false, async () => () => TEXT);
+        void tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
         deps.store.appendAgentText(tracker.getReplyId()!, "done");
         tracker.endTurn({ turnId: "t1", stopReason: "end_turn" });
@@ -908,10 +959,36 @@ describe("TurnTracker", () => {
         expect(deps.onTurnCompleted).toHaveBeenCalledTimes(1);
       });
 
+      it("https://github.com/logancyang/obsidian-copilot/issues/4062 marks a reply the agent cancelled on its own with the declined permission that preceded it", async () => {
+        const { deps, tracker } = setup();
+        const { outcome, replyId } = runningTurn(tracker, "p1", "t1");
+        deps.store.appendAgentText(replyId, "I'll ask before running it.");
+        deps.store.markPermissionDeclined(replyId);
+
+        tracker.endTurn({ turnId: "t1", stopReason: "cancelled" });
+
+        await expect(outcome).resolves.toMatchObject({ stopReason: "cancelled" });
+        expect(deps.store.getMessage(replyId)).toMatchObject({
+          turnStopReason: "cancelled",
+          agentCancelCause: "permission_declined",
+        });
+      });
+
+      it("leaves a reply that ended normally without an agent cancel cause", async () => {
+        const { deps, tracker } = setup();
+        const { outcome, replyId } = runningTurn(tracker, "p1", "t1");
+        deps.store.appendAgentText(replyId, "done");
+
+        tracker.endTurn({ turnId: "t1", stopReason: "end_turn" });
+        await outcome;
+
+        expect(deps.store.getMessage(replyId)?.agentCancelCause).toBeUndefined();
+      });
+
       it("keeps a prompt the agent has not taken waiting for the turn that answers it", async () => {
         const { deps, tracker } = setup();
         const { outcome } = runningTurn(tracker, "p1", "t1");
-        const queued = tracker.queue(ALSO, false, async () => () => TEXT);
+        const queued = tracker.queue(ALSO, async () => () => TEXT);
         await deps.whenSent(ALSO.id);
         deps.store.appendAgentText(tracker.getReplyId()!, "first answer");
         tracker.endTurn({ turnId: "t1", stopReason: "end_turn" });
@@ -1016,6 +1093,21 @@ describe("TurnTracker", () => {
         expect(tracker.whenStoppedTurnEnds(new AbortController().signal)).toBeNull();
       });
 
+      it("https://github.com/logancyang/obsidian-copilot/issues/4081 resolves the delivered prompt and logs the error when closing the reply throws", async () => {
+        const { deps, tracker } = setup();
+        const { outcome, replyId } = runningTurn(tracker, "p1", "t1");
+        deps.store.appendAgentText(replyId, "done");
+        const failure = new Error("markTurnComplete failed");
+        jest.spyOn(deps.store, "markTurnComplete").mockImplementation(() => {
+          throw failure;
+        });
+
+        tracker.endTurn({ turnId: "t1", stopReason: "end_turn" });
+
+        await expect(outcome).resolves.toMatchObject({ stopReason: "end_turn" });
+        expect(logError).toHaveBeenCalledWith(expect.any(String), failure);
+      });
+
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/175 still closes the reply when its file changes cannot be captured", async () => {
         const { deps, tracker } = setup();
         const { outcome, replyId } = runningTurn(tracker, "p1", "t1");
@@ -1042,6 +1134,16 @@ describe("TurnTracker", () => {
         expect(deps.endLaunches).toHaveBeenCalledWith("failed");
         expect(tracker.getReplyId()).toBeNull();
         expect(tracker.hasLastTurnFailed()).toBe(true);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/762 hands the shown error text and the raw error to the session so it can offer a report", () => {
+        const { deps, tracker } = setup();
+        tracker.openReply();
+
+        const error = new Error("rate limited");
+        tracker.failReply(error);
+
+        expect(deps.onTurnFailed).toHaveBeenCalledWith("rate limited", error);
       });
 
       it("opens a reply to show the failure when none is open", () => {

@@ -14,6 +14,7 @@ import type { CopilotSettings } from "@/settings/model";
 import type {
   BackendDescriptor,
   BackendId,
+  BlockedModels,
   EffortOption,
   EnabledModelCredentialState,
   EnabledModelEntry,
@@ -54,7 +55,13 @@ export function appendBackendSection(
     appendEnabledFallbackEntries(entries, descriptor, enabledEntries);
     return;
   }
-  appendFromEnabledEntries(entries, descriptor, enabledEntries, ctx.backendModels);
+  appendFromEnabledEntries(
+    entries,
+    descriptor,
+    enabledEntries,
+    ctx.backendModels,
+    descriptor.getBlockedModels?.(ctx.settings, ctx.backendModels) ?? null
+  );
 }
 
 function appendEnabledFallbackEntries(
@@ -80,7 +87,8 @@ function appendFromEnabledEntries(
   entries: ModelSelectorEntry[],
   descriptor: BackendDescriptor,
   enabledEntries: ReadonlyArray<EnabledModelEntry>,
-  backendModels: ReadonlyArray<ModelEntry>
+  backendModels: ReadonlyArray<ModelEntry>,
+  blocked: BlockedModels | null
 ): void {
   const reportedById = new Map(backendModels.map((m) => [m.baseModelId, m]));
   for (const enabled of enabledEntries) {
@@ -97,7 +105,14 @@ function appendFromEnabledEntries(
       capabilities
     );
     const reason = credentialDisabledReason(enabled.credentialState, !!reported);
-    if (reason) entry._disabledReason = reason;
+    // An agent's own config can drop a provider Copilot added, which reads as a bug unless the picker names the cause.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/835
+    if (enabled.credentialState === "ok" && blocked?.baseModelIds.has(enabled.baseModelId)) {
+      entry._disabledReason = blocked.reason;
+      entry._disabledHint = blocked.hint;
+    } else if (reason) {
+      entry._disabledReason = reason;
+    }
     if (enabled.needsSelfHostWarning) entry._needsSelfHostWarning = true;
     entries.push(entry);
   }
@@ -138,7 +153,6 @@ export function synthesizeAgentEntry(
     name: baseModelId,
     provider: AGENT_PROVIDER,
     enabled: true,
-    isBuiltIn: false,
     displayName: humanName || baseModelId,
     capabilities,
     _group: descriptor.displayName,
@@ -213,6 +227,17 @@ export function buildPickerEntries(
     const backendModels = catalog?.availableModels ?? null;
     const hasNoCatalog = catalog === null;
     const preloadStatus = manager.getPreloadStatus(descriptor.id);
+    if (descriptor.routesCopilotModels && shouldPreviewCopilotModels(settings.providers)) {
+      entries.push(
+        ...lockedCopilotEntries(settings.copilotPlusCatalog, {
+          group: descriptor.displayName,
+          backendId: descriptor.id,
+        })
+      );
+    }
+    // An agent the user never installed must not promote its models, least of all to a licensed user.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/765
+    if (!isActiveBackend && descriptor.getInstallState(settings).kind === "absent") continue;
     const sectionStart = entries.length;
     appendBackendSection(entries, descriptor, {
       backendModels,
@@ -238,16 +263,6 @@ export function buildPickerEntries(
       for (let i = sectionStart; i < entries.length; i++) {
         entries[i]._needsSelfHostWarning = true;
       }
-    }
-    if (descriptor.routesCopilotModels && shouldPreviewCopilotModels(settings.providers)) {
-      entries.splice(
-        sectionStart,
-        0,
-        ...lockedCopilotEntries(settings.copilotPlusCatalog, {
-          group: descriptor.displayName,
-          backendId: descriptor.id,
-        })
-      );
     }
   }
 
@@ -324,10 +339,7 @@ function runCrossBackendPick(
     try {
       const seedSelection = { baseModelId, effort };
       if (oldSessionId) {
-        await manager.replaceSessionInPlace(oldSessionId, targetBackendId, {
-          preserveChatInput: true,
-          seedSelection,
-        });
+        await manager.replaceSessionInPlace(oldSessionId, targetBackendId, { seedSelection });
       } else {
         await manager.createSession(targetBackendId, undefined, seedSelection);
       }

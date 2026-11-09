@@ -17,7 +17,7 @@ import type {
   SessionUsage,
 } from "@/agentMode/session/types";
 import type { MessageContext } from "@/types/message";
-import type { FeedbackOffer } from "@/agentMode/session/feedback/feedbackOffer";
+import type { ChatStateKey, ChatStates, ChatView } from "@/agentMode/session/chatExtension";
 
 export class AgentChatUIState implements AgentChatBackend {
   private listeners = new Set<() => void>();
@@ -54,15 +54,13 @@ export class AgentChatUIState implements AgentChatBackend {
     text: string,
     context?: MessageContext,
     promptContent?: PromptContent[],
-    mentionedAgents?: ReadonlyArray<BackendId>,
-    options?: { interrupt?: boolean }
+    mentionedAgents?: ReadonlyArray<BackendId>
   ): { id: string; turn: Promise<void> } {
     const { userMessageId, turn } = this.session.sendPrompt(
       text,
       context,
       promptContent,
-      mentionedAgents,
-      options
+      mentionedAgents
     );
     this.notifyListeners();
     const wrapped = turn.then(
@@ -97,6 +95,14 @@ export class AgentChatUIState implements AgentChatBackend {
 
   async cancel(): Promise<void> {
     await this.session.cancel();
+  }
+
+  async sendWaitingNow(): Promise<void> {
+    await this.session.cancel({ keepUnread: true });
+  }
+
+  isReplyRunning(): boolean {
+    return this.session.isReplyRunning();
   }
 
   async deleteMessage(id: string): Promise<boolean> {
@@ -193,16 +199,16 @@ export class AgentChatUIState implements AgentChatBackend {
     return this.session.getCurrentTodoList();
   }
 
-  getFeedbackOffer(): FeedbackOffer | null {
-    return this.session.getFeedbackOffer();
+  getChatStates(): ChatStates {
+    return this.session.getChatStates();
   }
 
-  dismissFeedbackOffer(): void {
-    this.session.dismissFeedbackOffer();
+  readChatState<S>(key: ChatStateKey<S>): S {
+    return this.session.readChatState(key);
   }
 
-  markFeedbackReported(report: { reportId: string; issueUrl: string }): void {
-    this.session.markFeedbackReported(report);
+  updateChatState<S>(key: ChatStateKey<S>, change: (state: S, chat: ChatView) => S): void {
+    this.session.updateChatState(key, change);
   }
 
   getSessionUsage(): SessionUsage | null {

@@ -1,4 +1,5 @@
 import { assertBinaryCompatible } from "@/agentMode/backends/shared/binaryCompatibility";
+import type { App } from "obsidian";
 import { getSettings } from "@/settings/model";
 import { detectBinary } from "@/utils/detectBinary";
 import { AcpBackend, AcpSpawnDescriptor } from "@/agentMode/acp/types";
@@ -12,6 +13,7 @@ import type { PlanUsageReading } from "@/agentMode/session/planUsage";
 import type { TurnDiff } from "@/agentMode/session/types";
 import { defaultCodexHome, readCodexPlanUsage } from "./codexPlanUsage";
 import { mergeCodexConfigEnv } from "./codexConfigEnv";
+import { readCodexCopilotTools } from "./codexCopilotToolCalls";
 import { buildCodexAcpInvocation, inspectCodexAcpPackage, CODEX_MIN_VERSION } from "./codexVersion";
 
 // Codex's built-in Default mode says to ask in plain text instead of calling
@@ -23,6 +25,7 @@ export const CODEX_QUESTION_CARD_STEERING =
 export class CodexBackend implements AcpBackend {
   readonly id = "codex" as const;
   readonly displayName = "Codex";
+  readonly readCopilotTools = readCodexCopilotTools;
 
   // Codex records each file's baseline inside apply_patch and sends its turn diff only to clients that opt in.
   // https://github.com/agentclientprotocol/codex-acp/issues/601
@@ -30,7 +33,10 @@ export class CodexBackend implements AcpBackend {
 
   private codexHome: string | null = null;
 
-  constructor(private readonly clientVersion = "") {}
+  constructor(
+    private readonly app: App,
+    private readonly clientVersion = ""
+  ) {}
 
   async buildSpawnDescriptor(ctx: { vaultBasePath: string }): Promise<AcpSpawnDescriptor> {
     const settings = getSettings();
@@ -50,7 +56,7 @@ export class CodexBackend implements AcpBackend {
     );
     descriptor.env.CODEX_CONFIG = mergeCodexConfigEnv(
       descriptor.env.CODEX_CONFIG,
-      buildAgentSystemPrompt("codex", CODEX_QUESTION_CARD_STEERING)
+      buildAgentSystemPrompt("codex", this.app, CODEX_QUESTION_CARD_STEERING)
     );
     const installed = inspectCodexAcpPackage(descriptor.command);
     const entryPath = installed.entryPath;

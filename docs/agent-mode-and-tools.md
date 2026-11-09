@@ -8,6 +8,8 @@ Quick Chat remains available for lightweight conversation and is the main chat e
 
 Your sent messages display Markdown formatting, including headings, lists, code blocks, links, and image embeds. Copy and Edit keep the original Markdown text. Links and image embeds in saved chats resolve from the conversation note, even when another note is open.
 
+Selecting a note in Agent Chat, such as a file on a tool card, a drawing on a Copilot card, a link in a reply, or **Open note** in a change review, switches to the tab where that note is already open, including one in a popout window. A new tab opens only when the note isn't open. To open another tab anyway, Cmd-click (Ctrl-click on Windows and Linux) or middle-click it.
+
 ## Choose an agent
 
 Open [**Settings → Copilot → Basic → Agents**](settings.md#basic). Configure at least one agent, then choose the **Default agent** for new chats.
@@ -107,7 +109,7 @@ Each agent has its own model list. The models shown in one agent do not automati
 - Use the controls beside the composer to change the model or effort for the current chat.
 - Before the first message, choosing a model from another installed agent switches the empty chat to that agent. Once a conversation has started, it stays with its agent.
 - **Effort** appears only when the selected agent and model support it. Higher effort can improve difficult reasoning but may take longer and use more of your account allowance.
-- Models with effort controls always use a concrete effort. A supported saved effort is kept; otherwise Copilot chooses the lowest supported effort and updates the saved default. Models without effort controls omit effort. **Agent default** clears the saved model preference; the new session shows the agent's model and its resolved effort.
+- Models with effort controls always use a concrete effort. A supported saved effort is kept; otherwise Copilot chooses the lowest supported effort and updates the saved default. Models without effort controls omit effort. **Agent default** clears the saved model preference; the new chat shows the agent's model and its resolved effort.
 - Reloading an agent keeps each open chat's model and effort. If that model is no longer enabled for the agent, or is still waiting for its API key, the chat falls back to your saved default, or to one of your enabled models.
 
 The permission picker shows only choices supported by the current agent:
@@ -124,7 +126,7 @@ With Codex, **Safe** uses the adapter's **Ask for approval** preset. It can edit
 
 When Codex presents a plan, you can **Approve** it, **Reject** it, or type feedback in the plan card. Feedback starts a new chat turn so Codex can revise the plan; review the new proposal before approving it. If you ask Codex to save the plan to a note, approve the revised plan to let it create the note.
 
-When an action needs approval, Agent Chat displays a **Permission required** card with the proposed change or tool input. Choose one of the temporary or persistent allow or deny options offered by that agent. The one-time allow is highlighted. Hover an "always" option to see what it covers and how long it lasts: Claude names its rule and the settings file it saves to, and Codex and OpenCode say when they save a rule for later chats. Claude offers "Allow always" only when it has a rule to save. Stopping the turn cancels the agent's unanswered requests. A background task's request stays until you answer it or stop that task.
+When an action needs approval, Agent Chat displays a **Permission required** card with the proposed change or tool input. Choose one of the temporary or persistent allow or deny options offered by that agent. The one-time allow is highlighted. Hover an "always" option to see what it covers and how long it lasts: Claude names its rule and the settings file it saves to, and Codex and OpenCode say when they save a rule for later chats. Claude offers "Allow always" only when it has a rule to save. **Stop** cancels the agent's unanswered requests. A running subagent's requests stay open.
 
 When Claude or Codex asks a set of questions, answer the current tab and select **Next**. On the final tab, **Submit** becomes available after every question has an answer. You can use the tabs to review or skip ahead. **Cancel** dismisses the entire request. If Codex withdraws or times out the question, its card disappears.
 
@@ -140,17 +142,22 @@ Your vault or project is the agent's working directory, not a security sandbox. 
 
 Agent Chat keeps each conversation separate:
 
-- Select **+** for another session. Each tab keeps its own history, draft, attachments, and queued follow-ups.
+- Select **+** for another chat. Each tab keeps its own history, draft, attachments, and queued follow-ups.
 - Select **New chat** to reset the current tab.
-- Select **Stop** to cancel the current turn. Messages the agent has not read yet return to the message box, with their notes, web pages, agent mentions, and images, so you can edit or resend them. They come before the current draft, and custom commands return as their expanded text. Background tasks keep running.
+- **Copilot Navigator** is a preview for Supporters; without preview access, its icon and the **Open Copilot Navigator** command open a dialog about it. If you are a Supporter, select **Already a Supporter? Enter your license key** and enter your key in Copilot settings; Copilot Navigator opens once your access is active. If your preview access ends, Copilot Navigator offers **See plans** instead of your chats, which stay under **Recent chats** in Agent Chat. Select the **Copilot Navigator** icon at the left end of the tabs, or run **Open Copilot Navigator** from the command palette, to list your saved chats in **Copilot Navigator** in the left sidebar. While the sidebar is open the tabs are hidden, and closing it brings them back. Select a chat to open it; the open chat is highlighted. A chat's status shows at the right end of its row: a spinner marks a chat that is responding, an alert icon marks one waiting for your permission, and a green dot marks one that is **Running**. A bold title marks a chat with a result you have not seen. Leaving a chat before you send a message in it shuts it down, unless you typed text or attached a note in it. A chat you sent a message in keeps running until you shut it down, so its changes and an unseen result are still there when you come back. Select **New chat** at the top to start a new global chat; it is listed under **Recents** once you send its first message.
+- The sidebar groups chats into **Pinned**, **Projects**, and **Recents**. A pinned chat is listed only under **Pinned**, with its Project's name beside it. Each Project is a folder that opens to show its five newest chats; select **Show more** to list the rest of the Projects or of a Project's chats. **Recents** lists chats outside any Project and loads more as you scroll. Projects and chats are listed newest first and keep their place when you open them. Select a group's name or a Project to fold or unfold it; folds stay after you reload Obsidian. Hover a Project and select **+** to start a chat in it. Select **+** beside **Projects**, type a name, and press Enter to create a Project; press Escape to cancel. A folder shows the most urgent status of the chats it hides: waiting for permission, then an unseen result, then responding.
+- Hover a chat in the sidebar to swap its status for **Pin chat**, **Archive chat**, and **...**. Select **...** (or right-click) for its other actions: rename, delete, open the chat note, and **Shut down** for a running chat. Hover a Project and select **...** (or right-click) to reveal, edit, archive, or delete it. Select the search icon to filter chats by title across every group. Select the **...** at the top and choose **View archived** to see archived chats and Projects; they are not listed in the sidebar.
+- While the sidebar is open, the Agent Chat start page shows only the greeting, the message box, and **Relevant Notes**, and a Project's start page shows only its context. To leave a Project, select another chat or **New chat** in the sidebar. Closing the sidebar brings back the **Recent chats** and **Projects** lists.
+- Select **Stop** to cancel the current turn. Messages the agent has not read yet return to the message box, with their notes, web pages, agent mentions, and images, so you can edit or resend them. They come before the current draft, and custom commands return as their expanded text. Subagents and background commands keep running; stop each one from the running-tasks list.
 - Use **Recent chats** from the Agent Chat home screen, or **Chat history** inside a conversation, to resume saved work. The **Recent chats** list can be scrolled or searched.
 - Hover a chat in **Recent chats** and select **Pin chat** to keep it at the top of the list, above a divider. The most recently pinned chat comes first, and pinned chats keep their order when you use them or change how history is sorted. Select **Unpin chat** to return it to its usual place. The pin is saved in the chat's Markdown note, so it lasts across restarts and appears in both the global and the Project list. Pinning a chat that has no note yet saves it as a note first, even when autosave is off. **Chat history** inside a conversation ignores pins.
 - The bar above the composer holds **New chat**, **Save chat as note** (when autosave is off), **Chat history**, and **More actions** (⋯), and starts with a task count, such as **2 tasks running**, while background tasks run. **More actions** has **Copy chat link**, **Add to bookmarks**, and **Report an issue**. **Copy chat link** and **Add to bookmarks** stay dimmed until you send the chat's first message.
+- Hover a chat in **Recent chats**, select **More actions**, and choose **Archive chat** to put it away without deleting it. Archived chats disappear from **Recent chats**, **Chat history** and the Project list, even when pinned. Select **View archived** below the list to unarchive a chat or open it. Sending a message in an archived chat unarchives it.
 - To bookmark the open chat in Obsidian's **Bookmarks** pane, select **More actions** above the composer and choose **Add to bookmarks**. To bookmark a chat without opening it, hover it in **Recent chats**, select **More actions** (or right-click the row), and choose **Add to bookmarks**. The bookmark uses the chat's title, and clicking it opens the chat in Agent Chat. A chat that has no note yet is saved as one first, even when autosave is off. Choose **Remove from bookmarks** to remove it. Deleting the chat from **Recent chats** also removes its bookmark, while renaming the chat keeps the bookmark's title. While the **Bookmarks** core plugin is turned off, **Add to bookmarks** is dimmed, with an info icon explaining why. Selecting it opens **Settings → Core plugins** filtered to **Bookmarks** so you can turn it on.
 - Select **More actions** above the composer and choose **Report an issue** to report a problem with the current chat, with its screenshot and agent details ready. See [Reporting from Agent Chat](troubleshooting-and-faq.md#reporting-from-agent-chat).
 - Select **More actions** above the composer and choose **Copy chat link** to copy an `obsidian://` link to the current conversation. Paste it into another note to reopen the chat in the same vault. The link points to the conversation's Markdown note, so Copilot saves the note first if it does not exist yet, including when autosave is off. The link keeps working after the note is renamed. To copy a link without opening the chat, hover it in **Recent chats**, select **More actions**, and choose **Copy chat link**. A chat that has no note yet is saved as one first.
-- Properties you add to an Agent chat note stay when Copilot saves the chat again. Copilot updates only the properties it manages: the agent, session, project, token usage, and tags.
-- A spinner marks a chat while its agent is responding or one of its background tasks runs. Closing a chat's tab keeps it running. When the response stops but the session remains live, a small blue dot appears on the bottom-right corner of the chat icon. Hover the row and select **Close chat** to release that session. Saved history stays available to reopen, and other chats keep running. If the agent does not support closing individual sessions or release fails, the chat stays marked live with an error.
+- Properties you add to an Agent chat note stay when Copilot saves the chat again. Copilot updates only the properties it manages, such as `backendId`, `sessionId`, `projectId`, `usage`, and `tags`.
+- A spinner marks a chat while its agent is responding or one of its background tasks runs. Closing a chat's tab keeps it running once you have sent a message in it; a chat you leave or close without sending a message shuts down. When the response stops but the chat is still running, a small blue dot appears on the bottom-right corner of the chat icon. Hover the row and select **Shut down** to stop it. Saved history stays available to reopen, and other chats keep running. If the agent can't shut down a single chat, or shutting down fails, the chat stays marked running with an error.
 - Deleting an Agent chat removes Copilot's chat note and its entry in Copilot's chat history. Claude Code, Codex, and OpenCode may keep their own copy of the conversation on your computer. Copilot does not delete or change those files, so you can still resume the chat in that agent's own tool. The confirmation and the notice after the delete both say this. Deleting an open chat closes it and stops any reply in progress.
 - Add the active note, selected text, other notes, folders, a Copilot Web Viewer tab, or supported images. You can also mention a note with `[[Note title]]`.
 - Hover the context ring beside the send controls to see how much of the model's context window is in use. The ring stays empty until the agent reports usage, and a stopped response keeps the last reported reading. If the connected account reports usage limits, the same panel shows the available limit and reset time.
@@ -197,11 +204,11 @@ A step cut short by **Stop** shows as stopped. Any other step the agent left unf
 
 ### Send a message
 
-You can type and send while the agent works. With Claude, the message waits above the message box under **The agent reads these at its next step**, then moves into the chat when the agent reads it. Select **Withdraw queued message** to take it back into the message box. **Send now** interrupts the agent and sends your message at once. With Codex and OpenCode, the message waits with **Sends when the agent finishes**.
+You can type and send while the agent works. The button beside the message box is **Stop** while the agent's reply runs and the box is empty. Otherwise it is **Send**. With Claude, the message waits above the message box under **The agent reads these at its next step**, then moves into the chat when the agent reads it. Select **Withdraw queued message** to take it back into the message box, or **Send now** to stop the agent's current reply so it reads every waiting message right away. Background subagents and commands keep running. With Codex and OpenCode, the message waits with **Sends when the agent finishes**.
 
 ### Background subagents and commands
 
-Claude runs subagents and long commands in the background unless it needs to wait on one, so you can keep chatting. A task appears as soon as Claude starts launching it. When one finishes, Claude replies with its result on its own.
+Claude runs subagents and long commands in the background unless it needs to wait on one, so you can keep chatting. A task appears as soon as Claude starts launching it. When one finishes, Claude replies with its result on its own. The chat's spinner stays on until every subagent has finished and Claude has replied about it.
 
 - Hover the task count above the composer, such as **2 tasks running**, to see each running task.
 - Select a task, or its card in the chat, to open its view: a subagent's steps or a command's output. Select **Back to chat** or press Escape to return.
@@ -211,13 +218,19 @@ Claude runs subagents and long commands in the background unless it needs to wai
 
 When a turn finishes after the agent has edited your vault, a **Files changed** card closes that turn. It lists one row per note, with the number of added and removed lines, and a **new** or **deleted** badge for notes the agent created or removed. The card totals the changes in its header and scrolls when a turn touched many files. A subagent's edits show on a card in that subagent's view instead.
 
-Select a row to open that note's before and after as a single tab. Removed text is struck through, added text is highlighted, and everything else reads as the note normally does, including the blank lines between paragraphs, so you can see the exact wording the agent changed without leaving Obsidian. The tab is read-only and never writes to your vault; use **Open note** in its header to open the note itself and edit it there. Files that are not notes, such as canvases, are shown as a plain line-by-line comparison.
+Select a row to open that note's before and after as a single tab. Removed text is struck through, added text is highlighted, and everything else reads as the note normally does, including the blank lines between paragraphs, so you can see the exact wording the agent changed without leaving Obsidian. Use **Open note** in its header to open the note itself and edit it there. Files that are not notes, such as canvases, are shown as a plain line-by-line comparison.
+
+To undo part of a turn, hover over a stretch of changes and select **Revoke**. That stretch goes back to what the note said before the turn, and the rest of the note stays as it is. Revoke is unavailable for a stretch that you or a later turn edited after this turn, and for notes the agent created or deleted. The agent is not told about a revoke.
+
+To undo everything the turn did to the note, select **Revoke all** in the tab's header. An edited note goes back to its text from before the turn, a note the agent created is deleted according to your **Files and links > Deleted files** setting, and a note the agent deleted is recreated. Revoke all is unavailable once you or a later turn edits the note, or, for a deleted note, once another file takes its place.
+
+Select text in the tab to attach it to your next message. Removed and added words in the selection stay marked, so a question such as "why did you change this?" is about exactly that change.
 
 In a long note, a narrow strip along the left edge of the tab shows where the changes are. The strip stands for the whole note, with one mark for each change at its position in the note: green where text was added, red where it was removed, and blue where both happened. Select a mark to jump to that change.
 
 The header shows which change you are at, such as "1 of 6". Use the up and down arrows beside it to move to the previous or next change; moving past the last change returns to the first. The **Go to next change in file diff** and **Go to previous change in file diff** commands do the same, so you can assign them hotkeys in Obsidian's settings.
 
-Selecting the same row again returns you to the tab that is already open. This review is part of the current session only: closing Obsidian or reloading the plugin drops the cards and the diff tabs, and earlier turns show no card when you reopen a saved conversation.
+Selecting the same row again returns you to the tab that is already open. This review lasts until you close Obsidian or reload the plugin, which drops the cards and the diff tabs. Earlier turns show no card when you reopen a saved chat.
 
 The card covers the notes an agent changed with its editing tools. Changes an agent makes by running a shell command, such as deleting a note with `rm`, are not listed. Treat the card as a review aid rather than a complete audit of the turn.
 
@@ -249,7 +262,7 @@ Custom Skills and built-in Obsidian Skills are free. Active Plus access adds clo
 
 The web search and web fetch Skills (`copilot-web-search` and `copilot-web-fetch`) start turned off in new installs, so agents use their own web tools. Turn them on in **Built-in skills** to route those requests through Copilot instead.
 
-The Obsidian Skills (`obsidian-markdown`, `obsidian-bases`, `json-canvas`, and `obsidian-cli`) start turned on for OpenCode in new installs, and `obsidian-bases` also for Codex. Turn them on for other agents in **Built-in skills**. `obsidian-cli` works only while **Command line interface** is on in Obsidian's **Settings → General**; while it is off, agents do not receive that Skill.
+In new installs, `obsidian-markdown` starts turned on for every agent, `obsidian-bases` for Codex and OpenCode, and `json-canvas` for OpenCode. Turn them on for other agents in **Built-in skills**.
 
 While **Miyo document processing** is on, which is the default, agents read PDF and EPUB files through Copilot's Miyo parse tool, which asks the connected Miyo to parse them and does not need Plus access. The tool is available only while Miyo is connected. With a remote Miyo server, files in the vault parse on that server, and files outside the vault can't be parsed. If Miyo cannot parse a file, the agent tells you and reads the file with its own tools. With **Miyo document processing** off, agents read documents with their own tools.
 
@@ -261,28 +274,48 @@ If you set a custom `OPENCODE_CONFIG_CONTENT` for OpenCode, Self-Host Mode adds 
 
 On Windows, creating the folder links may require **Developer Mode** or administrator access. If a sync service replaces a link, toggle that Skill off and on for the affected agent to recreate it.
 
+## The running Obsidian app
+
+While **Command line interface** is on in Obsidian's **Settings → General**, Claude Code, Codex, and OpenCode reach the running Obsidian app through Copilot's Obsidian CLI tool. Ask about open tabs, daily notes, typed properties, tasks, backlinks and unresolved links, or Bases results, or create a note from a template and rename notes with their links updated. There is no skill to turn on. Depending on the permission mode, the agent asks before each command. The tool refuses to reload Obsidian or turn off Copilot, because that would end the chat.
+
+## Excalidraw drawings
+
+While the Excalidraw plugin (2.29 or later) is enabled, Claude Code, Codex, and OpenCode read, draw, and edit Excalidraw drawings through Copilot's Excalidraw tools. The Excalidraw plugin builds each drawing, so labels stay inside their shapes and arrows stay attached when you move a shape. There is no skill to turn on.
+
+- Ask for a diagram, flowchart or chart, for example "Draw a diagram of the steps in [[Release process]]". The agent draws it in Excalidraw and embeds it in the note it belongs to. Ask for a Mermaid diagram or a canvas to get that instead. Creating a drawing never overwrites an existing file.
+- Select shapes in an open drawing to point the agent at them, for example "make these red". The selection is attached to your next message, like selected text. Clicking empty canvas removes it.
+- When the agent edits a drawing, Obsidian opens it in a tab and saves each change.
+- After drawing or editing, the agent looks at a picture of the result and fixes overlaps before it answers.
+- In the chat, a Copilot card marks each drawing the agent draws, edits or reads. Click the drawing's name to open it.
+- Codex asks you to approve each change to a drawing unless the chat is in **Auto**.
+
+## Outside services
+
+Connect services such as Notion, Linear, and Todoist under **Settings → Copilot → Connectors**, and Claude Code, Codex, and OpenCode can use them in your chats. See [Connectors](connectors.md).
+
 ## Applying a settings change
 
-Agents read their configuration when they start: API keys, enabled models, instructions, and skills. A change you make while a chat is open does not reach the agent already running. Agent Chat says so with a **settings changed** notice and a **Reload** action, and the chat keeps working in the meantime.
+Agents read their configuration when they start: API keys, enabled models, instructions, skills, and connectors. A change you make while a chat is open does not reach the agent already running. Agent Chat says so with a **settings changed** notice and a **Reload** action, and the chat keeps working in the meantime.
 
 The notice names the agent that needs to reload. Changing Claude's enabled models does not ask you to reload OpenCode. Settings an agent can apply without restarting do not need a reload notice.
 
 Choose **Reload** when you want the change to take effect. The agent restarts and reopens every chat using that agent, keeping each chat’s history and anything you had typed but not sent. During a running turn the reload waits for that turn to finish. If the agent cannot reopen a conversation, that tab starts a fresh chat and the old one remains under Recent chats. If a chat failed to start, correct its settings and choose **Retry** to apply them.
 
-Turning on Self-Host Mode never waits: it restarts the agent straight away, so no later step in the conversation can browse outside the new boundary. Changes to Miyo's **Search scope** and to the Miyo folders ticked under **Current vault** apply to the agent's next search, with no reload.
+Turning on Self-Host Mode never waits: it restarts the agent straight away, so no later step in the conversation can browse outside the new boundary. Changes to Miyo's **Search scope**, the Miyo folders ticked under **Current vault**, **Maximum results** and **Search variants** apply to the agent's next search, with no reload.
 
 ## Related
 
 - [Getting Started](getting-started.md)
 - [Models, Effort, and Permissions](models-and-parameters.md)
 - [Projects](projects.md)
+- [Connectors](connectors.md)
 - [Instructions for Agent Chat and Quick Chat](system-prompts.md)
 - [Copilot Commands and Quick Ask](custom-commands.md)
 - [Copilot Plans, Privacy, and Self-Hosting](copilot-plus-and-self-host.md)
 
 ### Publishing from Agent Chat
 
-Claude Code, Codex, and OpenCode publish through Copilot's own OpenArtifacts tools, which send your Copilot Plus license key to `api.openartifacts.ai` over HTTPS. There is nothing to install and no skill to turn on. Every agent session has the tools; without Copilot Plus, the agent tells you that OpenArtifacts comes with Copilot Plus and gives you an upgrade link, and nothing is published.
+Claude Code, Codex, and OpenCode publish through Copilot's own OpenArtifacts tools, which send your Copilot Plus license key to `api.openartifacts.ai` over HTTPS. There is nothing to install and no skill to turn on. Every chat has the tools; without Copilot Plus, the agent tells you that OpenArtifacts comes with Copilot Plus and gives you an upgrade link, and nothing is published.
 
 Ask the agent to publish a Markdown note or an existing HTML file. For Markdown, the agent renders the note to HTML and publishes it in the same turn, without writing a file. For an HTML file, it publishes that file's contents; only that page is uploaded, so relative local images or styles in it will not load. A page the agent creates is always private: only you, and anyone you name, can open it. Copilot opens a new page in your browser, already signed in, and to make it open to anyone with the link, choose **Anyone with the link** in **Share** on the page. Updating a page that is already published keeps who can open it.
 
@@ -319,7 +352,7 @@ If your Copilot license is not linked to an OpenArtifacts account, the first new
 
 When an installed agent needs a supported version, select **Configure** in Basic → Agents. Agent Chat offers **Upgrade** if Copilot can upgrade that installation. Both surfaces show the same progress and failures, including upgrades started in Configure. If an upgrade fails, retry in Configure or use **Retry** in Agent Chat. A failed custom-path selection is reported in Configure and does not turn the upgrade action into a path-validation retry.
 
-Image-only messages appear as "Image attachment" in the queue. Sessions with only images use the same fallback title in tabs and Recent chats until a text or agent-generated title is available.
+Image-only messages appear as "Image attachment" in the queue. Chats with only images use the same fallback title in tabs and Recent chats until a text or agent-generated title is available.
 
 ### Managed runtime updates
 

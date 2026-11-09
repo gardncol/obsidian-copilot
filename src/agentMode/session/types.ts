@@ -4,6 +4,7 @@ import type { ModelCapability } from "@/constants";
 import type { FormattedDateTime, MessageContext } from "@/types/message";
 import type { FanoutTurn } from "@/agentMode/session/fanout/fanoutTypes";
 import type { PlanUsage } from "@/agentMode/session/planUsage";
+import type { CopilotToolUse } from "@/agentMode/session/copilotToolCalls";
 
 export type { PlanUsage, UsageWindow } from "@/agentMode/session/planUsage";
 import type { ProjectScopeId } from "./scope";
@@ -38,6 +39,7 @@ export interface ModeMapping {
   configId?: string;
   canonical: Partial<Record<CopilotMode, string>>;
   readOnlyModeId?: string | null;
+  unlistedModeShowsAs?: CopilotMode;
 }
 
 export interface ModeOption {
@@ -72,6 +74,12 @@ export interface EnabledModelEntry {
   capabilities?: ModelCapability[];
   isFree?: boolean;
   needsSelfHostWarning?: boolean;
+}
+
+export interface BlockedModels {
+  baseModelIds: ReadonlySet<string>;
+  reason: string;
+  hint: string;
 }
 
 export interface ModelSelection {
@@ -170,6 +178,8 @@ export type PromptContent =
 
 export type StopReason = "end_turn" | "cancelled" | "refusal" | "max_tokens" | "max_turn_requests";
 
+export type AgentCancelCause = "permission_declined" | "unspecified";
+
 export type AgentToolKind =
   | "read"
   | "edit"
@@ -217,6 +227,7 @@ export interface ToolCallSnapshot {
   locations?: Array<{ path: string; line?: number | null }>;
   vendorToolName?: string;
   mcpServer?: string;
+  copilotTools?: CopilotToolUse;
   parentToolCallId?: string;
   progress?: AgentToolProgress;
   isPlanProposal?: boolean;
@@ -233,6 +244,7 @@ export interface ToolCallDelta {
   locations?: Array<{ path: string; line?: number | null }> | null;
   vendorToolName?: string;
   mcpServer?: string;
+  copilotTools?: CopilotToolUse;
   parentToolCallId?: string;
   progress?: AgentToolProgress;
   isPlanProposal?: boolean;
@@ -277,6 +289,7 @@ export type SessionUpdate =
   | { sessionUpdate: "messages_withdrawn"; promptIds: string[] }
   | { sessionUpdate: "turn_started"; turnId: string; startedAt?: number }
   | ({ sessionUpdate: "turn_ended" } & TurnEnd)
+  | { sessionUpdate: "busy_changed"; busy: boolean }
   | { sessionUpdate: "session_disconnected"; error: Error }
   | ({ sessionUpdate: "task_started" } & TaskStart)
   | {
@@ -396,6 +409,7 @@ export interface AgentMcpServer {
   name: string;
   url: string;
   headers: Readonly<Record<string, string>>;
+  readOnlyToolNames: ReadonlyArray<string>;
 }
 
 export interface OpenSessionInput {
@@ -431,7 +445,6 @@ export interface PromptInput {
   sessionId: SessionId;
   promptId: string;
   prompt: PromptContent[];
-  interrupt?: boolean;
 }
 
 export interface QueuedPrompt {
@@ -463,6 +476,7 @@ export interface ListSessionsOutput {
 
 export interface CancelInput {
   sessionId: SessionId;
+  keepUnread?: boolean;
 }
 
 export interface WithdrawInput {
@@ -508,7 +522,6 @@ export interface BackendProcess {
   listSessions(params: ListSessionsInput): Promise<ListSessionsOutput>;
   resumeSession(params: ResumeSessionInput): Promise<ResumeSessionOutput>;
   loadSession(params: LoadSessionInput): Promise<LoadSessionOutput>;
-  sessionExistsLocally?(params: { sessionId: SessionId; cwd: string }): Promise<boolean>;
   shutdown(): Promise<void>;
 }
 
@@ -525,6 +538,7 @@ export type AgentMessagePart =
       locations?: { path: string; line?: number }[];
       vendorToolName?: string;
       mcpServer?: string;
+      copilotTools?: CopilotToolUse;
       parentToolCallId?: string;
       progress?: AgentToolProgress;
     }
@@ -555,6 +569,7 @@ export interface AgentChatMessage {
   context?: MessageContext;
   content?: unknown[];
   turnStopReason?: StopReason;
+  agentCancelCause?: AgentCancelCause;
   turnDurationMs?: number;
   fanout?: FanoutTurn;
   fileChanges?: TurnFileChange[];

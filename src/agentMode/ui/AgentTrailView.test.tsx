@@ -5,12 +5,21 @@ import { AppContext } from "@/context";
 import { AgentTrail } from "@/agentMode/ui/AgentTrailView";
 import type { AgentMessagePart, TurnFileChange } from "@/agentMode/session/types";
 import { miyoSearchCall } from "@/miyo/agentMode/testing/miyoSearchCall";
+import { excalidrawToolCall } from "@/excalidraw/agentMode/testing/excalidrawToolCall";
 import { AgentTasksProvider } from "@/agentMode/ui/AgentTasksContext";
 import { makeCommandTask, makeTask } from "@/agentMode/ui/testing/taskFixtures";
 
 jest.mock("@/agentMode/ui/AgentMarkdownText", () => ({
-  AgentMarkdownText: ({ text, miyoPaths }: { text: string; miyoPaths?: string[] }) => (
-    <div data-testid="agent-md" data-miyo-paths={miyoPaths?.join("|")}>
+  AgentMarkdownText: ({
+    text,
+    miyoPaths,
+    streaming,
+  }: {
+    text: string;
+    miyoPaths?: string[];
+    streaming?: boolean;
+  }) => (
+    <div data-testid="agent-md" data-streaming={streaming} data-miyo-paths={miyoPaths?.join("|")}>
       {text}
     </div>
   ),
@@ -24,6 +33,7 @@ jest.mock("@/utils", () => ({
 jest.mock("obsidian", () => {
   class MarkdownView {}
   return {
+    Keymap: jest.requireActual<typeof import("obsidian")>("obsidian").Keymap,
     MarkdownView,
     Component: class {
       load() {}
@@ -95,6 +105,16 @@ const LINT = toolCall("b1", {
 });
 
 describe("AgentTrail", () => {
+  it("ends the live text lifecycle when the turn stops (https://github.com/Brevilabs/obsidian-copilot-private/issues/883)", () => {
+    const parts = [text("Earlier"), text("Arriving")];
+    const view = renderTrail({ parts, isStreaming: true });
+    const live = screen.getAllByTestId("agent-md");
+    expect(live[live.length - 1].getAttribute("data-streaming")).toBe("true");
+    view.rerenderTrail({ parts, isStreaming: false });
+    expect(
+      screen.getAllByTestId("agent-md").every((el) => el.getAttribute("data-streaming") === "false")
+    ).toBe(true);
+  });
   let writeText: jest.Mock;
 
   beforeEach(() => {
@@ -375,6 +395,27 @@ describe("AgentTrail", () => {
     expect(screen.getAllByTestId("agent-md")).toHaveLength(1);
   });
 
+  it("https://github.com/logancyang/obsidian-copilot/issues/4062 says the agent ended its turn after a declined permission, so a reply the agent cancelled does not look frozen", () => {
+    renderTrail({
+      parts: [text("I'll ask before running it."), toolCall("x1", { status: "failed" })],
+      turnStopReason: "cancelled",
+      agentCancelCause: "permission_declined",
+    });
+
+    expect(screen.getAllByTestId("agent-md").map((el) => el.textContent)).toEqual([
+      "I'll ask before running it.",
+      "**Stopped:** the agent ended its turn after you declined a permission. Send a message to tell it what to do next.",
+    ]);
+  });
+
+  it("https://github.com/logancyang/obsidian-copilot/issues/4062 says only that the agent ended its turn when no permission was declined, even before any text or tool activity", () => {
+    renderTrail({ parts: [], turnStopReason: "cancelled", agentCancelCause: "unspecified" });
+
+    expect(screen.getAllByTestId("agent-md").map((el) => el.textContent)).toEqual([
+      "**Stopped:** the agent ended its turn early. Send a message to continue.",
+    ]);
+  });
+
   it("uses one aligned folding header for reasoning and every tool-card family", () => {
     const { container } = renderTrail({
       parts: [
@@ -548,6 +589,24 @@ describe("AgentTrail", () => {
     expect(screen.getByText("Ran 2 commands, read 1 file")).toBeTruthy();
   });
 
+  it("counts each call folded into a sub-agent's Excalidraw card as a tool (https://github.com/Brevilabs/obsidian-copilot-private/issues/787)", () => {
+    const board = { path: "Boards/Launch board.excalidraw.md", operations: [] };
+    renderTrail({
+      parts: [
+        toolCall("task1", {
+          vendorToolName: "Task",
+          input: { subagent_type: "Explore", description: "Draw it" },
+        }),
+        excalidrawToolCall("excalidraw_write", board, { id: "w1", parentToolCallId: "task1" }),
+        excalidrawToolCall("excalidraw_render", board, { id: "r1", parentToolCallId: "task1" }),
+      ],
+    });
+
+    fireEvent.click(screen.getByText('Explore · "Draw it"'));
+
+    expect(screen.getByText("2 tools")).toBeTruthy();
+  });
+
   it("keeps an opened tool visible when streaming turns it into a group", () => {
     const readWithOutput = {
       ...READ_A,
@@ -649,6 +708,7 @@ describe("AgentTrail", () => {
     const app = {
       workspace: { getActiveFile: jest.fn(() => null), openLinkText },
       vault: { getAbstractFileByPath: jest.fn(() => ({})) },
+      metadataCache: { getFirstLinkpathDest: jest.fn(() => null) },
     } as never;
     renderTrail({
       app,
@@ -660,7 +720,7 @@ describe("AgentTrail", () => {
     fireEvent.click(screen.getByRole("button", { name: /^a/ }));
 
     expect(screen.getByText("b")).toBeTruthy();
-    expect(openLinkText).toHaveBeenCalledWith("v/a.md", "", true);
+    expect(openLinkText).toHaveBeenCalledWith("v/a.md", "", "tab");
   });
 
   it("renders a failed Miyo search as a failed card with its reason and no badge paths (https://github.com/Brevilabs/obsidian-copilot-private/issues/735)", () => {
@@ -684,6 +744,52 @@ describe("AgentTrail", () => {
     });
 
     expect(screen.getByTestId("agent-md").getAttribute("data-miyo-paths")).toBe("v/a.md|v/b.md");
+  });
+
+  it("renders an Excalidraw write as a Copilot card between grouped work and opens the drawing in a new tab (https://github.com/Brevilabs/obsidian-copilot-private/issues/787)", () => {
+    const openLinkText = jest.fn();
+    const app = {
+      workspace: { getActiveFile: jest.fn(() => null), openLinkText },
+      vault: { getAbstractFileByPath: jest.fn(() => ({})) },
+      metadataCache: { getFirstLinkpathDest: jest.fn(() => null) },
+    } as never;
+    const write = excalidrawToolCall("excalidraw_write", {
+      path: "Drawings/Release plan.excalidraw.md",
+      elements: [],
+    });
+    renderTrail({ app, parts: [READ_A, LINT, write, READ_B, LINT, text("Drew it.")] });
+
+    expect(screen.getByText("Drew in Excalidraw")).toBeTruthy();
+    expect(screen.getAllByText("Ran 2 commands, read 1 file")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "Release plan" }));
+    expect(openLinkText).toHaveBeenCalledWith("Drawings/Release plan.excalidraw.md", "", "tab");
+  });
+
+  it("shows an agent's uninterrupted work on one drawing as one card whose steps include a failed write's error (https://github.com/Brevilabs/obsidian-copilot-private/issues/787)", () => {
+    const board = { path: "Boards/Launch board.excalidraw.md", operations: [] };
+    renderTrail({
+      parts: [
+        excalidrawToolCall("excalidraw_write", board, { id: "w1" }),
+        excalidrawToolCall("excalidraw_render", board, { id: "render-1" }),
+        excalidrawToolCall("excalidraw_write", board, {
+          id: "w2",
+          status: "failed",
+          output: [{ type: "text", text: "INVALID_INPUT: Unsupported field" }],
+        }),
+        READ_A,
+        excalidrawToolCall("excalidraw_write", board, { id: "w3" }),
+        text("Updated the board."),
+      ],
+    });
+
+    expect(screen.getAllByText("Edited in Excalidraw")).toHaveLength(1);
+    expect(screen.getByText("1 failed")).toBeTruthy();
+    expect(screen.queryByText(/Unsupported field/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show Excalidraw steps" }));
+    fireEvent.click(screen.getAllByText(/Excalidraw write/)[1]);
+
+    expect(screen.getByText(/Unsupported field/)).toBeTruthy();
   });
 
   describe("with task state from the session", () => {
@@ -730,6 +836,24 @@ describe("AgentTrail", () => {
 
       expect(screen.getByText("Print 30 progress lines")).toBeTruthy();
       expect(screen.queryByText(/Ran 2 commands/)).toBeNull();
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/793 shows a task a sub-agent launched as its task card inside the sub-agent, not folded into its command group", () => {
+      renderWithTasks([
+        toolCall("task1", {
+          vendorToolName: "Task",
+          input: { subagent_type: "Explore", description: "Look around" },
+        }),
+        { ...READ_A, parentToolCallId: "task1" },
+        { ...BASH_LAUNCH, parentToolCallId: "task1" },
+        { ...LINT, parentToolCallId: "task1" },
+        text("Started."),
+      ]);
+
+      fireEvent.click(screen.getByText('Explore · "Look around"'));
+
+      expect(screen.getByText("Print 30 progress lines")).toBeTruthy();
+      expect(screen.queryByText(/Ran \d commands/)).toBeNull();
     });
 
     it("renders a launching call that has no task as before", () => {

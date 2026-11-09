@@ -4,13 +4,16 @@ import type CopilotPlugin from "@/main";
 import type { CopilotSettings } from "@/settings/model";
 import type { Destination } from "@/types/destination";
 import type { AgentSession } from "@/agentMode/session/AgentSession";
+import type { CopilotMcpServer } from "@/agentMode/session/copilotMcpServer";
 import type {
   BackendConfigOption,
   BackendId,
   BackendProcess,
   BackendState,
+  BlockedModels,
   EffortOption,
   EnabledModelEntry,
+  ModelEntry,
   ModelSelection,
   ModelState,
   ModelWireCodec,
@@ -115,10 +118,6 @@ export interface BackendDescriptor {
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/748
   readonly stopTask?: boolean;
 
-  // A backend that runs one agent process per chat keeps it alive while the chat is hidden, so only a few idle hidden chats stay open and the rest reopen from their transcripts.
-  // https://github.com/Brevilabs/obsidian-copilot-private/issues/175
-  readonly processPerChat?: boolean;
-
   getInstallState(settings: CopilotSettings): InstallState;
 
   getResolvedBinaryPath?(settings: CopilotSettings): string | null;
@@ -136,6 +135,7 @@ export interface BackendDescriptor {
     app: App;
     clientVersion: string;
     descriptor: BackendDescriptor;
+    copilotMcpServer?: CopilotMcpServer;
   }): BackendProcess;
 
   SettingsPanel?: React.FC<{ plugin: CopilotPlugin; app: App }>;
@@ -177,6 +177,11 @@ export interface BackendDescriptor {
   getProbeSessionId?(settings: CopilotSettings): string | undefined;
 
   getEnabledModelEntries?(settings: CopilotSettings): EnabledModelEntry[] | null;
+
+  getBlockedModels?(
+    settings: CopilotSettings,
+    reportedModels: ReadonlyArray<ModelEntry>
+  ): BlockedModels | null;
 
   getWireBaseId?(configuredModelId: string, settings: CopilotSettings): string | null;
 

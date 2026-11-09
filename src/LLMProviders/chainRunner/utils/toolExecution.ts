@@ -1,5 +1,8 @@
 import { StructuredTool } from "@langchain/core/tools";
 import { logError, logInfo, logWarn } from "@/logger";
+// Fork: kept from upstream as a fire-and-forget usage counter for Quick Chat edits;
+// the plus-only gate itself is BYOK (API key) instead of a Copilot Plus license.
+import { checkIsPaidUser } from "@/plusUtils";
 import { getSettings } from "@/settings/model";
 import { ToolManager } from "@/tools/toolManager";
 import { ToolRegistry } from "@/tools/ToolRegistry";
@@ -46,6 +49,12 @@ export async function executeSequentialToolCall(
 
     const registry = ToolRegistry.getInstance();
     const metadata = registry.getToolMetadata(toolCall.name);
+
+    // Count Quick Chat edit attempts before removal is considered, without gating the edit.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/852
+    if (toolCall.name === "writeFile" || toolCall.name === "editFile") {
+      void checkIsPaidUser(undefined, { trigger: "quick_chat_edit" });
+    }
 
     if (metadata?.isPlusOnly) {
       const hasApiKey = Boolean(

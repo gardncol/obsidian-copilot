@@ -9,23 +9,29 @@ import { buildChatDeepLink, getSavedChatDeepLinkId } from "@/utils/chatDeepLink"
 import { extractChatTitle } from "@/utils/chatHistoryUtils";
 import { getUrlBookmarks, isBookmarksPluginDisabled } from "@/utils/obsidianBookmarks";
 import { type App, Notice, TFile } from "obsidian";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const EMPTY_CHAT_HISTORY_ITEMS = Object.freeze([]) as unknown as ChatHistoryItem[];
 
 export interface AgentHistoryControls {
   chatHistoryItems: ChatHistoryItem[];
+  archivedChatItems: ChatHistoryItem[];
   chatHistorySettled: boolean;
   loadChatHistory: () => Promise<void>;
   loadChat: (id: string) => Promise<void>;
   updateChatTitle: (id: string, newTitle: string) => Promise<void>;
   deleteChat: (id: string) => Promise<void>;
-  setChatPinned: (id: string, pinned: boolean) => Promise<void>;
+  setChatPinned: (id: string, pinned: boolean, pinnedAt?: number) => Promise<void>;
+  setChatArchived: (id: string, archived: boolean) => Promise<void>;
   openSourceFile: (id: string) => Promise<void>;
   copyChatLink: (id: string) => Promise<void>;
   getChatBookmarkState: (id: string) => Promise<ChatBookmarkState>;
   setChatBookmarked: (id: string, title: string, bookmarked: boolean) => Promise<void>;
   setActiveChatBookmarked: (bookmarked: boolean) => Promise<void>;
+}
+
+function keepOrEmpty(items: ChatHistoryItem[]): ChatHistoryItem[] {
+  return items.length === 0 ? EMPTY_CHAT_HISTORY_ITEMS : items;
 }
 
 export type ChatBookmarkState = "unavailable" | "off" | "bookmarked" | "not-bookmarked";
@@ -42,8 +48,16 @@ export function useAgentHistoryControls(
   const [chatHistoryItems, setChatHistoryItems] = useState<ChatHistoryItem[]>([]);
   const effectiveScope = scope ?? GLOBAL_SCOPE;
   const [loadedScope, setLoadedScope] = useState<ProjectScopeId>(effectiveScope);
-  const visibleChatHistoryItems =
+  const scopedChatHistoryItems =
     loadedScope === effectiveScope ? chatHistoryItems : EMPTY_CHAT_HISTORY_ITEMS;
+  const visibleChatHistoryItems = useMemo(
+    () => keepOrEmpty(scopedChatHistoryItems.filter((item) => item.archivedAt === undefined)),
+    [scopedChatHistoryItems]
+  );
+  const archivedChatItems = useMemo(
+    () => keepOrEmpty(scopedChatHistoryItems.filter((item) => item.archivedAt !== undefined)),
+    [scopedChatHistoryItems]
+  );
   const [settledScope, setSettledScope] = useState<ProjectScopeId | null>(null);
   const chatHistorySettled = settledScope === effectiveScope;
 
@@ -97,6 +111,21 @@ export function useAgentHistoryControls(
     }
   }, [manager, runWithNotice, scope]);
 
+  // A chat note renamed or deleted outside Copilot would leave a row pointing at a path that no longer exists.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/801
+  useEffect(() => {
+    const { vault } = plugin.app;
+    const listedIds = new Set(chatHistoryItems.map((item) => item.id));
+    const reloadIfListed = (path: string) => {
+      if (listedIds.has(path)) void loadChatHistory();
+    };
+    const refs = [
+      vault.on("rename", (_file, oldPath) => reloadIfListed(oldPath)),
+      vault.on("delete", (file) => reloadIfListed(file.path)),
+    ];
+    return () => refs.forEach((ref) => vault.offref(ref));
+  }, [plugin, chatHistoryItems, loadChatHistory]);
+
   const loadChat = useCallback(
     async (id: string) => {
       await runWithNotice("load chat", () => plugin.loadChatById(id));
@@ -148,19 +177,58 @@ export function useAgentHistoryControls(
   );
 
   const setChatPinned = useCallback(
-    async (id: string, pinned: boolean) => {
-      await runWithNotice(pinned ? "pin chat" : "unpin chat", async () => {
-        const chat = await manager.setChatPinned(id, pinned);
-        if (!isMountedRef.current) return;
-        historyRequestRef.current++;
-        // A reload right after the frontmatter write reads the metadata cache's previous pin state.
-        // https://github.com/logancyang/obsidian-copilot/issues/3195
+    async (id: string, pinned: boolean, pinnedAt?: number) => {
+      // A dragged pin takes its new place in the frame it is dropped; waiting for the note write snaps it back first.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/811
+      if (pinnedAt !== undefined) {
         setChatHistoryItems((items) =>
-          items.map((item) =>
-            item.id === id ? { ...item, id: chat.id, pinnedAt: chat.pinnedAt } : item
-          )
+          items.map((item) => (item.id === id ? { ...item, pinnedAt } : item))
         );
-      });
+      }
+      try {
+        await runWithNotice(
+          pinned ? "pin chat" : "unpin chat",
+          async () => {
+            const chat = await manager.setChatPinned(id, pinned, pinnedAt);
+            if (!isMountedRef.current) return;
+            historyRequestRef.current++;
+            // A reload right after the frontmatter write reads the metadata cache's previous pin state.
+            // https://github.com/logancyang/obsidian-copilot/issues/3195
+            setChatHistoryItems((items) =>
+              items.map((item) =>
+                item.id === id ? { ...item, id: chat.id, pinnedAt: chat.pinnedAt } : item
+              )
+            );
+          },
+          true
+        );
+      } catch {
+        // A dropped pin whose write failed would keep an order that was never saved, and the next drag would build on it.
+        // https://github.com/Brevilabs/obsidian-copilot-private/issues/811
+        if (pinnedAt !== undefined) await loadChatHistory();
+      }
+    },
+    [manager, loadChatHistory, runWithNotice]
+  );
+
+  const setChatArchived = useCallback(
+    async (id: string, archived: boolean) => {
+      await runWithNotice(
+        archived ? "archive chat" : "unarchive chat",
+        async () => {
+          const chat = await manager.setChatArchived(id, archived);
+          if (!isMountedRef.current) return;
+          historyRequestRef.current++;
+          // A reload right after the frontmatter write reads the metadata cache's previous archive state.
+          // https://github.com/Brevilabs/obsidian-copilot-private/issues/805
+          setChatHistoryItems((items) =>
+            items.map((item) =>
+              item.id === id ? { ...item, id: chat.id, archivedAt: chat.archivedAt } : item
+            )
+          );
+        },
+        true
+      );
     },
     [manager, runWithNotice]
   );
@@ -254,12 +322,14 @@ export function useAgentHistoryControls(
 
   return {
     chatHistoryItems: visibleChatHistoryItems,
+    archivedChatItems,
     chatHistorySettled,
     loadChatHistory,
     loadChat,
     updateChatTitle,
     deleteChat,
     setChatPinned,
+    setChatArchived,
     openSourceFile,
     copyChatLink,
     getChatBookmarkState,

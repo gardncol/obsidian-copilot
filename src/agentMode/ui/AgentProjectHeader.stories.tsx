@@ -16,16 +16,22 @@ const meta = {
 } satisfies Meta<AgentProjectHeaderProps>;
 export default meta;
 
-export const Default: StoryObj<AgentProjectHeaderProps> = {
-  render: (args) => (
-    <TooltipProvider>
-      <AgentProjectHeader
-        projectName={args.projectName ?? "Product research"}
-        onExit={args.onExit ?? (() => undefined)}
-        menu={args.menu}
-        orphaned={args.orphaned}
-        className={args.className}
-      />
-    </TooltipProvider>
-  ),
+const renderHeader: StoryObj<AgentProjectHeaderProps>["render"] = (args) => (
+  <TooltipProvider>
+    <AgentProjectHeader
+      projectName={args.projectName ?? "Product research"}
+      onExit={args.onExit ?? (() => undefined)}
+      menu={args.menu}
+      orphaned={args.orphaned}
+      canLeaveProject={args.canLeaveProject}
+      className={args.className}
+    />
+  </TooltipProvider>
+);
+
+export const Default: StoryObj<AgentProjectHeaderProps> = { render: renderHeader };
+
+export const ProjectCannotLeave: StoryObj<AgentProjectHeaderProps> = {
+  args: { canLeaveProject: false },
+  render: renderHeader,
 };

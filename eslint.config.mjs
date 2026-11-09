@@ -515,8 +515,11 @@ export default [
         { type: "backend", pattern: "src/agentMode/backends/*", capture: ["name"] },
         { type: "ui", pattern: "src/agentMode/ui" },
         { type: "skills", pattern: "src/agentMode/skills" },
+        { type: "navigator", pattern: "src/agentMode/navigator" },
         { type: "modelmgmt", pattern: "src/modelManagement" },
         { type: "miyoAgent", pattern: "src/miyo/agentMode" },
+        { type: "excalidrawAgent", pattern: "src/excalidraw/agentMode" },
+        { type: "connectorsAgent", pattern: "src/connectors/agentMode" },
         { type: "host", pattern: "src/**" },
       ],
     },
@@ -541,12 +544,36 @@ export default [
             {
               from: { type: "ui" },
               allow: {
-                to: { type: ["ui", "session", "registry", "skills", "miyoAgent", "host"] },
+                to: {
+                  type: [
+                    "ui",
+                    "session",
+                    "registry",
+                    "skills",
+                    "navigator",
+                    "miyoAgent",
+                    "excalidrawAgent",
+                    "connectorsAgent",
+                    "host",
+                  ],
+                },
               },
+            },
+            {
+              from: { type: "navigator" },
+              allow: { to: { type: ["navigator", "ui", "session", "host"] } },
             },
             {
               from: { type: "miyoAgent" },
               allow: { to: { type: ["miyoAgent", "ui", "session", "host"] } },
+            },
+            {
+              from: { type: "excalidrawAgent" },
+              allow: { to: { type: ["excalidrawAgent", "ui", "session", "host"] } },
+            },
+            {
+              from: { type: "connectorsAgent" },
+              allow: { to: { type: ["connectorsAgent", "ui", "session", "host"] } },
             },
             {
               from: { type: "skills" },
@@ -556,7 +583,18 @@ export default [
               from: { type: "barrel" },
               allow: {
                 to: {
-                  type: ["acp", "session", "sdk", "backend", "registry", "ui", "skills", "host"],
+                  type: [
+                    "acp",
+                    "session",
+                    "sdk",
+                    "backend",
+                    "registry",
+                    "ui",
+                    "skills",
+                    "navigator",
+                    "connectorsAgent",
+                    "host",
+                  ],
                 },
               },
             },

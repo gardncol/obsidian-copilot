@@ -73,7 +73,7 @@ Do not delete `data.json`: it contains the vault's Keychain namespace. Use the i
 
 Look for **Permission required** or **Question from agent**. Review the inputs or diff, then choose an offered option. Another session tab may show an attention indicator.
 
-Permission choices depend on the active agent. **Stop** cancels the current turn, including the agent's unanswered requests. A background task's request stays until you answer it or stop that task. Review every persistent permission carefully.
+Permission choices depend on the active agent. **Stop** cancels the current turn and Claude's running subagents, including their unanswered requests. Review every persistent permission carefully.
 
 ### You cannot switch agents in the current session
 
@@ -86,6 +86,14 @@ In **Settings → Copilot → Skills**, confirm the skill has a valid `SKILL.md`
 On Windows, **Turn on Windows Developer Mode to share skills with your agents** means you must enable **Settings → Privacy & security → For developers → Developer Mode** (or run Obsidian as administrator), then toggle again. The same repair works when vault sync replaces a link.
 
 Learn more in [Skills across agents](agent-mode-and-tools.md#skills-across-agents).
+
+### A connector shows Needs login or Couldn't reach
+
+See [Reconnect a service](connectors.md#reconnect-a-service).
+
+### The agent can't use a service you just connected
+
+Click **Reload** on the chat's **settings changed** notice, then send your next message. Learn more in [Connectors](connectors.md).
 
 ## Miyo is unavailable or search is not running
 
@@ -121,9 +129,11 @@ Use **Advanced → Debugging & support → Report an issue** for any Copilot pro
 
 When something goes wrong in an Agent Chat, select **More actions** (⋯) above the composer and choose **Report error**. **Report an issue** opens for that chat without going through Settings: the screenshot is of the Obsidian window, every available attachment starts ticked, and the description ends with which agent, model and chat the report came from. Write what went wrong above that line, then continue with the steps above.
 
-When you tell Agent Chat it got something wrong, or the agent notices its own mistake, it may draft a report for you. A **Report this to the Copilot team?** card appears under its reply, with a one-line summary and your own words. The card never interrupts the agent, and it appears at most once each time you open a chat. The card is not saved with the chat, so it is gone once you close the chat or reload Obsidian.
+When Copilot itself fails in Agent Chat, such as a Copilot tool erroring, a needed tool missing, or you telling the agent Copilot crashed or lost your text, the agent may draft a report for you. The agent's own mistakes and answers don't get a card, since the Copilot team can't change how a model reasons. A **Report this to the Copilot team?** card appears under its reply, with a one-line summary and your own words. The card never interrupts the agent, and it appears at most once each time you open a chat. The card is not saved with the chat, so it is gone once you close the chat or reload Obsidian.
 
-- **Review & report** opens **Report an issue** with the agent's draft already in the description: what happened, what you said, steps to reproduce, and which agent, model and chat it came from. Every available attachment starts ticked, so untick anything you would rather not send. Edit the description freely, then continue with the steps above. Once the upload lands, the card shows the report ID.
+When a reply fails with an error, the same card appears under it, carrying the error. Errors from your AI provider about used-up quota or credit, or a rate limit, get no card; check your plan or wait for the limit to reset.
+
+- **Review & report** opens **Report an issue** with the draft already in the description: what happened, what you said, and steps to reproduce, or the error for a failed reply, plus which agent, model and chat it came from. Every available attachment starts ticked, so untick anything you would rather not send. Edit the description freely, then continue with the steps above. Once the upload lands, the card shows the report ID.
 - **Dismiss** removes the card. Nothing is sent.
 - **Don't offer again** removes the card and turns off **Offer feedback reports in Agent Chat** in **Advanced → Debugging & support**.
 
@@ -162,7 +172,7 @@ Logs and screenshots can contain prompts, note contents, paths, and tool inputs.
 
 ## What works on mobile?
 
-Agent Chat, including OpenCode, Claude, Codex, Projects, and Skill execution, is desktop-only. On mobile, use Quick Chat. Agent settings display **Agent settings are available on desktop.** Miyo on mobile requires a remote Miyo connection and manual vault registration in Miyo.
+Agent Chat, including OpenCode, Claude, Codex, Projects, Skill execution, and Connectors, is desktop-only. On mobile, use Quick Chat. Agent settings display **Agent settings are available on desktop.** Miyo on mobile requires a remote Miyo connection and manual vault registration in Miyo.
 
 ## Related
 

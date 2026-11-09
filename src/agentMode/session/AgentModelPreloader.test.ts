@@ -2,6 +2,7 @@ import { App, FileSystemAdapter } from "obsidian";
 import { waitFor } from "@testing-library/react";
 import type CopilotPlugin from "@/main";
 import { AgentModelPreloader } from "./AgentModelPreloader";
+import type { CopilotMcpServer } from "./copilotMcpServer";
 import type {
   BackendDescriptor,
   BackendProcess,
@@ -138,6 +139,24 @@ function pushCatalog(procHandle: MockProcHandle, state: BackendState): void {
 
 describe("AgentModelPreloader", () => {
   describe("preload()", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/862 starts the probe with Copilot's MCP server, so the process it hands to a chat knows which Copilot tools are read-only", async () => {
+      const { descriptor } = buildDescriptor(() => makeMockProc());
+      const copilotMcpServer = {} as CopilotMcpServer;
+      const preloader = new AgentModelPreloader(
+        buildApp(),
+        buildPlugin(),
+        () => descriptor,
+        undefined,
+        copilotMcpServer
+      );
+
+      await preloader.preload("claude-sdk");
+
+      expect(descriptor.createBackendProcess).toHaveBeenCalledWith(
+        expect.objectContaining({ copilotMcpServer })
+      );
+    });
+
     it("retains the probe subprocess after a successful preload and hands it to the manager", async () => {
       const { descriptor, procHandle } = buildDescriptor(() => makeMockProc());
       const preloader = new AgentModelPreloader(buildApp(), buildPlugin(), () => descriptor);
@@ -480,6 +499,37 @@ describe("AgentModelPreloader", () => {
       );
       expect(seenEfforts.at(-1)).toEqual({ [flash]: efforts });
       expect(prefetchEffortCatalog).toHaveBeenCalledTimes(2);
+    });
+
+    it("prefetches efforts only for enabled models the agent's own config does not block (https://github.com/Brevilabs/obsidian-copilot-private/issues/835)", async () => {
+      const open = { baseModelId: "opencode/fledge", name: "Fledge", credentialState: "ok" };
+      const blocked = { baseModelId: "openrouter/qwen", name: "Qwen", credentialState: "ok" };
+      const { descriptor } = buildDescriptor(() =>
+        makeMockProc({ newSessionState: catalogOf(["opencode/fledge"]) })
+      );
+      const getBlockedModels = jest.fn(() => ({
+        baseModelIds: new Set([blocked.baseModelId]),
+        reason: "Blocked",
+        hint: "Check your config.",
+      }));
+      const prefetchEffortCatalog = jest.fn(async () => ({}));
+      Object.assign(descriptor, {
+        getEnabledModelEntries: () => [open, blocked],
+        getBlockedModels,
+        prefetchEffortCatalog,
+      });
+      const preloader = new AgentModelPreloader(buildApp(), buildPlugin(), () => descriptor);
+
+      await preloader.preload("claude-sdk");
+
+      await waitFor(() => expect(prefetchEffortCatalog).toHaveBeenCalledTimes(1));
+      expect(prefetchEffortCatalog).toHaveBeenCalledWith(
+        expect.objectContaining({ enabledModels: [open] })
+      );
+      expect(getBlockedModels).toHaveBeenCalledWith(
+        expect.anything(),
+        catalogOf(["opencode/fledge"]).model?.availableModels
+      );
     });
   });
 

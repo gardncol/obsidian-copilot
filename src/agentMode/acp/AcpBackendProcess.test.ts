@@ -438,6 +438,58 @@ describe("AcpBackendProcess", () => {
         expect(handler).toHaveBeenCalledTimes(1);
       });
 
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/735 tags each tool call, live or replayed, with the Copilot tools the backend reads from its input", async () => {
+        const uses = { runs: "notion_search", calls: [{ name: "notion_search", args: {} }] };
+        const readCopilotTools = jest.fn((input: unknown) =>
+          (input as { code?: string }).code === "copilot" ? uses : null
+        );
+        const backend = new AcpBackendProcess(
+          buildApp(),
+          { ...buildStubBackend(), readCopilotTools },
+          "1.0.0",
+          buildStubDescriptor()
+        );
+        await backend.start();
+        const client = getVaultClient(backend);
+        const send = (update: Record<string, unknown>) =>
+          client.sessionUpdate({ sessionId: "s1", update } as unknown as Parameters<
+            typeof client.sessionUpdate
+          >[0]);
+        await send({
+          sessionUpdate: "tool_call",
+          toolCallId: "early",
+          title: "execute",
+          rawInput: { code: "copilot" },
+        });
+
+        const handler = jest.fn();
+        backend.registerSessionHandler("s1", handler);
+        await send({
+          sessionUpdate: "tool_call",
+          toolCallId: "other",
+          title: "execute",
+          rawInput: { code: "other" },
+        });
+        await send({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "late",
+          rawInput: { code: "copilot" },
+        });
+        await send({ sessionUpdate: "tool_call_update", toolCallId: "late", status: "completed" });
+
+        const tagged = handler.mock.calls
+          .map(([event]) => event.update)
+          .filter((update) => update.toolCallId)
+          .map((update) => [update.toolCallId, update.copilotTools]);
+        expect(tagged).toEqual([
+          ["early", uses],
+          ["other", undefined],
+          ["late", uses],
+          ["late", undefined],
+        ]);
+        expect(readCopilotTools).toHaveBeenCalledTimes(3);
+      });
+
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/625 replays a catalog update that arrived before the handler as the session's refreshed state", async () => {
         mockNewSession.mockResolvedValue({
           sessionId: "s-late",
@@ -1121,6 +1173,7 @@ describe("AcpBackendProcess", () => {
         name: "obsidian-copilot",
         url: "http://127.0.0.1:4100/mcp",
         headers: { Authorization: "Bearer t0k3n" },
+        readOnlyToolNames: [],
       };
 
       it("passes Copilot's MCP servers to session/new as HTTP servers when the agent advertises HTTP MCP", async () => {
@@ -1221,7 +1274,14 @@ describe("AcpBackendProcess", () => {
         await backend.resumeSession({
           sessionId: "s1",
           cwd: "/vault",
-          mcpServers: [{ name: "obsidian-copilot", url: "http://127.0.0.1:1/mcp", headers: {} }],
+          mcpServers: [
+            {
+              name: "obsidian-copilot",
+              url: "http://127.0.0.1:1/mcp",
+              headers: {},
+              readOnlyToolNames: [],
+            },
+          ],
         });
         const req = mockResumeSession.mock.calls[0][0] as { mcpServers: unknown[] };
         expect(req.mcpServers).toEqual([
@@ -1273,7 +1333,14 @@ describe("AcpBackendProcess", () => {
         await backend.loadSession({
           sessionId: "s1",
           cwd: "/vault",
-          mcpServers: [{ name: "obsidian-copilot", url: "http://127.0.0.1:1/mcp", headers: {} }],
+          mcpServers: [
+            {
+              name: "obsidian-copilot",
+              url: "http://127.0.0.1:1/mcp",
+              headers: {},
+              readOnlyToolNames: [],
+            },
+          ],
         });
         const req = mockLoadSession.mock.calls[0][0] as { mcpServers: unknown[] };
         expect(req.mcpServers).toEqual([

@@ -1,5 +1,5 @@
+import type { ChatStateHost, ChatStates } from "@/agentMode/session/chatExtension";
 import type { MessageContext } from "@/types/message";
-import type { FeedbackOffer } from "@/agentMode/session/feedback/feedbackOffer";
 import type { AgentTask } from "@/agentMode/session/AgentSession";
 import type {
   AgentChatMessage,
@@ -17,14 +17,13 @@ import type {
   SessionUsage,
 } from "./types";
 
-export interface AgentChatBackend {
+export interface AgentChatBackend extends ChatStateHost {
   subscribe(listener: () => void): () => void;
   sendMessage(
     text: string,
     context?: MessageContext,
     promptContent?: PromptContent[],
-    mentionedAgents?: ReadonlyArray<BackendId>,
-    options?: { interrupt?: boolean }
+    mentionedAgents?: ReadonlyArray<BackendId>
   ): { id: string; turn: Promise<void> };
   acceptsMidTurnMessages(): boolean;
   getQueuedPrompts(): readonly QueuedPrompt[];
@@ -32,6 +31,7 @@ export interface AgentChatBackend {
   withdrawMessage(id: string): Promise<void>;
   takeWithdrawnPrompts(): readonly QueuedPrompt[];
   cancel(): Promise<void>;
+  sendWaitingNow(): Promise<void>;
   deleteMessage(id: string): Promise<boolean>;
   clearMessages(): void;
   getMessages(): AgentChatMessage[];
@@ -42,6 +42,7 @@ export interface AgentChatBackend {
 
   isStarting(): boolean;
   isTurnInFlight(): boolean;
+  isReplyRunning(): boolean;
 
   getBackendState(): BackendState | null;
   canSwitchModel(): boolean | null;
@@ -72,9 +73,5 @@ export interface AgentChatBackend {
 
   resolveAskUserQuestion(requestId: string, answers: AgentQuestionAnswers): void;
 
-  getFeedbackOffer(): FeedbackOffer | null;
-
-  dismissFeedbackOffer(): void;
-
-  markFeedbackReported(report: { reportId: string; issueUrl: string }): void;
+  getChatStates(): ChatStates;
 }

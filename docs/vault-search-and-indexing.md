@@ -15,7 +15,7 @@ When you upgrade, Copilot removes its retired index settings and recognized inde
 Agent Chat can combine three kinds of search:
 
 - **File search** finds exact words, phrases, filenames, and paths with the active agent's normal tools. It needs no index.
-- **Obsidian-aware search** uses the Obsidian CLI skill when a question depends on Obsidian's index, such as links, backlinks, properties, tags, tasks, Bases, or the currently open note.
+- **Obsidian-aware search** uses Copilot's Obsidian CLI tool when a question depends on Obsidian's index, such as links, backlinks, properties, tags, tasks, Bases, or the currently open note.
 - **Miyo semantic search** finds related ideas even when the notes use different words. It is useful for fuzzy recall, research across many notes, and large collections.
 
 You can ask naturally, such as “Find everything I have written about memory consolidation,” or say “Use Miyo” when you want semantic search explicitly. Search results become context for the model you selected, so the model still receives the excerpts Agent Chat uses in its answer.
@@ -23,6 +23,8 @@ You can ask naturally, such as “Find everything I have written about memory co
 With **Semantic search for agents** on, agents search your notes with Miyo and file search for any question your notes might answer before turning to the web.
 
 Each Miyo search appears in the chat as a card with the query and, when available, how many notes it found, or why the search failed.
+
+Two settings in the Miyo tab shape each agent search. **Maximum results** sets the most notes one search returns, from 1 to 20; lower it if you use a local model with a small context window. **Search variants** sets how many rephrasings of the question a search can add, from 0 to 2.
 
 Links in the answer to notes Miyo found get a small Miyo logo.
 

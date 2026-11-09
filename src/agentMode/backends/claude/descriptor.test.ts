@@ -241,7 +241,6 @@ describe("descriptor", () => {
           offerFeedbackCards: true,
           notificationSound: false,
           notificationSoundId: "piano",
-          welcomeDismissed: false,
           skills: { folder: "copilot/skills" },
           backends: {},
         },
@@ -479,6 +478,7 @@ describe("descriptor", () => {
       expect(ClaudeBackendDescriptor.getModeMapping?.(null, null)).toEqual({
         kind: "setMode",
         canonical: { default: "default", plan: "plan", auto: "auto" },
+        unlistedModeShowsAs: "auto",
       });
     });
 

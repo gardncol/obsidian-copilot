@@ -2,6 +2,7 @@ import React from "react";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { App, type Modal } from "obsidian";
 import { GlobalRecentChatsSection } from "@/agentMode/ui/GlobalRecentChatsSection";
+import { simulateMenuExitAnimation } from "@/agentMode/ui/testing/menuExitAnimation";
 import { AppContext } from "@/context";
 import { buildNativeChatId } from "@/utils/nativeChatId";
 import { safeAsyncHandler } from "@/utils/safeAsyncHandler";
@@ -60,6 +61,8 @@ function renderSection(
         onOpenSourceFile={props.onOpenSourceFile ?? noop}
         onCopyChatLink={props.onCopyChatLink ?? noop}
         onSetChatPinned={props.onSetChatPinned ?? noop}
+        onSetChatArchived={props.onSetChatArchived ?? noop}
+        onViewArchived={props.onViewArchived}
         getChatBookmarkState={props.getChatBookmarkState ?? unsettledBookmarkState}
         onSetChatBookmarked={props.onSetChatBookmarked ?? noop}
       />
@@ -174,11 +177,11 @@ describe("GlobalRecentChatsSection", () => {
         onLoadChat,
         onDeleteChat,
       });
-      const liveDots = screen.getAllByLabelText("Session live");
+      const liveDots = screen.getAllByLabelText("Running");
       expect(liveDots).toHaveLength(2);
-      expect(liveDots[0].parentElement?.getAttribute("title")).toBe("Session is running");
+      expect(liveDots[0].parentElement?.getAttribute("title")).toBe("Running");
       expect(screen.getByLabelText("Responding")).toBeTruthy();
-      const buttons = screen.getAllByRole("button", { name: "Close chat" });
+      const buttons = screen.getAllByRole("button", { name: "Shut down" });
       expect(buttons).toHaveLength(2);
       fireEvent.keyDown(buttons[0], { key: "Enter" });
       await act(async () => {
@@ -375,17 +378,17 @@ describe("GlobalRecentChatsSection", () => {
       expect(screen.getAllByText(/^Chat search-page-/)).toHaveLength(50);
     });
 
-    it("shows only Pin chat, Open source note, and More actions when hovering a saved chat whose session is closed", () => {
+    it("shows only Pin chat, Open chat note, and More actions when hovering a saved chat whose session is closed", () => {
       renderSection({ items: [makeItem("chats/saved.md", { title: "Saved chat" })] });
 
       const actions = within(rowFor("Saved chat"))
         .getAllByRole("button")
         .map((button) => button.getAttribute("aria-label"));
 
-      expect(actions).toEqual(["Pin chat", "Open source note", "More actions"]);
+      expect(actions).toEqual(["Pin chat", "Open chat note", "More actions"]);
     });
 
-    it("leads the hover actions with Close chat when the chat's session is open", () => {
+    it("leads the hover actions with Shut down when the chat's session is open", () => {
       renderSection({
         items: [makeItem("chats/open.md", { title: "Open chat" })],
         openChatIds: new Set(["chats/open.md"]),
@@ -396,7 +399,7 @@ describe("GlobalRecentChatsSection", () => {
         .getAllByRole("button")
         .map((button) => button.getAttribute("aria-label"));
 
-      expect(actions).toEqual(["Pin chat", "Close chat", "Open source note", "More actions"]);
+      expect(actions).toEqual(["Pin chat", "Shut down", "Open chat note", "More actions"]);
     });
 
     it("pins an unpinned chat from its Pin chat action without opening it", async () => {
@@ -541,10 +544,11 @@ describe("GlobalRecentChatsSection", () => {
 
       expect(menuEntries(menu)).toEqual([
         "Pin chat",
-        "Open source note",
+        "Open chat note",
         "Rename",
         "Copy chat link",
         "---",
+        "Archive chat",
         "Delete",
       ]);
       expect(within(menu).getByRole("menuitem", { name: "Delete" }).className).toContain(
@@ -552,7 +556,58 @@ describe("GlobalRecentChatsSection", () => {
       );
     });
 
-    it("adds Close chat above Delete in the menu when the chat's session is open", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 archives the chosen chat when Archive chat is selected from the menu, without opening it", async () => {
+      const onSetChatArchived = jest.fn(noop);
+      const onLoadChat = jest.fn(noop);
+      renderSection({
+        items: [makeItem("chats/saved.md", { title: "Saved chat" })],
+        onSetChatArchived,
+        onLoadChat,
+      });
+
+      const menu = openMenuFromButton("Saved chat");
+      await act(async () => {
+        chooseMenuItem(menu, "Archive chat");
+      });
+
+      expect(onSetChatArchived).toHaveBeenCalledWith("chats/saved.md", true);
+      expect(onLoadChat).not.toHaveBeenCalled();
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 offers Archive chat for a pinned chat too", () => {
+      renderSection({
+        items: [makeItem("chats/pinned.md", { title: "Pinned chat", pinnedAt: 5_000 })],
+      });
+
+      expect(menuEntries(openMenuFromButton("Pinned chat"))).toContain("Archive chat");
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 opens the archived chats from a View archived button below the list", () => {
+      const onViewArchived = jest.fn();
+      renderSection({
+        items: [makeItem("chats/saved.md", { title: "Saved chat" })],
+        onViewArchived,
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "View archived" }));
+
+      expect(onViewArchived).toHaveBeenCalledTimes(1);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/805 still offers View archived when every chat is archived and the list is empty", () => {
+      renderSection({ items: [], onViewArchived: jest.fn() });
+
+      expect(screen.getByText("No recent chats")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "View archived" })).toBeTruthy();
+    });
+
+    it("shows no View archived button when the host provides no archive viewer", () => {
+      renderSection({ items: [makeItem("chats/saved.md", { title: "Saved chat" })] });
+
+      expect(screen.queryByRole("button", { name: "View archived" })).toBeNull();
+    });
+
+    it("adds Shut down above Delete in the menu when the chat's session is open", () => {
       renderSection({
         items: [makeItem("chats/open.md", { title: "Open chat" })],
         openChatIds: new Set(["chats/open.md"]),
@@ -561,11 +616,12 @@ describe("GlobalRecentChatsSection", () => {
 
       expect(menuEntries(openMenuFromButton("Open chat"))).toEqual([
         "Pin chat",
-        "Open source note",
+        "Open chat note",
         "Rename",
         "Copy chat link",
         "---",
-        "Close chat",
+        "Archive chat",
+        "Shut down",
         "Delete",
       ]);
     });
@@ -581,16 +637,17 @@ describe("GlobalRecentChatsSection", () => {
 
       expect(menuEntries(menu)).toEqual([
         "Pin chat",
-        "Open source note",
+        "Open chat note",
         "Rename",
         "Copy chat link",
         "Add to bookmarks",
         "---",
+        "Archive chat",
         "Delete",
       ]);
     });
 
-    it("opens the chosen chat's source note when Open source note is selected from the menu", () => {
+    it("opens the chosen chat's saved note when Open chat note is selected from the menu", () => {
       const onOpenSourceFile = jest.fn(noop);
       const onLoadChat = jest.fn(noop);
       renderSection({
@@ -599,13 +656,13 @@ describe("GlobalRecentChatsSection", () => {
         onLoadChat,
       });
 
-      chooseMenuItem(openMenuFromButton("Saved chat"), "Open source note");
+      chooseMenuItem(openMenuFromButton("Saved chat"), "Open chat note");
 
       expect(onOpenSourceFile).toHaveBeenCalledWith("chats/saved.md");
       expect(onLoadChat).not.toHaveBeenCalled();
     });
 
-    it("closes the chosen chat's session when Close chat is selected from the menu", async () => {
+    it("closes the chosen chat's session when Shut down is selected from the menu", async () => {
       const onCloseSession = jest.fn(noop);
       renderSection({
         items: [makeItem("chats/open.md", { title: "Open chat" })],
@@ -614,7 +671,7 @@ describe("GlobalRecentChatsSection", () => {
       });
 
       const menu = openMenuFromButton("Open chat");
-      await act(async () => chooseMenuItem(menu, "Close chat"));
+      await act(async () => chooseMenuItem(menu, "Shut down"));
 
       expect(onCloseSession).toHaveBeenCalledWith("chats/open.md");
     });
@@ -705,15 +762,27 @@ describe("GlobalRecentChatsSection", () => {
       expect(onLoadChat).not.toHaveBeenCalled();
     });
 
-    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/693 leaves Open source note out for a chat with no saved note", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/802 removes the menu as soon as an item is chosen instead of animating it out after its More actions anchor is hidden", () => {
+      renderSection({ items: [makeItem("chats/saved.md", { title: "Saved chat" })] });
+      const exitAnimation = simulateMenuExitAnimation();
+      try {
+        chooseMenuItem(openMenuFromButton("Saved chat"), "Copy chat link");
+
+        expect(document.querySelector('[role="menu"]')).toBeNull();
+      } finally {
+        exitAnimation.mockRestore();
+      }
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/693 leaves Open chat note out for a chat with no saved note", () => {
       const nativeId = buildNativeChatId("opencode", "session-1");
       renderSection({ items: [makeItem(nativeId, { title: "Native chat" })] });
 
       const menu = openMenuFromButton("Native chat");
 
-      expect(menuEntries(menu)).not.toContain("Open source note");
+      expect(menuEntries(menu)).not.toContain("Open chat note");
       expect(
-        within(rowFor("Native chat")).queryByRole("button", { name: "Open source note" })
+        within(rowFor("Native chat")).queryByRole("button", { name: "Open chat note" })
       ).toBeNull();
     });
 
@@ -822,6 +891,7 @@ describe("GlobalRecentChatsSection", () => {
             onOpenSourceFile={noop}
             onCopyChatLink={noop}
             onSetChatPinned={noop}
+            onSetChatArchived={noop}
             getChatBookmarkState={async () => "unavailable"}
             onSetChatBookmarked={noop}
             onLoadHistory={safeAsyncHandler(loadHistory)}

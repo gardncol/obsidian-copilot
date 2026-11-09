@@ -49,7 +49,7 @@ function renderRow(props: Partial<React.ComponentProps<typeof RelevantNoteRow>> 
 
 describe("RelevantNoteRow", () => {
   describe("RelevantNoteRow()", () => {
-    it("renders the hover preview as Markdown with links relative to the previewed note", async () => {
+    it("renders the hover preview as Markdown with links relative to the previewed note and without live Dataview queries", async () => {
       const file: unknown = Object.create(TFile.prototype);
       if (!(file instanceof TFile)) throw new Error("Expected a TFile fixture");
       Object.assign(file, {
@@ -75,7 +75,8 @@ describe("RelevantNoteRow", () => {
         "# Readable preview\n\n**Key idea**",
         expect.any(HTMLElement),
         file.path,
-        expect.anything()
+        expect.anything(),
+        false
       );
     });
 
@@ -84,6 +85,23 @@ describe("RelevantNoteRow", () => {
 
       expect(screen.getByText("Design principles")).toBeTruthy();
       expect(screen.getByText("86%")).toBeTruthy();
+    });
+
+    it("shows the vault folder that holds the note under its title", () => {
+      renderRow({
+        note: {
+          ...entry(),
+          note: { path: "Skills/writing/SKILL.md", title: "SKILL" },
+        },
+      });
+
+      expect(screen.getByText("Skills/writing")).toBeTruthy();
+    });
+
+    it("shows / as the folder of a note at the vault root", () => {
+      renderRow();
+
+      expect(screen.getByText("/")).toBeTruthy();
     });
 
     it("marks a note that is linked in either direction", () => {

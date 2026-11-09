@@ -21,7 +21,11 @@ import {
   OpencodeBinaryManager,
   toOpencodeInstallState,
 } from "./OpencodeBinaryManager";
-import { opencodeEnabledModelEntries, opencodeWireBaseIdFor } from "./opencodeModelResolve";
+import {
+  opencodeBlockedModels,
+  opencodeEnabledModelEntries,
+  opencodeWireBaseIdFor,
+} from "./opencodeModelResolve";
 import { OpencodeSettingsPanel } from "./OpencodeSettingsPanel";
 import { mapNodeArch, mapNodePlatform } from "./platformResolver";
 import { opencodeCopilotPluginDir } from "./opencodeCopilotPlugin";
@@ -91,7 +95,9 @@ export const OpencodeBackendDescriptor: BackendDescriptor = {
     return [...opencodeEnabledModelEntries(settings)];
   },
 
-  // OpenCode 2.0.22 stores an "always" reply as a saved rule for its project folder.
+  getBlockedModels: opencodeBlockedModels,
+
+  // OpenCode 2.0.32 stores an "always" reply as a saved rule for its project folder.
   // https://github.com/logancyang/obsidian-copilot/issues/2889
   presentPermissionOption(option: PermissionOption): PermissionOption {
     if (option.kind !== "allow_always") return option;
@@ -194,6 +200,7 @@ export const OpencodeBackendDescriptor: BackendDescriptor = {
     return simpleBinaryBackendProcess(
       args,
       new OpencodeBackend({
+        app: args.app,
         providerRegistry,
         backendConfigRegistry,
         clientVersion: args.clientVersion,
@@ -205,6 +212,8 @@ export const OpencodeBackendDescriptor: BackendDescriptor = {
           }
           return bridge.getChannel();
         },
+        readCopilotReadOnlyToolNames: async () =>
+          (await args.copilotMcpServer?.readOnlyToolNames()) ?? [],
       })
     );
   },

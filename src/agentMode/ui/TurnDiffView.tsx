@@ -1,17 +1,36 @@
+import { buildTurnFileChange } from "@/agentMode/session/turnFileChanges";
 import type { TurnFileChange } from "@/agentMode/session/types";
 import {
   ChangeScroller,
   useChangeNavigation,
   type ChangeStep,
 } from "@/agentMode/ui/renderedDiff/ChangeScroller";
+import { markedSelectionText } from "@/agentMode/ui/renderedDiff/markedSelection";
+import type { DiffRun } from "@/agentMode/ui/renderedDiff/mergeMarkdown";
 import { RenderedDiff } from "@/agentMode/ui/renderedDiff/RenderedDiff";
+import { revokeRun } from "@/agentMode/ui/renderedDiff/revokeRun";
 import { TurnDiffHeader } from "@/agentMode/ui/TurnDiffHeader";
 import { COMMAND_IDS, COMMAND_NAMES, TURN_DIFF_VIEW_TYPE } from "@/constants";
 import { useApp } from "@/context";
 import { logError } from "@/logger";
+import type { SelectionReport } from "@/selection/selectionStore";
+import { ensureFolderExists } from "@/utils";
+import { openFileInTab, type OpenPane } from "@/utils/openVaultPath";
+import { parentDir } from "@/utils/pathUtils";
+import { trashFile } from "@/utils/vaultAdapterUtils";
 import { mountPluginViewRoot, type PluginViewRootHandle } from "@/utils/react/mountPluginViewRoot";
-import { App, ItemView, Notice, Plugin, TFile, Workspace, WorkspaceLeaf } from "obsidian";
+import {
+  App,
+  ItemView,
+  Notice,
+  Plugin,
+  TAbstractFile,
+  TFile,
+  Workspace,
+  WorkspaceLeaf,
+} from "obsidian";
 import React, { type ReactNode } from "react";
+import { v4 as uuidv4 } from "uuid";
 
 // A diff tab's capture lives only in memory, so tabs restored after a restart or plugin reload are empty.
 // https://github.com/Brevilabs/obsidian-copilot-private/issues/348
@@ -47,6 +66,36 @@ export class TurnDiffView extends ItemView {
 
   constructor(leaf: WorkspaceLeaf) {
     super(leaf);
+  }
+
+  static activeSelection(this: void, app: App): (() => SelectionReport) | null {
+    const view = app.workspace.getActiveViewOfType(TurnDiffView);
+    const state = view?.state;
+    if (!view || !state) return null;
+    // The selection is read now, before the debounce: moving into chat in the meantime moves the selection there,
+    // and a selection outside the diff leaves the attached one in place.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/824
+    const selection = view.containerEl.ownerDocument.getSelection();
+    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+    if (!range || !view.containerEl.contains(range.commonAncestorContainer)) return null;
+    const location = turnDiffKey(state.turnId, state.path);
+    const content = markedSelectionText(range);
+    const report: SelectionReport = content
+      ? {
+          location,
+          key: `${location}\n${content}`,
+          context: {
+            id: uuidv4(),
+            content,
+            sourceType: "note",
+            noteTitle: basename(state.path).replace(/\.[^.]+$/, ""),
+            notePath: state.path,
+            startLine: 0,
+            endLine: 0,
+          },
+        }
+      : { location, context: null };
+    return () => report;
   }
 
   getViewType(): string {
@@ -104,9 +153,60 @@ export class TurnDiffView extends ItemView {
     this.stepper = stepper;
   };
 
+  private readonly revoke = (state: TurnDiffViewState, run: DiffRun): Promise<void> =>
+    this.rewrite(
+      state,
+      "This text changed in the note after the turn, so it was not revoked.",
+      async () => {
+        const file = this.app.vault.getAbstractFileByPath(state.path);
+        const { before, after } = state;
+        if (!(file instanceof TFile) || before === null || after === null) return undefined;
+        let revokedAfter: string | undefined;
+        await this.app.vault.process(file, (current) => {
+          const revoked = revokeRun(before, after, current, run);
+          revokedAfter = revoked?.after;
+          return revoked?.current ?? current;
+        });
+        return revokedAfter;
+      }
+    );
+
+  private readonly revokeAll = (state: TurnDiffViewState): Promise<void> =>
+    this.rewrite(state, "This note changed after the turn, so it was not revoked.", () =>
+      restoreBefore(this.app, state)
+    );
+
+  // The tab keeps its own copy of the turn's result, so a revoked change reads as unchanged until the
+  // tab closes.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/823
+  private async rewrite(
+    state: TurnDiffViewState,
+    notice: string,
+    write: () => Promise<string | null | undefined>
+  ): Promise<void> {
+    const after = await write();
+    if (after === undefined) {
+      new Notice(notice);
+      return;
+    }
+    const counts = buildTurnFileChange(state.path, state.before, after);
+    this.state = {
+      ...state,
+      after,
+      additions: counts?.additions ?? 0,
+      deletions: counts?.deletions ?? 0,
+    };
+    this.viewRoot?.rerender();
+  }
+
   private renderTree(): ReactNode {
     return this.state ? (
-      <TurnDiffPane state={this.state} onStepperChange={this.setStepper} />
+      <TurnDiffPane
+        state={this.state}
+        onStepperChange={this.setStepper}
+        onRevoke={this.revoke}
+        onRevokeAll={this.revokeAll}
+      />
     ) : null;
   }
 }
@@ -114,11 +214,19 @@ export class TurnDiffView extends ItemView {
 interface TurnDiffPaneProps {
   state: TurnDiffViewState;
   onStepperChange: (stepper: ((direction: ChangeStep) => void) | null) => void;
+  onRevoke: (state: TurnDiffViewState, run: DiffRun) => Promise<void>;
+  onRevokeAll: (state: TurnDiffViewState) => Promise<void>;
 }
 
-const TurnDiffPane: React.FC<TurnDiffPaneProps> = ({ state, onStepperChange }) => {
+const TurnDiffPane: React.FC<TurnDiffPaneProps> = ({
+  state,
+  onStepperChange,
+  onRevoke,
+  onRevokeAll,
+}) => {
   const app = useApp();
   const navigation = useChangeNavigation();
+  const current = useNoteText(app, state.path);
   const total = navigation.layout.ticks.length;
   React.useEffect(() => {
     onStepperChange(total > 0 ? navigation.step : null);
@@ -131,14 +239,103 @@ const TurnDiffPane: React.FC<TurnDiffPaneProps> = ({ state, onStepperChange }) =
         additions={state.additions}
         deletions={state.deletions}
         changes={{ current: navigation.current, total, onStep: navigation.step }}
-        onOpenNote={state.status === "deleted" ? undefined : () => openNote(app, state.path)}
+        // Revoke all returns the note to before the turn only while it is exactly what the turn left,
+        // counting this tab's own revokes, and has nothing to offer once no change is left.
+        // https://github.com/Brevilabs/obsidian-copilot-private/issues/825
+        revokeAll={
+          current === undefined || state.before === state.after
+            ? undefined
+            : {
+                changedAfterTurn: current !== state.after,
+                onRevokeAll: () =>
+                  void onRevokeAll(state).catch((error: unknown) =>
+                    logError("[TurnDiffView] failed to revoke the note's changes", error)
+                  ),
+              }
+        }
+        onOpenNote={state.after === null ? undefined : (pane) => openNote(app, state.path, pane)}
       />
       <ChangeScroller navigation={navigation}>
-        <RenderedDiff before={state.before} after={state.after} path={state.path} />
+        <RenderedDiff
+          before={state.before}
+          after={state.after}
+          path={state.path}
+          revoke={
+            state.status === "modified" && current !== undefined
+              ? {
+                  current,
+                  onRevoke: (run) =>
+                    void onRevoke(state, run).catch((error: unknown) =>
+                      logError("[TurnDiffView] failed to revoke a change", error)
+                    ),
+                }
+              : undefined
+          }
+        />
       </ChangeScroller>
     </div>
   );
 };
+
+// Revoke compares each run with the note as it is now, so the tab follows the note while it is open.
+// https://github.com/Brevilabs/obsidian-copilot-private/issues/823
+function useNoteText(app: App, path: string): string | null | undefined {
+  const [text, setText] = React.useState<string | null | undefined>(undefined);
+  React.useEffect(() => {
+    let latest = 0;
+    const load = (): void => {
+      const read = ++latest;
+      const file = app.vault.getAbstractFileByPath(path);
+      const content = file instanceof TFile ? app.vault.cachedRead(file) : Promise.resolve(null);
+      void content.then(
+        (value) => {
+          if (read === latest) setText(value);
+        },
+        (error: unknown) => logError("[TurnDiffView] failed to read the note", error)
+      );
+    };
+    const onChange = (file: TAbstractFile, oldPath?: string): void => {
+      if (file.path === path || oldPath === path) load();
+    };
+    const refs = [
+      app.vault.on("modify", onChange),
+      app.vault.on("create", onChange),
+      app.vault.on("delete", onChange),
+      app.vault.on("rename", onChange),
+    ];
+    load();
+    return () => {
+      latest = -1;
+      for (const ref of refs) app.vault.offref(ref);
+    };
+  }, [app, path]);
+  return text;
+}
+
+// Each kind of note is compared with what the turn left at write time, so an edit made after the turn
+// is never undone; a deleted note's path must still be free.
+// https://github.com/Brevilabs/obsidian-copilot-private/issues/825
+async function restoreBefore(
+  app: App,
+  { path, before, after }: TurnFileChange
+): Promise<string | null | undefined> {
+  const file = app.vault.getAbstractFileByPath(path);
+  if (after === null) {
+    if (file !== null) return undefined;
+    await ensureFolderExists(app.vault, parentDir(path));
+    await app.vault.create(path, before ?? "");
+    return before;
+  }
+  if (!(file instanceof TFile)) return undefined;
+  let unchanged = false;
+  await app.vault.process(file, (current) => {
+    unchanged = current === after;
+    return unchanged && before !== null ? before : current;
+  });
+  if (!unchanged) return undefined;
+  if (before === null) await trashFile(app, file);
+  return before;
+}
 
 export async function openTurnDiff(
   app: App,
@@ -166,7 +363,7 @@ function turnDiffKey(turnId: string, path: string): string {
   return `${turnId}\n${path}`;
 }
 
-function openNote(app: App, path: string): void {
+function openNote(app: App, path: string, pane: OpenPane): void {
   const file = app.vault.getAbstractFileByPath(path);
   // Opening a path whose file was renamed or deleted after the turn would create an empty note.
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/348
@@ -174,10 +371,9 @@ function openNote(app: App, path: string): void {
     new Notice(`${path} no longer exists.`);
     return;
   }
-  void app.workspace
-    .getLeaf(true)
-    .openFile(file)
-    .catch((error: unknown) => logError("[TurnDiffView] failed to open the note", error));
+  void openFileInTab(app, file, pane).catch((error: unknown) =>
+    logError("[TurnDiffView] failed to open the note", error)
+  );
 }
 
 function basename(path: string): string {

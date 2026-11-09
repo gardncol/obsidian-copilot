@@ -60,6 +60,10 @@ jest.mock("@/agentMode/session/debugSink", () => ({
   formatPayload: () => "",
 }));
 
+jest.mock("@/utils/loginShellPath", () => ({
+  agentShellPath: jest.fn(async () => "/login/bin:/usr/bin"),
+}));
+
 jest.mock("./effortOption", () => ({
   ...jest.requireActual("./effortOption"),
   getCachedSdkCatalog: jest.fn(),
@@ -110,6 +114,29 @@ function fakeDescriptor(): BackendDescriptor {
 }
 
 const ISSUE_175 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/175";
+const ISSUE_870 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/870";
+
+function pickerDescriptor(auto: string): BackendDescriptor {
+  return {
+    ...fakeDescriptor(),
+    getModeMapping: () => ({
+      kind: "setMode",
+      canonical: { default: "default", plan: "plan", auto },
+      unlistedModeShowsAs: "auto",
+    }),
+  };
+}
+
+function permissionModeStatus(permissionMode: string): SDKMessage {
+  return {
+    type: "system",
+    subtype: "status",
+    status: null,
+    permissionMode,
+    uuid: "uuid-status" as `${string}-${string}-${string}-${string}-${string}`,
+    session_id: "irrelevant",
+  } as SDKMessage;
+}
 
 let fakes: FakeClaudeQuery[] = [];
 
@@ -520,6 +547,18 @@ describe("ClaudeSdkBackendProcess", () => {
         expect(call.options.effort).toBe("low");
       });
 
+      it(`starts the chat's query in Default, the mode the picker shows, so a defaultMode of auto, plan, or bypassPermissions in Claude settings never applies (${ISSUE_870})`, async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc({ descriptor: pickerDescriptor("auto") });
+
+        const { sessionId, state } = await proc.newSession({ cwd: "/vault" });
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
+
+        const call = getPromptQueryCalls()[0][0] as { options: { permissionMode?: string } };
+        expect(state.mode?.current).toBe("default");
+        expect(call.options.permissionMode).toBe("default");
+      });
+
       it("does not open a session when Claude Code is unsupported", async () => {
         const checkCompatibility = jest
           .fn()
@@ -579,21 +618,6 @@ describe("ClaudeSdkBackendProcess", () => {
     });
 
     describe("prompt()", () => {
-      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/509 sends an interrupt-and-send prompt to Claude at priority now", async () => {
-        queryMock.mockImplementation(silent());
-        const proc = makeProc();
-        const { sessionId } = await proc.newSession({ cwd: "/vault" });
-
-        await proc.prompt({
-          sessionId,
-          promptId: "p1",
-          prompt: [{ type: "text", text: "hi" }],
-          interrupt: true,
-        });
-
-        expect(await fakes[0].nextInput()).toMatchObject({ uuid: "p1", priority: "now" });
-      });
-
       it(`resolves once the prompt is queued on the chat's live query, which reports its delivery and turn when Claude echoes it (${ISSUE_175})`, async () => {
         queryMock.mockImplementation(silent());
         const proc = makeProc();
@@ -634,6 +658,44 @@ describe("ClaudeSdkBackendProcess", () => {
         const { options } = promptCalls[0][0] as { options: Record<string, unknown> };
         expect(options.sessionId).toBe(sessionId);
         expect(options.resume).toBeUndefined();
+      });
+
+      it.each([["acceptEdits"], ["auto"]])(
+        `when Claude switches the chat to accepting edits mid-reply, as an approved Allow always that covers all file edits does, shows Auto in the picker, with Auto set to %s (${ISSUE_870})`,
+        async (auto) => {
+          queryMock.mockImplementation(
+            answering([permissionModeStatus("acceptEdits"), resultMessage()])
+          );
+          const proc = makeProc({ descriptor: pickerDescriptor(auto) });
+          const { sessionId } = await proc.newSession({ cwd: "/vault" });
+          const events = registerCollector(proc, sessionId);
+
+          await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
+
+          const states = events.flatMap(({ update }) =>
+            update.sessionUpdate === "state_changed" ? [update.state.mode?.current] : []
+          );
+          expect(states).toEqual(["auto"]);
+        }
+      );
+
+      it(`resumes the chat after a disconnect in the mode Claude last switched it to (${ISSUE_870})`, async () => {
+        queryMock.mockImplementation(
+          answering([permissionModeStatus("acceptEdits"), resultMessage()])
+        );
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        const recorder = new SessionEventRecorder();
+        proc.registerSessionHandler(sessionId, recorder.handler);
+        await proc.prompt({ sessionId, promptId: "p1", prompt: [{ type: "text", text: "1" }] });
+        await recorder.waitFor("turn_ended");
+
+        fakes[0].fail(new Error("process exited with code 1"));
+        await recorder.waitFor("session_disconnected");
+        await proc.prompt({ sessionId, promptId: "p2", prompt: [{ type: "text", text: "2" }] });
+
+        const reconnected = getPromptQueryCalls()[1][0] as { options: { permissionMode?: string } };
+        expect(reconnected.options.permissionMode).toBe("acceptEdits");
       });
 
       it(`after Claude exits unexpectedly, reports the disconnect and resumes the chat in a new query on the next prompt (${ISSUE_175})`, async () => {
@@ -702,7 +764,7 @@ describe("ClaudeSdkBackendProcess", () => {
         ]);
       });
 
-      it("attaches Copilot's MCP servers over HTTP and pre-approves their tools on every turn", async () => {
+      it("attaches Copilot's MCP servers over HTTP and pre-approves only their read-only tools, so Claude asks before a tool that changes something (https://github.com/Brevilabs/obsidian-copilot-private/issues/807)", async () => {
         queryMock.mockImplementation(answering([resultMessage()]));
         const proc = makeProc();
         const { sessionId } = await proc.newSession({
@@ -712,6 +774,7 @@ describe("ClaudeSdkBackendProcess", () => {
               name: "obsidian-copilot",
               url: "http://127.0.0.1:4100/mcp",
               headers: { Authorization: "Bearer t0k3n" },
+              readOnlyToolNames: ["send_feedback", "excalidraw_read"],
             },
           ],
         });
@@ -731,7 +794,8 @@ describe("ClaudeSdkBackendProcess", () => {
           "Glob",
           "Grep",
           "LS",
-          "mcp__obsidian-copilot",
+          "mcp__obsidian-copilot__send_feedback",
+          "mcp__obsidian-copilot__excalidraw_read",
         ]);
       });
 
@@ -790,6 +854,50 @@ describe("ClaudeSdkBackendProcess", () => {
           excludeDynamicSections: true,
           append: undefined,
         });
+      });
+
+      it("asks Claude to report its session state, so the chat knows when its subagents and the replies about them are done, and keeps the backend's env overrides (https://github.com/Brevilabs/obsidian-copilot-private/issues/757)", async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc({ getEnvOverrides: () => ({ CLAUDE_CONFIG_DIR: "/config" }) });
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
+
+        const { options } = getPromptQueryCalls()[0][0] as {
+          options: { env?: Record<string, string> };
+        };
+        expect(options.env).toEqual({
+          ...process.env,
+          PATH: "/login/bin:/usr/bin",
+          CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
+          CLAUDE_CONFIG_DIR: "/config",
+        });
+      });
+
+      it("runs Claude with the user's login-shell PATH, because its Bash tool keeps the PATH Claude starts with (https://github.com/logancyang/obsidian-copilot/issues/4096)", async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
+
+        const { options } = getPromptQueryCalls()[0][0] as {
+          options: { env?: Record<string, string> };
+        };
+        expect(options.env?.PATH).toBe("/login/bin:/usr/bin");
+      });
+
+      it("lets a PATH set in the backend's env overrides win over the login-shell PATH", async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc({ getEnvOverrides: () => ({ PATH: "/custom/bin" }) });
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+
+        await promptTurn(proc, { sessionId, prompt: [{ type: "text", text: "hi" }] });
+
+        const { options } = getPromptQueryCalls()[0][0] as {
+          options: { env?: Record<string, string> };
+        };
+        expect(options.env?.PATH).toBe("/custom/bin");
       });
 
       it("auto-allows only read tools so Write and Edit follow the session's permission mode and reach Copilot's prompt in Default mode (https://github.com/Brevilabs/obsidian-copilot-private/issues/690)", async () => {
@@ -1305,6 +1413,19 @@ describe("ClaudeSdkBackendProcess", () => {
     });
 
     describe("cancel()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/789 interrupts the live query but leaves unread messages with Claude when asked to keep them", async () => {
+        queryMock.mockImplementation(silent());
+        const proc = makeProc();
+        const { sessionId } = await proc.newSession({ cwd: "/vault" });
+        await proc.prompt({ sessionId, promptId: "p1", prompt: [{ type: "text", text: "hi" }] });
+        await proc.prompt({ sessionId, promptId: "p2", prompt: [{ type: "text", text: "next" }] });
+
+        await proc.cancel({ sessionId, keepUnread: true });
+
+        expect(fakes[0].interrupt).toHaveBeenCalledTimes(1);
+        expect(fakes[0].cancelAsyncMessage).not.toHaveBeenCalled();
+      });
+
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/747 interrupts the chat's live query, withdrawing every message Claude has not read yet, and keeps it open so the next message continues the same query", async () => {
         queryMock.mockImplementation(silent());
         const proc = makeProc();
@@ -1415,6 +1536,21 @@ describe("ClaudeSdkBackendProcess", () => {
         const { options } = getPromptQueryCalls()[0][0] as { options: Record<string, unknown> };
         expect(options.resume).toBe(sessionId);
         expect(options.sessionId).toBeUndefined();
+      });
+
+      it(`resumes the chat's query in Default, the mode the picker shows, whatever defaultMode Claude settings set (${ISSUE_870})`, async () => {
+        queryMock.mockImplementation(answering([resultMessage()]));
+        const proc = makeProc({ descriptor: pickerDescriptor("auto") });
+
+        const { state } = await proc.resumeSession({ sessionId: "resumed-session", cwd: "/vault" });
+        await promptTurn(proc, {
+          sessionId: "resumed-session",
+          prompt: [{ type: "text", text: "continue" }],
+        });
+
+        const call = getPromptQueryCalls()[0][0] as { options: { permissionMode?: string } };
+        expect(state.mode?.current).toBe("default");
+        expect(call.options.permissionMode).toBe("default");
       });
     });
 

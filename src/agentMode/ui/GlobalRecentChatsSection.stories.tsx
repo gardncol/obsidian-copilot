@@ -27,6 +27,7 @@ const defaultArgs: GlobalRecentChatsSectionProps = {
   onOpenSourceFile: noop,
   onCopyChatLink: noop,
   onSetChatPinned: noop,
+  onSetChatArchived: noop,
   getChatBookmarkState: async () => "not-bookmarked",
   onSetChatBookmarked: noop,
   onLoadHistory: noopSync,
@@ -75,7 +76,7 @@ export const OpenSessions: StoryObj<GlobalRecentChatsSectionProps> = {
   args: {
     items: items.slice(0, 3).map((item, index) => ({
       ...item,
-      title: ["Session live", "Agent responding", "Saved chat, session closed"][index],
+      title: ["Running chat", "Agent responding", "Saved chat, shut down"][index],
     })),
     openChatIds: new Set([items[0].id, items[1].id]),
     runningChatIds: new Set([items[1].id]),
@@ -162,5 +163,15 @@ export const PinnedRowActions: StoryObj<GlobalRecentChatsSectionProps> = {
 
 export const OnlyPinnedChats: StoryObj<GlobalRecentChatsSectionProps> = {
   args: { items: pinnedItems.filter((item) => item.pinnedAt !== undefined) },
+  render: renderShelf,
+};
+
+export const ViewArchivedEntry: StoryObj<GlobalRecentChatsSectionProps> = {
+  args: { items: items.slice(0, 5), onViewArchived: noopSync },
+  render: renderShelf,
+};
+
+export const EveryChatArchived: StoryObj<GlobalRecentChatsSectionProps> = {
+  args: { items: [], onViewArchived: noopSync },
   render: renderShelf,
 };

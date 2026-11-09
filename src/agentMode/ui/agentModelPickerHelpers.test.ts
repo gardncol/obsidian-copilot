@@ -175,6 +175,14 @@ function claudeWithInstallState(installState: InstallState): BackendDescriptor {
   };
 }
 
+const OUTDATED_INSTALL: InstallState = {
+  kind: "incompatible",
+  source: "custom",
+  currentVersion: "1.0.0",
+  minVersion: "2.0.0",
+  message: "too old",
+};
+
 function noSessionContext(): ModelActiveContext {
   return {
     activeSession: null,
@@ -697,19 +705,19 @@ describe("agentModelPickerHelpers", () => {
       expect(entries[0]._needsSelfHostWarning).toBe(true);
     });
 
-    it("marks rows of a backend that isn't set up so the pick can't be made", () => {
+    it("marks rows of an installed backend that needs an update so the pick can't be made", () => {
       const { entries } = buildPickerEntries(
         managerWithSonnet(),
-        [claudeWithInstallState({ kind: "absent" })],
+        [claudeWithInstallState(OUTDATED_INSTALL)],
         noSessionContext(),
         emptySettings
       );
-      expect(entries.map((entry) => entry._disabledReason)).toEqual(["Not set up"]);
+      expect(entries.map((entry) => entry._disabledReason)).toEqual(["Update required"]);
     });
 
-    it("reports the unset-up backend rather than a per-model credential problem", () => {
+    it("reports the outdated backend rather than a per-model credential problem", () => {
       const claude = {
-        ...makeDescriptor("claude", { kind: "absent" }),
+        ...makeDescriptor("claude", OUTDATED_INSTALL),
         getEnabledModelEntries: () => [
           { baseModelId: "sonnet", name: "Sonnet", credentialState: "missing_key" as const },
         ],
@@ -722,7 +730,69 @@ describe("agentModelPickerHelpers", () => {
         emptySettings
       );
 
-      expect(entries[0]._disabledReason).toBe("Not set up");
+      expect(entries[0]._disabledReason).toBe("Update required");
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/765 lists nothing for an agent that was never installed, even after its model discovery settled", () => {
+      const codex = {
+        ...makeDescriptor("codex", { kind: "absent" }),
+        getEnabledModelEntries: () => [],
+      } as unknown as BackendDescriptor;
+      const manager = makeManager({
+        catalogById: { codex: null },
+        preloadStatusById: { codex: "ready" },
+      });
+
+      const { entries } = buildPickerEntries(manager, [codex], noSessionContext(), emptySettings);
+
+      expect(entries).toEqual([]);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/765 promotes no Copilot model to a licensed user whose routing agent is not installed", () => {
+      const opencode = {
+        ...makeDescriptor("opencode", { kind: "absent" }),
+        routesCopilotModels: true,
+        getEnabledModelEntries: () => [
+          { baseModelId: "copilot-plus-flash", name: "Copilot Plus Flash", credentialState: "ok" },
+          { baseModelId: "glm-5.2", name: "GLM-5.2", credentialState: "ok" },
+        ],
+      } as unknown as BackendDescriptor;
+      const manager = makeManager({
+        catalogById: { opencode: null },
+        preloadStatusById: { opencode: "error" },
+      });
+
+      const { entries } = buildPickerEntries(
+        manager,
+        [opencode],
+        noSessionContext(),
+        copilotPlusSettings
+      );
+
+      expect(entries).toEqual([]);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/765 keeps only the single locked Copilot row for an unlicensed user whose routing agent is not installed", () => {
+      const opencode = {
+        ...makeDescriptor("opencode", { kind: "absent" }),
+        routesCopilotModels: true,
+        getEnabledModelEntries: () => [],
+      } as unknown as BackendDescriptor;
+      const manager = makeManager({
+        catalogById: { opencode: null },
+        preloadStatusById: { opencode: "ready" },
+      });
+
+      const { entries } = buildPickerEntries(
+        manager,
+        [opencode],
+        noSessionContext(),
+        emptySettings
+      );
+
+      expect(entries.map((entry) => [entry.displayName, entry._disabledReason])).toEqual([
+        ["Copilot Plus Flash", "Copilot license required"],
+      ]);
     });
 
     it("regression: never disables the running backend's own rows when its binary goes missing", () => {
@@ -819,6 +889,35 @@ describe("agentModelPickerHelpers", () => {
       expect(byId["openrouter/c"]._disabledReason).toBeUndefined();
       expect(byId["openrouter/d"]._disabledReason).toBe("Not offered by agent");
       expect(byId["openrouter/c"].displayName).toBe("Reported C");
+    });
+
+    it("labels a model the agent's own config blocks with the backend's reason and hint, while a missing key and an unblocked unreported model keep their own labels (https://github.com/Brevilabs/obsidian-copilot-private/issues/835)", () => {
+      const enabled: EnabledModelEntry[] = [
+        { baseModelId: "openrouter/a", name: "A", credentialState: "ok" },
+        { baseModelId: "openrouter/b", name: "B", credentialState: "missing_key" },
+        { baseModelId: "anthropic/c", name: "C", credentialState: "ok" },
+        { baseModelId: "anthropic/d", name: "D", credentialState: "ok" },
+      ];
+      const getBlockedModels = jest.fn(() => ({
+        baseModelIds: new Set(["openrouter/a", "openrouter/b"]),
+        reason: "Blocked by your OpenCode settings",
+        hint: "Check enabled_providers.",
+      }));
+      const backendModels = [makeModelEntry("anthropic/c")];
+      const entries: ModelSelectorEntry[] = [];
+      appendBackendSection(
+        entries,
+        { ...opencodeWithEntries(enabled), getBlockedModels },
+        { backendModels, settings: emptySettings }
+      );
+      const byId = Object.fromEntries(entries.map((e) => [e.name, e]));
+      expect(byId["openrouter/a"]._disabledReason).toBe("Blocked by your OpenCode settings");
+      expect(byId["openrouter/a"]._disabledHint).toBe("Check enabled_providers.");
+      expect(byId["openrouter/b"]._disabledReason).toBe("Add API key");
+      expect(byId["openrouter/b"]._disabledHint).toBeUndefined();
+      expect(byId["anthropic/d"]._disabledReason).toBe("Not offered by agent");
+      expect(byId["anthropic/d"]._disabledHint).toBeUndefined();
+      expect(getBlockedModels).toHaveBeenCalledWith(emptySettings, backendModels);
     });
 
     it("shows an enabled model's host label over the agent-reported name, and the reported name when unlabeled (https://github.com/logancyang/obsidian-copilot/issues/3496)", () => {
@@ -964,7 +1063,6 @@ describe("agentModelPickerHelpers", () => {
         name: baseModelId,
         provider: "agent",
         enabled: true,
-        isBuiltIn: false,
         displayName: baseModelId,
         _group: backendId,
         _backendId: backendId,
@@ -1026,7 +1124,6 @@ describe("agentModelPickerHelpers", () => {
       await new Promise((r) => window.setTimeout(r, 0));
       expect(persistDefaultSelection).not.toHaveBeenCalled();
       expect(replaceSessionInPlace).toHaveBeenCalledWith("tab-1", "claude", {
-        preserveChatInput: true,
         seedSelection: { baseModelId: "opus", effort: "low" },
       });
       expect(setDefaultBackend).toHaveBeenCalledWith("claude");
@@ -1042,7 +1139,6 @@ describe("agentModelPickerHelpers", () => {
           name: "no-backend",
           provider: "agent",
           enabled: true,
-          isBuiltIn: false,
           displayName: "x",
         },
       ];
