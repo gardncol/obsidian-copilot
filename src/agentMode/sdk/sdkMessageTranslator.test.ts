@@ -5,7 +5,7 @@ import type { SessionUpdate, SessionUsage } from "@/agentMode/session/types";
 import {
   createTranslatorState,
   mapStopReason,
-  replayClaudeTranscript,
+  createClaudeTranscriptReplay,
   translateSdkMessage,
   type TranslatorState,
 } from "./sdkMessageTranslator";
@@ -1622,8 +1622,13 @@ describe("sdkMessageTranslator", () => {
     });
   });
 
-  describe("replayClaudeTranscript()", () => {
+  describe("createClaudeTranscriptReplay()", () => {
     const ISSUE_643 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/643";
+
+    function replayLines(jsonl: string, claudeTasks = createClaudeTaskPlanState()) {
+      const replay = createClaudeTranscriptReplay(SESSION_ID, claudeTasks);
+      return [...jsonl.split("\n").flatMap((line) => replay.line(line)), ...replay.finish()];
+    }
 
     function transcript(...entries: object[]): string {
       return entries.map((entry) => JSON.stringify(entry)).join("\n");
@@ -1638,7 +1643,7 @@ describe("sdkMessageTranslator", () => {
     }
 
     function replay(jsonl: string, claudeTasks = createClaudeTaskPlanState()): SessionUpdate[] {
-      return replayClaudeTranscript(jsonl, SESSION_ID, claudeTasks).map((e) => e.update);
+      return replayLines(jsonl, claudeTasks).map((e) => e.update);
     }
 
     it("replays a turn's prompt, thinking, reply, and tool call with its result as live-shaped updates in transcript order", () => {
@@ -1655,7 +1660,7 @@ describe("sdkMessageTranslator", () => {
         assistantEntry([{ type: "text", text: "You have two notes." }])
       );
 
-      const events = replayClaudeTranscript(jsonl, SESSION_ID, createClaudeTaskPlanState());
+      const events = replayLines(jsonl);
 
       expect(events.every((e) => e.sessionId === SESSION_ID)).toBe(true);
       expect(events.map((e) => e.update)).toEqual([
@@ -1706,7 +1711,7 @@ describe("sdkMessageTranslator", () => {
         assistantEntry([{ type: "text", text: "Done." }], { timestamp: "not a date" })
       );
 
-      const events = replayClaudeTranscript(jsonl, SESSION_ID, createClaudeTaskPlanState());
+      const events = replayLines(jsonl);
 
       expect(events.map((e) => [e.update.sessionUpdate, e.occurredAt])).toEqual([
         ["user_message_chunk", Date.parse("2026-10-03T19:31:18.348Z")],
@@ -1827,7 +1832,7 @@ describe("sdkMessageTranslator", () => {
 
     it("seeds the session's task plan so a live TaskUpdate after reopening updates a task created in a replayed turn", () => {
       const claudeTasks = createClaudeTaskPlanState();
-      replayClaudeTranscript(
+      replayLines(
         transcript(
           assistantEntry([
             {
@@ -1845,7 +1850,6 @@ describe("sdkMessageTranslator", () => {
             },
           ])
         ),
-        SESSION_ID,
         claudeTasks
       );
 

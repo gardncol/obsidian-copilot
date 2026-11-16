@@ -5,13 +5,13 @@ import { AgentChatInput } from "@/agentMode/ui/AgentChatInput";
 import { openReportIssueModal } from "@/agentMode/ui/ReportIssueModal";
 import { formatChatReportNote } from "@/agentMode/session/feedback/feedbackOffer";
 import AgentContextMeter from "@/agentMode/ui/AgentContextMeter";
-import AgentContextSection, { buildContextSummary } from "@/agentMode/ui/AgentContextSection";
 import { AgentLandingStack } from "@/agentMode/ui/AgentLandingStack";
-import { CreateProjectPanel } from "@/agentMode/ui/CreateProjectPanel";
+import { CreateProjectPanel } from "@/projects/ui/CreateProjectPanel";
 import { AgentModeStatus } from "@/agentMode/ui/AgentModeStatus";
 import { ConnectorsAttentionBanner } from "@/agentMode/ui/ConnectorsAttentionBanner";
-import { AgentProjectHeader } from "@/agentMode/ui/AgentProjectHeader";
-import { ProjectInfoPopover } from "@/agentMode/ui/ProjectInfoPopover";
+import { AgentProjectHeader } from "@/projects/ui/AgentProjectHeader";
+import { ProjectFilesView } from "@/projects/ui/ProjectFilesView";
+import { ProjectInfoPopover } from "@/projects/ui/ProjectInfoPopover";
 import { AgentTabStrip } from "@/agentMode/ui/AgentTabStrip";
 import { AgentTasksProvider } from "@/agentMode/ui/AgentTasksContext";
 import { QueuedMessageList } from "@/agentMode/ui/QueuedMessageList";
@@ -24,17 +24,17 @@ import { CopilotBrandIcon } from "@/components/ui/CopilotBrandIcon";
 import {
   nextProjectLandingPlacement,
   type ProjectLandingPlacement,
-} from "@/agentMode/ui/projectLandingPlacement";
+} from "@/projects/projectLandingPlacement";
 import { AgentHomeShelf, type AgentHomeShelfSection } from "@/agentMode/ui/AgentHomeShelf";
 import { ArchivedChatsModal, createProjectArchiveActions } from "@/agentMode/ui/ArchivedChatsModal";
 import { GlobalRecentChatsSection } from "@/agentMode/ui/GlobalRecentChatsSection";
 import {
-  getHomeShelfTab,
-  setHomeShelfTab,
+  useHomeShelfTab,
   HOME_SHELF_TAB_STORAGE_KEY,
+  PROJECT_SHELF_TAB_STORAGE_KEY,
 } from "@/agentMode/ui/homeShelfPrefs";
-import { leaveDeletedProject } from "@/agentMode/ui/AgentProjectRowActions";
-import { ProjectPickerList } from "@/agentMode/ui/ProjectPickerList";
+import { leaveDeletedProject, projectRowActions } from "@/projects/ui/AgentProjectRowActions";
+import { ProjectPickerList } from "@/projects/ui/ProjectPickerList";
 import { RelevantNotesShelfPanel } from "@/agentMode/ui/RelevantNotesShelfPanel";
 import { useRelevantNotesPaneOpen } from "@/agentMode/ui/useRelevantNotesPaneOpen";
 import { useAgentChatRuntimeState } from "@/agentMode/ui/hooks/useAgentChatRuntimeState";
@@ -47,7 +47,7 @@ import { useAttentionChatIds } from "@/agentMode/ui/hooks/useAttentionChatIds";
 import { useRunningChatIds } from "@/agentMode/ui/hooks/useRunningChatIds";
 import { useChatInputAutoFocus } from "@/agentMode/ui/hooks/useChatInputAutoFocus";
 import { useComposerFocusAfterTaskView } from "@/agentMode/ui/hooks/useComposerFocusAfterTaskView";
-import { useRefreshEmptyLandingOnContextSourceChange } from "@/agentMode/ui/hooks/useRefreshEmptyLandingOnContextSourceChange";
+import { useRefreshEmptyLandingOnContextSourceChange } from "@/projects/hooks/useRefreshEmptyLandingOnContextSourceChange";
 import { useAgentModelPicker } from "@/agentMode/ui/useAgentModelPicker";
 import { useAgentModePicker } from "@/agentMode/ui/useAgentModePicker";
 import { useSessionBackendDescriptor } from "@/agentMode/ui/useBackendDescriptor";
@@ -56,7 +56,7 @@ import type { AgentChatBackend } from "@/agentMode/session/AgentChatBackend";
 import type { AgentSessionManager } from "@/agentMode/session/AgentSessionManager";
 import { GLOBAL_SCOPE } from "@/agentMode/session/scope";
 import { type ProjectConfig } from "@/aiParams";
-import { createProjectAndEnter } from "@/agentMode/ui/AgentProjectCreateForm";
+import { createProjectAndEnter } from "@/projects/ui/AgentProjectCreateForm";
 import { TruncatedText } from "@/components/TruncatedText";
 import { AppContext } from "@/context";
 import { ChatInputProvider } from "@/context/ChatInputContext";
@@ -66,6 +66,7 @@ import { logError, logWarn } from "@/logger";
 import type CopilotPlugin from "@/main";
 import { ProjectFileManager } from "@/projects/ProjectFileManager";
 import { getProjectLandingCaptureSignature } from "@/projects/projectContextSignature";
+import { getProjectFolderPath } from "@/projects/projectPaths";
 import {
   getCachedProjectRecordById,
   useActiveProjects,
@@ -103,7 +104,6 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
   const app = plugin.app || appContext;
   const settings = useSettingsValue();
   const isRelevantNotesPaneOpen = useRelevantNotesPaneOpen(app);
-  const sidebarOpen = useSessionsSidebarOpen(app);
   const draft = useAgentInputDrafts({ store: manager.drafts, chatInputId });
 
   useChatInputAutoFocus();
@@ -114,7 +114,6 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     isTurnInFlight,
     hasPendingPlanPermission,
     currentPlan,
-    currentTodoList,
     pendingToolPermissions,
     pendingAskUserQuestions,
     chatStates,
@@ -185,6 +184,15 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     })();
   }, [manager]);
 
+  const handleContinueFrom = useCallback(
+    (messageId: string) =>
+      manager.continueChatFrom(sessionId, messageId).catch((e) => {
+        logError("[AgentMode] continue in a new chat failed", e);
+        new Notice("Failed to continue in a new chat. Please try again.");
+      }),
+    [manager, sessionId]
+  );
+
   const descriptor = useSessionBackendDescriptor(manager);
   const handleInstall = useCallback(() => {
     descriptor.openInstallUI(plugin);
@@ -208,6 +216,10 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
   const isProjectScope = activeProjectId !== GLOBAL_SCOPE;
   const activeProject = isProjectScope ? projects.find((p) => p.id === activeProjectId) : undefined;
   const isOrphanedProject = isProjectScope && !activeProject;
+  const activeProjectRecord = isProjectScope ? getCachedProjectRecordById(activeProjectId) : null;
+  const projectFolderPath = activeProjectRecord
+    ? getProjectFolderPath(activeProjectRecord.folderName)
+    : undefined;
   const projectName = activeProject?.name ?? "";
   const lastProjectHeaderRef = useRef({
     name: projectName,
@@ -230,8 +242,10 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     loadChat: handleLoadChat,
     updateChatTitle: handleUpdateChatTitle,
     deleteChat: handleDeleteChat,
+    deleteChats: handleDeleteChats,
     setChatPinned: handleSetChatPinned,
     setChatArchived: handleSetChatArchived,
+    archiveChats: handleArchiveChats,
     openSourceFile: handleOpenSourceFile,
     copyChatLink: handleCopyHistoryChatLink,
     getChatBookmarkState,
@@ -281,10 +295,19 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     openSessionsSidebar(plugin).catch((e) => logError("[AgentMode] open sidebar failed", e));
   }, [plugin]);
 
+  const navigatorOpen = useSessionsSidebarOpen(app);
+
   const handleExitProject = useCallback(() => {
     manager.exitProject().catch((e) => {
       logError("[AgentMode] exit project failed", e);
       new Notice("Failed to leave project. Please try again.");
+    });
+  }, [manager]);
+
+  const handleOpenProjectHome = useCallback(() => {
+    manager.openProjectLanding(manager.getActiveProjectId()).catch((e) => {
+      logError("[AgentMode] open project home failed", e);
+      new Notice("Failed to open project. Please try again.");
     });
   }, [manager]);
 
@@ -334,6 +357,13 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
 
   useChatRelevantNotesContext(app, rootEl, chatInputId, draft, messages, activeProject);
 
+  const { setContextFolders } = draft;
+  const addContextFolders = useCallback(
+    (folderPaths: string[]) =>
+      setContextFolders((previous) => [...new Set([...previous, ...folderPaths])]),
+    [setContextFolders]
+  );
+
   const { isDragActive } = useChatFileDrop({
     app,
     contextNotes: draft.contextNotes,
@@ -341,10 +371,18 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     selectedImages: draft.images,
     onAddImage: draft.addImages,
     containerRef: chatContainerRef,
+    acceptAnyFileType: true,
+    projectFolderPath,
+    onAddFolders: addContextFolders,
   });
 
   const isLanding = !manager.getActiveSession()?.hasUserVisibleMessages();
   const isProjectLanding = isLanding && isProjectScope;
+  const dropOverlay = isDragActive && (
+    <div className="tw-pointer-events-none tw-absolute tw-inset-0 tw-z-modal tw-flex tw-items-center tw-justify-center tw-rounded-md tw-border tw-border-dashed tw-bg-primary tw-opacity-80">
+      <span>Drop files here...</span>
+    </div>
+  );
 
   const refreshContextForEmptyLanding = useCallback(async (): Promise<boolean> => {
     const active = manager.getActiveSession();
@@ -353,6 +391,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       draft.input.trim() === "" &&
       draft.images.length === 0 &&
       draft.contextNotes.length === 0 &&
+      draft.contextFolders.length === 0 &&
       draft.queue.length === 0;
     if (!draftEmpty) return false;
     try {
@@ -368,6 +407,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     draft.input.trim() === "" &&
     draft.images.length === 0 &&
     draft.contextNotes.length === 0 &&
+    draft.contextFolders.length === 0 &&
     draft.queue.length === 0;
   const activeProjectLandingCaptureSignature = useMemo(() => {
     if (!isProjectScope) return null;
@@ -391,7 +431,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     archivedChatCount: archivedChatItems.length,
   });
   const projectPlacement = placementRef.current;
-  const isProjectContextInline = sidebarOpen || projectPlacement?.standalone === true;
+  const isProjectContextInline = projectPlacement?.standalone === true;
 
   const mainAgentId =
     manager.getActiveSession()?.backendId ?? manager.getStartingBackendId() ?? null;
@@ -403,16 +443,8 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     if (isLanding) void handleLoadChatHistory();
   }, [isLanding, handleLoadChatHistory, archivedProjectKey]);
 
-  const [globalShelfTab, setGlobalShelfTabState] = useState<string | null>(() =>
-    getHomeShelfTab(app, HOME_SHELF_TAB_STORAGE_KEY)
-  );
-  const setGlobalShelfTab = useCallback(
-    (id: string) => {
-      setGlobalShelfTabState(id);
-      setHomeShelfTab(app, HOME_SHELF_TAB_STORAGE_KEY, id);
-    },
-    [app]
-  );
+  const [globalShelfTab, setGlobalShelfTab] = useHomeShelfTab(app, HOME_SHELF_TAB_STORAGE_KEY);
+  const [projectShelfTab, setProjectShelfTab] = useHomeShelfTab(app, PROJECT_SHELF_TAB_STORAGE_KEY);
 
   const landingSections = useMemo<AgentHomeShelfSection[]>(
     () => [
@@ -432,6 +464,8 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
             onCopyChatLink={handleCopyHistoryChatLink}
             onSetChatPinned={handleSetChatPinned}
             onSetChatArchived={handleSetChatArchived}
+            onDeleteChats={handleDeleteChats}
+            onArchiveChats={handleArchiveChats}
             onViewArchived={handleViewArchived}
             getChatBookmarkState={getChatBookmarkState}
             onSetChatBookmarked={handleSetChatBookmarked}
@@ -489,6 +523,8 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       handleLoadChat,
       handleUpdateChatTitle,
       handleDeleteChat,
+      handleDeleteChats,
+      handleArchiveChats,
       handleSetChatPinned,
       handleSetChatArchived,
       handleViewArchived,
@@ -507,21 +543,14 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     ]
   );
 
-  // The sessions sidebar already lists chats and projects, so the landing keeps only Relevant Notes and shows the
-  // project context inline instead of a shelf.
-  // https://github.com/Brevilabs/obsidian-copilot-private/issues/804
-  const globalShelfSections = useMemo(
-    () =>
-      sidebarOpen
-        ? landingSections.filter((section) => section.id === "relevant-notes")
-        : landingSections,
-    [sidebarOpen, landingSections]
-  );
-
-  const contextSummary = useMemo(() => buildContextSummary(activeProject), [activeProject]);
-
   const projectLandingSections = useMemo<AgentHomeShelfSection[]>(
     () => [
+      {
+        id: "project-files",
+        icon: <Files className="tw-size-4" />,
+        title: "Files",
+        renderBody: () => <ProjectFilesView projectId={activeProjectId} canLink />,
+      },
       {
         id: "project-chats",
         icon: <MessageSquare className="tw-size-4" />,
@@ -539,6 +568,8 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
             onCopyChatLink={handleCopyHistoryChatLink}
             onSetChatPinned={handleSetChatPinned}
             onSetChatArchived={handleSetChatArchived}
+            onDeleteChats={handleDeleteChats}
+            onArchiveChats={handleArchiveChats}
             onViewArchived={handleViewArchived}
             getChatBookmarkState={getChatBookmarkState}
             onSetChatBookmarked={handleSetChatBookmarked}
@@ -549,25 +580,15 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
           />
         ),
       },
-      {
-        id: "project-context",
-        icon: <Files className="tw-size-4" />,
-        title: "Context",
-        count: contextSummary.totalItems,
-        renderBody: () => (
-          <AgentContextSection app={app} projectId={activeProjectId} popoverContainer={rootEl} />
-        ),
-      },
     ],
     [
       chatHistoryItems,
-      contextSummary.totalItems,
-      app,
       activeProjectId,
-      rootEl,
       handleLoadChat,
       handleUpdateChatTitle,
       handleDeleteChat,
+      handleDeleteChats,
+      handleArchiveChats,
       handleSetChatPinned,
       handleSetChatArchived,
       handleViewArchived,
@@ -582,6 +603,22 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       attentionChatIds,
       settings.chatHistorySortStrategy,
     ]
+  );
+
+  const projectShelfSections = useMemo(
+    () =>
+      isProjectContextInline
+        ? projectLandingSections.filter((section) => section.id === "project-files")
+        : projectLandingSections,
+    [isProjectContextInline, projectLandingSections]
+  );
+  const showProjectShelf = isProjectContextInline ? !isOrphanedProject : projectPlacement !== null;
+
+  const hasChatMovedFrom = useCallback(
+    (from: AgentChatBackend) =>
+      manager.getActiveSession()?.chatInputId === chatInputId &&
+      manager.getActiveChatUIState() !== from,
+    [manager, chatInputId]
   );
 
   const composerNode = (
@@ -603,6 +640,8 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
       modePickerOverride={modePickerOverride ?? undefined}
       onCycleMode={handleCycleMode}
       disabled={isOrphanedProject}
+      projectFolderPath={projectFolderPath}
+      hasChatMovedFrom={hasChatMovedFrom}
     />
   );
 
@@ -662,6 +701,9 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
     });
 
   const showHeader = isProjectScope;
+  const headerProjectActions = activeProject
+    ? projectRowActions({ app, project: activeProject })
+    : undefined;
   const collapsibleHeaderRef = useRef<HTMLDivElement>(null);
   // The collapsed header stays mounted for its animation, so it is made inert to keep its buttons out of the tab order.
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/804
@@ -693,17 +735,19 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
         <div className="tw-min-h-0 tw-overflow-hidden">
           <AgentProjectHeader
             projectName={headerName}
+            onOpenHome={handleOpenProjectHome}
             onExit={handleExitProject}
             orphaned={headerOrphaned}
-            // The open sessions sidebar is the navigation, so the header offers no way back out of a project.
-            // https://github.com/Brevilabs/obsidian-copilot-private/issues/804
-            canLeaveProject={!sidebarOpen}
+            onOpenSettings={headerProjectActions?.edit}
+            onRevealFolder={headerProjectActions?.reveal}
+            isProjectHome={isProjectLanding}
+            navigatorOpen={navigatorOpen}
             menu={
               activeProject ? (
                 <ProjectInfoPopover
                   app={app}
                   project={activeProject}
-                  todoList={currentTodoList}
+                  messages={messages}
                   container={rootEl}
                 />
               ) : undefined
@@ -727,11 +771,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                 currentVersion={plugin.manifest.version}
                 visible={isLanding && !isProjectLanding}
               />
-              {isDragActive && (
-                <div className="tw-pointer-events-none tw-absolute tw-inset-0 tw-z-modal tw-flex tw-items-center tw-justify-center tw-rounded-md tw-border tw-border-dashed tw-bg-primary tw-opacity-80">
-                  <span>Drop files here...</span>
-                </div>
-              )}
+              {!isProjectLanding && dropOverlay}
               <div
                 className={
                   isLanding
@@ -750,32 +790,35 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                     composer={
                       <>
                         {queuedMessagesNode}
-                        {composerNode}
+                        {isProjectLanding ? (
+                          // The project home's Files tab takes its own drops, so only the message box shows the attach
+                          // overlay there. https://github.com/Brevilabs/obsidian-copilot-private/issues/461
+                          <div className="tw-relative">
+                            {composerNode}
+                            {dropOverlay}
+                          </div>
+                        ) : (
+                          composerNode
+                        )}
                       </>
-                    }
-                    context={
-                      isProjectLanding && !isOrphanedProject && isProjectContextInline ? (
-                        <div className="tw-px-2 tw-pb-1 tw-pt-3">
-                          <AgentContextSection
-                            app={app}
-                            projectId={activeProjectId}
-                            popoverContainer={rootEl}
-                          />
-                        </div>
-                      ) : undefined
                     }
                     shelf={
                       isProjectLanding ? (
-                        projectPlacement && !isProjectContextInline ? (
-                          <AgentHomeShelf key={activeProjectId} sections={projectLandingSections} />
+                        showProjectShelf ? (
+                          <AgentHomeShelf
+                            key={activeProjectId}
+                            sections={projectShelfSections}
+                            activeSectionId={projectShelfTab}
+                            onSectionSelect={setProjectShelfTab}
+                          />
                         ) : null
-                      ) : globalShelfSections.length > 0 ? (
+                      ) : (
                         <AgentHomeShelf
-                          sections={globalShelfSections}
+                          sections={landingSections}
                           activeSectionId={globalShelfTab}
                           onSectionSelect={setGlobalShelfTab}
                         />
-                      ) : null
+                      )
                     }
                   />
                 ) : (
@@ -810,6 +853,7 @@ const AgentHomeInternal: React.FC<AgentHomeProps> = ({
                         chatBackend={backend}
                         isLoading={isLoading}
                         chatStates={chatStates}
+                        onContinueFrom={handleContinueFrom}
                       />
                       {queuedMessagesNode}
                       <AgentChatControls

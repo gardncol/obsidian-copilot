@@ -8,7 +8,6 @@ import {
   AgentMessagePart,
   AgentToolKind,
   AgentQuestionAnswers,
-  AgentTodoListEntry,
   AskUserQuestionPrompt,
   BackendDescriptor,
   BackendId,
@@ -43,7 +42,7 @@ import {
   ensureMultiAgentEntitlement,
   showMultiAgentUpgradePrompt,
 } from "@/agentMode/session/fanout/multiAgentEntitlement";
-import type { App, DataAdapter } from "obsidian";
+import { Notice, type App, type DataAdapter } from "obsidian";
 import { MethodUnsupportedError } from "@/agentMode/session/errors";
 import {
   diffTargetPaths,
@@ -59,14 +58,19 @@ import {
   type FileCaptures,
 } from "@/agentMode/session/turnFileChanges";
 import { TurnTracker, type TurnOutcome, type TurnSend } from "@/agentMode/session/TurnTracker";
+import { joinPosix } from "@/utils/pathUtils";
 import { getVaultBase } from "@/utils/vaultPath";
+import { savedChatImagePath } from "@/utils/chatImagePersistence";
+import { getEffectiveConversationsFolder } from "@/settings/copilotFolder";
 import { deriveChatTitleFromMessages } from "@/agentMode/session/chatHistoryMerge";
 import { isCompactCommand } from "@/commands/compactCommand";
 import type { FanoutRunInput } from "@/agentMode/session/fanout/FanoutOrchestrator";
 import { isFanout } from "@/agentMode/session/fanout/answerers";
 import {
   buildConversationHistoryBlock,
-  CONVERSATION_HISTORY_MAX_CHARS,
+  type ConversationHistoryBlock,
+  MENTION_HISTORY_MAX_CHARS,
+  SAVED_HISTORY_MAX_CHARS,
 } from "@/agentMode/session/conversationHistory";
 import {
   buildPriorFanoutContextBlock,
@@ -125,6 +129,7 @@ export const DEFAULT_TITLE_PREFIX = "New session";
 const EMPTY_BACKEND_IDS: ReadonlyArray<BackendId> = Object.freeze([]);
 const EMPTY_TASKS: readonly AgentTask[] = Object.freeze([]);
 const EMPTY_MESSAGES: readonly AgentChatMessage[] = Object.freeze([]);
+const NO_EARLIER_CHATS: readonly string[] = Object.freeze([]);
 const EMPTY_TOOL_CALL_IDS: ReadonlySet<string> = new Set();
 const LAUNCH_CARD_STATUS: Record<TaskEndStatus, AgentToolStatus> = {
   completed: "completed",
@@ -188,7 +193,6 @@ export interface AgentSessionListener {
   onModelChanged?(): void;
   onLabelChanged?(): void;
   onCurrentPlanChanged?(): void;
-  onCurrentTodoListChanged?(): void;
   onNeedsAttentionChanged?(needsAttention: boolean): void;
   onTasksChanged?(): void;
   onQueuedPromptsChanged?(): void;
@@ -269,6 +273,7 @@ export class AgentSession implements ChatStateHost, ChatView {
   private lastMentionedAgents: ReadonlyArray<BackendId> = EMPTY_BACKEND_IDS;
   private pendingFanoutContext: PendingFanoutContext[] = [];
   private resendSavedHistory = false;
+  private continuedFrom: readonly string[] = NO_EARLIER_CHATS;
   private readonly turns: TurnTracker;
   private readonly taskFiles = new Map<string, FileCaptures>();
   private readonly tasks = new Map<string, AgentTask>();
@@ -286,7 +291,6 @@ export class AgentSession implements ChatStateHost, ChatView {
   private readonly historyReplay = new SessionHistoryReplay({
     store: this.store,
     scheduleNotifyMessages: () => this.scheduleNotifyMessages(),
-    applyTodoList: (entries) => this.requests.applyTodoList(entries),
   });
   private readonly requests: InteractiveRequests;
   private readonly usageTracker: UsageTracker;
@@ -347,7 +351,6 @@ export class AgentSession implements ChatStateHost, ChatView {
       recomputeStatus: () => this.recomputeStatusIfChanged(),
       notifyMessages: () => this.notifyMessages(),
       notifyPlanChanged: () => this.notifyCurrentPlanChanged(),
-      notifyTodoListChanged: () => this.notifyCurrentTodoListChanged(),
     });
     this.usageTracker = new UsageTracker({
       backend: this.backend,
@@ -661,6 +664,10 @@ export class AgentSession implements ChatStateHost, ChatView {
     this.resendSavedHistory = true;
   }
 
+  setContinuedFrom(continuedFrom: readonly string[] = NO_EARLIER_CHATS): void {
+    this.continuedFrom = continuedFrom;
+  }
+
   getLabel(): string | null {
     return this.label;
   }
@@ -917,10 +924,9 @@ export class AgentSession implements ChatStateHost, ChatView {
           );
         }
 
-        const historyBlock = buildConversationHistoryBlock(
-          this.priorDisplayMessages(userMessageId),
-          CONVERSATION_HISTORY_MAX_CHARS
-        );
+        const historyBlock =
+          this.priorHistoryBlock(userMessageId, MENTION_HISTORY_MAX_CHARS, this.continuedFrom)
+            ?.text ?? null;
         const promptBlocks = buildPromptBlocks(
           displayText,
           context,
@@ -936,12 +942,10 @@ export class AgentSession implements ChatStateHost, ChatView {
       // A reopened chat whose agent session is gone from this device sends its saved turns once.
       // https://github.com/logancyang/obsidian-copilot/issues/3643
       const sendsSavedHistory = this.resendSavedHistory && !sendsCompact;
-      const historyBlock = sendsSavedHistory
-        ? buildConversationHistoryBlock(
-            this.priorDisplayMessages(userMessageId),
-            CONVERSATION_HISTORY_MAX_CHARS
-          )
+      const savedHistory = sendsSavedHistory
+        ? this.priorHistoryBlock(userMessageId, SAVED_HISTORY_MAX_CHARS, this.continuedFrom)
         : null;
+      const historyBlock = savedHistory?.text ?? null;
       // A feature card's tool call returns before the user answers it, so the answer rides their next message.
       // https://github.com/Brevilabs/obsidian-copilot-private/issues/860
       const promptNotes = sendsCompact ? [] : this.takePromptNotes();
@@ -967,6 +971,13 @@ export class AgentSession implements ChatStateHost, ChatView {
         projectContextUpdatesBlock
       );
 
+      // The agent answers without the oldest saved messages, so the user learns why it may not know them.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+      if (savedHistory?.truncated) {
+        new Notice(
+          "This chat is too long to send in full, so the agent wasn't told its oldest messages."
+        );
+      }
       const outcome = await this.turns.submit(
         { promptId: userMessageId, prompt: promptBlocks },
         true,
@@ -1064,8 +1075,22 @@ export class AgentSession implements ChatStateHost, ChatView {
     return stopReason;
   }
 
-  private priorDisplayMessages(userMessageId: string): readonly AgentChatMessage[] {
-    return this.store.getDisplayMessages().filter((m) => m.id !== userMessageId);
+  private priorHistoryBlock(
+    userMessageId: string,
+    maxChars: number,
+    continuedFrom?: readonly string[]
+  ): ConversationHistoryBlock | null {
+    const app = this.getApp?.();
+    const vaultBase = app ? getVaultBase(app) : null;
+    return buildConversationHistoryBlock(
+      this.store.getDisplayMessages().filter((m) => m.id !== userMessageId),
+      maxChars,
+      vaultBase,
+      (image) => (app ? savedChatImagePath(app, getEffectiveConversationsFolder(), image) : null),
+      // A project chat's agent works in the project folder, so the notes are named by full path.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+      continuedFrom?.map((note) => (vaultBase ? joinPosix(vaultBase, note) : note))
+    );
   }
 
   private displayNameFor(backendId: BackendId): string {
@@ -1128,10 +1153,6 @@ export class AgentSession implements ChatStateHost, ChatView {
 
   getCurrentPlan(): CurrentPlan | null {
     return this.requests.getCurrentPlan();
-  }
-
-  getCurrentTodoList(): AgentTodoListEntry[] | null {
-    return this.requests.getCurrentTodoList();
   }
 
   getTasks(): readonly AgentTask[] {
@@ -1337,8 +1358,6 @@ export class AgentSession implements ChatStateHost, ChatView {
           return;
       }
     }
-
-    if (update.sessionUpdate === "plan") this.requests.applyTodoList(update.entries);
 
     if (update.sessionUpdate === "session_info_update") {
       // An update that omits `title` (opencode's compaction and retry markers) leaves the title alone; only an explicit null clears it. https://github.com/Brevilabs/obsidian-copilot-private/issues/632
@@ -1865,16 +1884,6 @@ export class AgentSession implements ChatStateHost, ChatView {
         l.onModelChanged?.();
       } catch (e) {
         logWarn(`[AgentMode] model listener threw`, e);
-      }
-    }
-  }
-
-  private notifyCurrentTodoListChanged(): void {
-    for (const l of this.listeners) {
-      try {
-        l.onCurrentTodoListChanged?.();
-      } catch (e) {
-        logWarn(`[AgentMode] todo-list listener threw`, e);
       }
     }
   }

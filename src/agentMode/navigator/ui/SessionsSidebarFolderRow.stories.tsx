@@ -12,7 +12,9 @@ const meta = {
     project: sidebarProject("garden", "Garden plans"),
     expanded: false,
     active: false,
+    current: false,
     hiddenStatus: "idle",
+    onOpen: () => {},
     onToggle: () => {},
     onNewChat: () => {},
     onDeleted: () => {},
@@ -28,7 +30,11 @@ export const Expanded: StoryObj<SessionsSidebarFolderRowProps> = {
 };
 
 export const ProjectLandingOpen: StoryObj<SessionsSidebarFolderRowProps> = {
-  args: { expanded: true, active: true },
+  args: { expanded: true, active: true, current: true },
+};
+
+export const CurrentChatInside: StoryObj<SessionsSidebarFolderRowProps> = {
+  args: { expanded: true, current: true },
 };
 
 export const HiddenRunning: StoryObj<SessionsSidebarFolderRowProps> = {

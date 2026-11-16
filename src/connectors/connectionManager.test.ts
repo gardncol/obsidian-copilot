@@ -79,10 +79,18 @@ function fakeAuth() {
 
 const managers: ConnectionManager[] = [];
 
-function setUp(options: { connections?: Array<{ id: string; serviceId: string }> } = {}) {
+function setUp(
+  options: {
+    connections?: Array<{ id: string; serviceId: string }>;
+    catalog?: readonly ConnectorCatalogEntry[];
+  } = {}
+) {
   setSettings({ connectors: options.connections ?? [] });
   const fake = fakeAuth();
-  const manager = new ConnectionManager({ auth: fake.auth, catalog: [NOTION, LINEAR] });
+  const manager = new ConnectionManager({
+    auth: fake.auth,
+    catalog: options.catalog ?? [NOTION, LINEAR],
+  });
   managers.push(manager);
   return { ...fake, manager };
 }
@@ -199,6 +207,42 @@ describe("connectionManager", () => {
     });
 
     describe("connect()", () => {
+      it("uses the connector name as its connection and Keychain ID (https://github.com/Brevilabs/obsidian-copilot-private/issues/892)", async () => {
+        const fake = setUp();
+
+        expect(await connectNotion(fake)).toBe("notion");
+        expect(getSettings().connectors).toEqual([{ id: "notion", serviceId: "notion" }]);
+      });
+
+      it("adds a numeric suffix when the connector name is already taken (https://github.com/Brevilabs/obsidian-copilot-private/issues/892)", async () => {
+        const fake = setUp({
+          connections: [
+            { id: "notion", serviceId: "notion" },
+            { id: "notion-2", serviceId: "notion" },
+          ],
+        });
+        const outcome = fake.manager.connect("notion");
+
+        expect(fake.pendingLogin()?.target.connectionId).toBe("notion-3");
+        fake.finishLogin({ status: "connected" });
+        await outcome;
+        expect(getSettings().connectors.map(({ id }) => id)).toEqual([
+          "notion",
+          "notion-2",
+          "notion-3",
+        ]);
+      });
+
+      it("https://github.com/NangoHQ/nango/issues/7142 passes the catalog's dynamic registration choice to the login", () => {
+        const fake = setUp({
+          catalog: [{ ...NOTION, useDynamicClientRegistration: true }],
+        });
+
+        void fake.manager.connect("notion");
+
+        expect(fake.pendingLogin()?.target).toMatchObject({ useDynamicClientRegistration: true });
+      });
+
       it("waits for the browser with the login link and a cancel, without adding a connection yet, and gives the login the service's name and logo", () => {
         const fake = setUp();
 
@@ -279,6 +323,20 @@ describe("connectionManager", () => {
     });
 
     describe("reconnect()", () => {
+      it("https://github.com/NangoHQ/nango/issues/7142 uses the catalog's dynamic registration choice again for a saved connection", () => {
+        const fake = setUp({
+          connections: [{ id: "c1", serviceId: "notion" }],
+          catalog: [{ ...NOTION, useDynamicClientRegistration: true }],
+        });
+
+        void fake.manager.reconnect("c1");
+
+        expect(fake.pendingLogin()?.target).toMatchObject({
+          connectionId: "c1",
+          useDynamicClientRegistration: true,
+        });
+      });
+
       it("moves a needs-login connection back to connected once the login finishes, keeping its id", async () => {
         const fake = setUp({ connections: [{ id: "c1", serviceId: "notion" }] });
         expect(statusOf(fake.manager, "c1")).toBe("needs-login");

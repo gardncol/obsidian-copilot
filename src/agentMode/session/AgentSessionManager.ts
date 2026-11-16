@@ -1,5 +1,12 @@
 import { isCompactCommand } from "@/commands/compactCommand";
-import type { AgentMcpServer, BackendState } from "@/agentMode/session/types";
+import { toolsUsedLines } from "@/agentMode/session/conversationHistory";
+import { getVaultBase } from "@/utils/vaultPath";
+import type {
+  AgentChatMessage,
+  AgentMcpServer,
+  BackendState,
+  SessionUsage,
+} from "@/agentMode/session/types";
 import type { ChatExtension } from "@/agentMode/session/chatExtension";
 import type { CopilotMcpServer, FindCallingChat } from "@/agentMode/session/copilotMcpServer";
 import { refreshLatestVersion } from "@/hooks/useLatestVersion";
@@ -17,7 +24,7 @@ import {
   subscribeToSettingsChange,
   type CopilotSettings,
 } from "@/settings/model";
-import { buildProjectContext } from "@/context/manifestBuilder";
+import { buildProjectContext } from "@/projects/projectContextBlock";
 import { err2String } from "@/utils";
 import type { ChatHistoryItem } from "@/components/chat-components/ChatHistoryPopover";
 import {
@@ -67,7 +74,7 @@ import {
   getProjectContextSignature,
   getProjectLandingCaptureSignature,
 } from "@/projects/projectContextSignature";
-import { ProjectContentTracker } from "@/context/projectContentTracker";
+import { ProjectContentTracker } from "@/projects/projectContentTracker";
 import { buildProjectContextUpdatesBlock } from "@/context/contextUpdatesBlockBuilder";
 import { ensureAgentsFileForDiscovery } from "@/instructions/agentsFile";
 import { moveProjectPromptToAgentsFile } from "@/projects/moveProjectPrompt";
@@ -137,6 +144,7 @@ function hasUnsentInput(draft: AgentInputDraft | undefined): boolean {
     (draft.input.trim() !== "" ||
       draft.images.length > 0 ||
       draft.contextNotes.length > 0 ||
+      draft.contextFolders.length > 0 ||
       draft.queue.length > 0)
   );
 }
@@ -258,6 +266,8 @@ export class AgentSessionManager {
       savedLabel?: string | null;
       attentionUnsub?: () => void;
       withholdsSessionId?: boolean;
+      replacedSessionId?: string;
+      carriedMessages?: number;
     }
   >();
 
@@ -950,7 +960,9 @@ export class AgentSessionManager {
     }
     this.detachedFromTabIds.delete(session.internalId);
     this.lastActiveByScope.set(projectId, session.internalId);
-    if (projectId === this.activeProjectId) {
+    // A restart reselects the user's chat once every chat is rebuilt; a rebuilt chat taking the selection meanwhile would receive the user's next message.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/877
+    if (projectId === this.activeProjectId && !this.restartingBackends.has(resolvedId)) {
       this.activeSessionId = session.internalId;
     }
     this.attachAutoSave(session);
@@ -1715,17 +1727,59 @@ export class AgentSessionManager {
   ): Promise<AgentSession> {
     const oldIdx = Array.from(this.sessions.keys()).indexOf(oldId);
     const replaced = this.sessions.get(oldId);
+    // A chat with messages its agent never received moves with its note: the note is opened again on the other agent, as a restart opens it, and then names that agent.
+    // Its pending save is written first, or it would land after the note names the new agent and point it back.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+    if (replaced?.hasUserVisibleMessages()) await this.drainAutoSave(replaced);
+    const note = replaced?.hasUserVisibleMessages()
+      ? this.app.vault.getAbstractFileByPath(this.getSessionSourcePath(oldId))
+      : null;
+    const persistence = this.opts.persistenceManager;
+    const loaded = note instanceof TFile && persistence ? await persistence.loadFile(note) : null;
     const created = await this.createSession(
       backendId,
       replaced?.projectId ?? this.activeProjectId,
       options.seedSelection,
       replaced?.chatInputId
     );
+    // A message sent before the other agent is up ties the chat to the agent that received it, so the switch is dropped.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+    if (replaced && this.isTiedToAgent(oldId)) {
+      await this.closeSession(created.internalId);
+      this.setActiveSession(oldId);
+      return replaced;
+    }
+    if (loaded && note instanceof TFile) {
+      this.restoreFromNote(created, false, note, loaded);
+      if (loaded.label) created.setLabel(loaded.label);
+    }
     this.moveIntoTabSlot(created.internalId, oldIdx);
     void this.closeSession(oldId).catch((e) =>
       logWarn(`[AgentMode] closeSession during replaceSessionInPlace failed`, e)
     );
+    if (loaded) await this.recordUnsentChatAgent(created, options.seedSelection);
     return created;
+  }
+
+  // A chat whose agent has received nothing reopens on the agent and model its note names, so the note follows each switch and model or effort change until the first send.
+  // The chat has moved by then, so a failed write is only logged; the first send saves the agent anyway.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+  private recordUnsentChatAgent(session: AgentSession, model?: ModelSelection): Promise<void> {
+    const state = this.getSessionState(session.internalId);
+    const path = state.source?.path;
+    const persistence = this.opts.persistenceManager;
+    if (!path || !persistence || this.isTiedToAgent(session.internalId)) return Promise.resolve();
+    const write = (state.saving ?? Promise.resolve())
+      .then(() => persistence.setAgent(path, session.backendId, model))
+      .catch((e) => logWarn(`[AgentMode] pointing ${path} at ${session.backendId} failed`, e));
+    state.saving = write;
+    return write;
+  }
+
+  isTiedToAgent(internalId: string): boolean {
+    if (!this.sessions.get(internalId)?.hasUserVisibleMessages()) return false;
+    const state = this.sessionState.get(internalId);
+    return !state?.withholdsSessionId || state.replacedSessionId !== undefined;
   }
 
   async startNewChatInPlace(oldId: string, backendId?: BackendId): Promise<AgentSession> {
@@ -1739,6 +1793,39 @@ export class AgentSessionManager {
     // https://github.com/Brevilabs/obsidian-copilot-private/issues/849
     this.detachSessionFromTab(oldId);
     return created;
+  }
+
+  async continueChatFrom(sourceId: string, messageId: string): Promise<AgentSession> {
+    const source = this.sessions.get(sourceId);
+    const persistence = this.opts.persistenceManager;
+    if (!source || !persistence) throw new Error(`No open chat ${sourceId} to continue from`);
+    const savedSource = await this.saveSessionNow(source);
+    const sourceNote = savedSource && this.app.vault.getAbstractFileByPath(savedSource.path);
+    if (!(sourceNote instanceof TFile)) {
+      throw new Error(`Could not save chat ${sourceId} before continuing it`);
+    }
+    // Every earlier chat's note holds messages after the point this chat continues from, and agents found them by searching the vault.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+    const { continuedFrom = [] } = await persistence.loadFile(sourceNote);
+    const messages = source.store.getDisplayMessages();
+    const [first, ...rest] = messages.slice(0, messages.findIndex((m) => m.id === messageId) + 1);
+    // A chat link finds its note by the first message's time, so a continued chat that kept the original's would share the original's link.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+    const startedAt = first.timestamp && { ...first.timestamp, epoch: Date.now() };
+    const saved = await persistence.saveSession(
+      [{ ...first, timestamp: startedAt }, ...rest],
+      source.backendId,
+      {
+        label: source.getLabel(),
+        projectId: source.projectId,
+        model: source.getState()?.model?.current,
+        continuedFrom: [...continuedFrom, sourceNote.path],
+      }
+    );
+    const note = saved && this.app.vault.getAbstractFileByPath(saved.path);
+    if (!(note instanceof TFile))
+      throw new Error(`Could not save the chat continued from ${sourceId}`);
+    return this.loadSessionFromHistory(note);
   }
 
   private moveIntoTabSlot(id: string, slot: number): void {
@@ -2000,7 +2087,11 @@ export class AgentSessionManager {
       resumed = loaded.sessionId
         ? await this.tryResumeSessionFromHistory(loaded.backendId, loaded.sessionId, projectId)
         : null;
-      session = resumed ?? (await this.createSession(loaded.backendId, projectId));
+      // A note with no agent session to resume keeps its own record of the model it ran.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+      const noteModel = loaded.model && this.getSeedSelection(loaded.backendId, loaded.model);
+      session =
+        resumed ?? (await this.createSession(loaded.backendId, projectId, noteModel ?? undefined));
     } catch (err) {
       this.rollbackOptimisticScopeSwitch(previousActiveProjectId, scopeSeq);
       throw err;
@@ -2031,25 +2122,49 @@ export class AgentSessionManager {
       .filter((m) => m.sender === USER_SENDER).length;
     // Claude's transcript keeps /compact only as command bookkeeping, which its replay drops.
     // https://github.com/Brevilabs/obsidian-copilot-private/issues/635
-    const savedUserTurns = loaded.messages.filter(
+    // A chat's leading messages that its agent got only as history are not in the agent's replay, so they are left out of the comparison and shown before it.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+    const carried = loaded.messages.slice(0, loaded.carriedMessages ?? 0);
+    const ownMessages = loaded.messages.slice(carried.length);
+    const savedUserTurns = ownMessages.filter(
       (m) => m.isVisible && m.sender === USER_SENDER && !isCompactCommand(m.message)
     ).length;
+    const state = this.getSessionState(session.internalId);
+    // A multi-agent mention sends the history again on any later turn, including after the agent's own session reattaches.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+    session.setContinuedFrom(loaded.continuedFrom);
     if (replayedUserTurns > 0 && replayedUserTurns >= savedUserTurns) {
-      session.store.fillMissingTimestamps(loaded.messages);
+      session.store.adoptNoteRows(ownMessages);
+      if (carried.length > 0) {
+        session.loadDisplayMessages([...carried, ...session.store.getDisplayMessages()]);
+      }
     } else {
       session.loadDisplayMessages(loaded.messages);
       // The agent never saw this note's turns when its saved session is gone from this device.
       // https://github.com/logancyang/obsidian-copilot/issues/3643
-      if (!resumed) session.resendSavedHistoryOnNextTurn();
+      if (!resumed) {
+        session.resendSavedHistoryOnNextTurn();
+        state.carriedMessages = loaded.messages.length;
+      }
     }
     session.seedSessionUsage(loaded.usage);
-    const state = this.getSessionState(session.internalId);
     state.source = file;
     state.savedLabel = loaded.label;
     // A fresh session has no transcript until its first prompt; saving it earlier repoints the note away from the session
     // another device can still resume, and each browse leaves a duplicate history row.
     // https://github.com/Brevilabs/obsidian-copilot-private/issues/814
-    if (!resumed) state.withholdsSessionId = true;
+    if (!resumed) {
+      state.withholdsSessionId = true;
+      state.replacedSessionId = loaded.sessionId;
+    }
+    // The restored title and usage schedule a save, which must find the note current rather than rewrite it for being opened.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/921
+    state.signature = this.saveSignature(
+      loaded.label ?? null,
+      state.withholdsSessionId ? null : (loaded.sessionId ?? null),
+      loaded.messages,
+      loaded.usage ?? null
+    );
   }
 
   private absorbIntoEmptyActiveTab(loaded: AgentSession, previousActiveId: string | null): void {
@@ -2176,8 +2291,13 @@ export class AgentSessionManager {
     sessionId: SessionId,
     projectId: ProjectScopeId,
     chatInputId?: string,
-    seedSelection?: ModelSelection
+    carriedSelection?: ModelSelection
   ): Promise<AgentSession | null> {
+    // A reopened chat continues on the model it last ran, not the agent's default.
+    // https://github.com/logancyang/obsidian-copilot/issues/4274
+    const lastModel = (await this.opts.sessionIndex?.getEntry(backendId, sessionId))?.model;
+    const seedSelection =
+      carriedSelection ?? (lastModel && (this.getSeedSelection(backendId, lastModel) ?? undefined));
     await this.ensureScopeInstructions(
       projectId,
       projectId === GLOBAL_SCOPE ? undefined : getCachedProjectRecordById(projectId)
@@ -2324,6 +2444,10 @@ export class AgentSessionManager {
       onMessagesChanged: trigger,
       onStatusChanged: () => {},
       onLabelChanged: trigger,
+      onModelChanged: () => {
+        const model = session.getState()?.model?.current;
+        if (model) void this.recordUnsentChatAgent(session, model);
+      },
       onPromptSent: () => {
         this.getSessionState(session.internalId).withholdsSessionId = false;
         this.unarchiveSavedChat(session);
@@ -2411,7 +2535,15 @@ export class AgentSessionManager {
       createdAtMs: messages[0]?.timestamp?.epoch ?? now,
       lastAccessedAtMs: now,
       projectId: session.projectId === GLOBAL_SCOPE ? undefined : session.projectId,
+      model: session.getState()?.model?.current,
     });
+    // The note now points at the session that replaced its unresumable one, so the old entry would list the chat twice.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/902
+    const state = this.sessionState.get(session.internalId);
+    if (state?.replacedSessionId) {
+      await index.deleteSession(session.backendId, state.replacedSessionId);
+      state.replacedSessionId = undefined;
+    }
     // A chat without a note has no metadata-cache event, so the chat lists only learn of it here.
     // https://github.com/Brevilabs/obsidian-copilot-private/issues/801
     this.markHistoryChanged();
@@ -2472,15 +2604,7 @@ export class AgentSessionManager {
     const label = session.getLabel();
     const sessionId = state.withholdsSessionId ? null : session.getBackendSessionId();
     const usage = session.getSessionUsage();
-    const last = messages[messages.length - 1];
-    const fanoutSig = last?.fanout
-      ? Object.values(last.fanout.answers)
-          .map((a) => `${a.status}:${a.text.length}`)
-          .join(",") + `|${last.fanout.summary.status}:${last.fanout.summary.text.length}`
-      : "";
-    const signature = `${label ?? ""}-${sessionId ?? ""}-${messages.length}-${
-      last?.message ?? ""
-    }-${fanoutSig}-${usage?.updatedAt ?? ""}`;
+    const signature = this.saveSignature(label, sessionId, messages, usage);
     if (state.signature === signature) {
       return state.source ?? null;
     }
@@ -2491,6 +2615,8 @@ export class AgentSessionManager {
       sessionId,
       projectId: session.projectId,
       usage: usage ?? undefined,
+      model: session.getState()?.model?.current,
+      carriedMessages: state.withholdsSessionId ? undefined : state.carriedMessages,
     });
     if (result) {
       state.source = this.app.vault.getAbstractFileByPath(result.path) ?? result;
@@ -2503,6 +2629,26 @@ export class AgentSessionManager {
       if (previousSourcePath !== result.path) this.markHistoryChanged();
     }
     return result;
+  }
+
+  private saveSignature(
+    label: string | null,
+    sessionId: string | null,
+    messages: readonly AgentChatMessage[],
+    usage: SessionUsage | null
+  ): string {
+    const last = messages[messages.length - 1];
+    const fanoutSig = last?.fanout
+      ? Object.values(last.fanout.answers)
+          .map((a) => `${a.status}:${a.text.length}`)
+          .join(",") + `|${last.fanout.summary.status}:${last.fanout.summary.text.length}`
+      : "";
+    // The note lists each reply's tools, so a tool call that adds no text still needs a save.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/906
+    const toolsSig = last ? toolsUsedLines(last, getVaultBase(this.app)).join("|") : "";
+    return `${label ?? ""}-${sessionId ?? ""}-${messages.length}-${
+      last?.message ?? ""
+    }-${fanoutSig}-${toolsSig}-${usage?.updatedAt ?? ""}`;
   }
 
   private async drainAutoSave(session: AgentSession): Promise<void> {
@@ -2779,11 +2925,12 @@ export class AgentSessionManager {
       });
       if (resumed) {
         if (label && !resumed.getLabel()) resumed.restoreLabel(label, labelSource ?? "agent");
-        this.setActiveSession(resumed.internalId);
         return resumed;
       }
     }
-    return this.createSession(backendId, projectId, seedSelection, chatInputId);
+    const created = await this.createSession(backendId, projectId, seedSelection, chatInputId);
+    if (label) created.restoreLabel(label, labelSource ?? "agent");
+    return created;
   }
 
   private async restartBackendNow(
@@ -2812,13 +2959,14 @@ export class AgentSessionManager {
     this.heldConfigChanges.delete(backendId);
     logInfo(`[AgentMode] restarting ${backendId} backend: ${reason}`);
     const retainedChatInputIds: string[] = [];
+    let selectionCleared = false;
+    let reselectId: string | null = null;
     try {
       const affected = Array.from(this.sessions.values()).filter((s) => s.backendId === backendId);
       // A chat's first save can still be pending, and its note must exist before the note is read below.
       // https://github.com/Brevilabs/obsidian-copilot-private/issues/742
       for (const session of affected) await this.drainAutoSave(session);
       const activeSessionId = this.activeSessionId;
-      const activeProjectId = this.activeProjectId;
       // Every affected composer must stay owned across the gap, including tabs
       // outside the active scope, or the draft store prunes their unsent text.
       // https://github.com/Brevilabs/obsidian-copilot-private/issues/475
@@ -2827,7 +2975,11 @@ export class AgentSessionManager {
             internalId: session.internalId,
             projectId: session.projectId,
             chatInputId: session.chatInputId,
-            resumableSessionId: session.getBackendSessionId() ?? undefined,
+            // A chat whose agent has received no message has nothing to resume, and resuming its empty session would drop the history its first message owes the agent.
+            // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+            resumableSessionId: this.sessionState.get(session.internalId)?.withholdsSessionId
+              ? undefined
+              : (session.getBackendSessionId() ?? undefined),
             label: session.getLabel(),
             labelSource: session.getLabelSource(),
             // The displayed selection is otherwise lost when the process restarts.
@@ -2846,6 +2998,12 @@ export class AgentSessionManager {
         retainedChatInputIds.push(replacement.chatInputId);
         this.retainedChatInputIds.add(replacement.chatInputId);
       }
+      // Closing the selected chat would select another agent's chat until the rebuild, and a message sent then runs there.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/877
+      if (replacements.some((r) => r.internalId === activeSessionId)) {
+        this.activeSessionId = null;
+        selectionCleared = true;
+      }
       for (const session of affected) {
         await this.closeSession(session.internalId);
       }
@@ -2860,7 +3018,6 @@ export class AgentSessionManager {
         this.registerPreload(backendId, probe);
         if (replacements.length > 0 && !this.disposed) {
           await probe;
-          let selectedId = activeSessionId;
           for (const replacement of replacements) {
             const rebuilt = await this.rebuildReplacedSession(
               backendId,
@@ -2892,18 +3049,26 @@ export class AgentSessionManager {
             }
             rebuilt.restoreChatStates(replacement.chatStates);
             if (replacement.detached) this.detachedFromTabIds.add(rebuilt.internalId);
-            if (replacement.internalId === activeSessionId) selectedId = rebuilt.internalId;
-          }
-          if (selectedId) this.setActiveSession(selectedId);
-          else {
-            this.activeSessionId = null;
-            this.activeProjectId = activeProjectId;
+            if (replacement.internalId === activeSessionId) reselectId = rebuilt.internalId;
           }
         }
       }
     } finally {
       this.restartingBackends.delete(backendId);
       for (const id of retainedChatInputIds) this.retainedChatInputIds.delete(id);
+      // Only the restart that cleared the selection restores it, and only if nothing was selected since; a failed rebuild falls back to a neighbor so the tabs stay visible.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/877
+      if (selectionCleared && this.activeSessionId === null) {
+        const scope = this.activeProjectId;
+        const next =
+          reselectId ??
+          pickScopeNeighbor(
+            this.getSessionIdsForScope(scope),
+            0,
+            this.lastActiveByScope.get(scope)
+          );
+        if (next) this.setActiveSession(next);
+      }
       this.notify();
     }
     const queued = this.pendingBackendRestarts.get(backendId);

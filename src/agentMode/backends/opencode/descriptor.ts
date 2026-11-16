@@ -29,6 +29,7 @@ import {
 import { OpencodeSettingsPanel } from "./OpencodeSettingsPanel";
 import { mapNodeArch, mapNodePlatform } from "./platformResolver";
 import { opencodeCopilotPluginDir } from "./opencodeCopilotPlugin";
+import { opencodeApprovedRules } from "./opencodeApprovedRules";
 import type { ModelSelectionSession } from "@/agentMode/session/types";
 import { simpleBinaryBackendProcess } from "@/agentMode/backends/shared/simpleBinaryBackend";
 import type {
@@ -97,7 +98,7 @@ export const OpencodeBackendDescriptor: BackendDescriptor = {
 
   getBlockedModels: opencodeBlockedModels,
 
-  // OpenCode 2.0.32 stores an "always" reply as a saved rule for its project folder.
+  // OpenCode 2.2.7 stores an "always" reply as a saved rule for its project folder.
   // https://github.com/logancyang/obsidian-copilot/issues/2889
   presentPermissionOption(option: PermissionOption): PermissionOption {
     if (option.kind !== "allow_always") return option;
@@ -219,6 +220,8 @@ export const OpencodeBackendDescriptor: BackendDescriptor = {
   },
 
   SettingsPanel: OpencodeSettingsPanel,
+
+  approvedRules: opencodeApprovedRules,
 
   async onPluginLoad(plugin: CopilotPlugin): Promise<void> {
     const manager = getOpencodeBinaryManager(plugin);

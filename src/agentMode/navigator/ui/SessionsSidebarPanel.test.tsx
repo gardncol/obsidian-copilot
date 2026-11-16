@@ -14,6 +14,26 @@ import React from "react";
 
 const NONE: ReadonlySet<string> = new Set();
 
+interface MockConfirm {
+  title: string;
+  onConfirm: () => unknown;
+}
+const mockConfirms: MockConfirm[] = [];
+
+jest.mock("@/components/modals/ConfirmModal", () => ({
+  ConfirmModal: class {
+    title: string;
+    onConfirm: () => unknown;
+    constructor(_app: unknown, onConfirm: () => unknown, _content: unknown, title: string) {
+      this.onConfirm = onConfirm;
+      this.title = title;
+    }
+    open() {
+      mockConfirms.push(this);
+    }
+  },
+}));
+
 function baseProps(
   overrides: Partial<React.ComponentProps<typeof SessionsSidebarPanel>> = {}
 ): React.ComponentProps<typeof SessionsSidebarPanel> {
@@ -213,7 +233,7 @@ describe("SessionsSidebarPanel", () => {
         renderPanel({ projects: projects(7) });
 
         const folders = within(section("Projects"))
-          .getAllByRole("button", { expanded: false, name: /^Project \d$/ })
+          .getAllByRole("button", { name: /^Project \d$/ })
           .map((button) => button.textContent);
         expect(folders).toEqual(["Project 1", "Project 2", "Project 3", "Project 4", "Project 5"]);
       });
@@ -233,14 +253,27 @@ describe("SessionsSidebarPanel", () => {
         expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
       });
 
-      it("only folds or unfolds a project on a click of its row, without opening the project or a chat for https://github.com/Brevilabs/obsidian-copilot-private/issues/802", () => {
+      it("opens a project's home on a click of its row without folding it or opening a chat for https://github.com/Brevilabs/obsidian-copilot-private/issues/840", () => {
+        const { onToggleProject, onOpenProject, onOpenChat } = renderPanel({
+          projects: projects(1),
+          items: projectChats("p1", 2),
+        });
+
+        fireEvent.click(screen.getByRole("button", { name: "Project 1" }));
+
+        expect(onOpenProject).toHaveBeenCalledWith("p1");
+        expect(onToggleProject).not.toHaveBeenCalled();
+        expect(onOpenChat).not.toHaveBeenCalled();
+      });
+
+      it("folds or unfolds a project from its chevron without opening the project or a chat for https://github.com/Brevilabs/obsidian-copilot-private/issues/840", () => {
         const { onToggleProject, onOpenProject, onOpenChat } = renderPanel({
           projects: projects(1),
           items: projectChats("p1", 2),
           expandedProjectIds: new Set(["p1"]),
         });
 
-        fireEvent.click(screen.getByRole("button", { name: "Project 1" }));
+        fireEvent.click(screen.getByRole("button", { name: "Hide chats in Project 1" }));
 
         expect(onToggleProject).toHaveBeenCalledWith("p1");
         expect(onOpenProject).not.toHaveBeenCalled();
@@ -295,6 +328,20 @@ describe("SessionsSidebarPanel", () => {
           activeChatIds: new Set([items[0].id]),
         });
         expect(current()).toEqual(["Chat p1 1"]);
+      });
+
+      it("brightens only the name of the project holding the current chat, even when that chat is shown inside it, for https://github.com/Brevilabs/obsidian-copilot-private/issues/890", () => {
+        const items = projectChats("p1", 1);
+        renderPanel({
+          projects: projects(2),
+          items,
+          expandedProjectIds: new Set(["p1"]),
+          activeProjectId: "p1",
+          activeChatIds: new Set([items[0].id]),
+        });
+
+        expect(screen.getByText("Project 1").classList.contains("tw-text-normal")).toBe(true);
+        expect(screen.getByText("Project 2").classList.contains("tw-text-muted")).toBe(true);
       });
 
       it("says an expanded project has no chats instead of leaving an empty gap for https://github.com/Brevilabs/obsidian-copilot-private/issues/802", () => {
@@ -875,14 +922,14 @@ describe("SessionsSidebarPanel", () => {
 
       it("stores the new project order when a project is dropped by keyboard for https://github.com/Brevilabs/obsidian-copilot-private/issues/811", () => {
         const props = renderPanel({ projects: projects(3) });
-        const [first] = within(section("Projects")).getAllByRole("button", { expanded: false });
+        const first = within(section("Projects")).getByRole("button", { name: "Project 1" });
 
         dragByKeyboard(first, "ArrowDown", 2);
 
         expect(props.onReorderProjects).toHaveBeenCalledWith(["p2", "p3", "p1"]);
       });
 
-      it("keeps Enter for opening a pinned chat or folding a project instead of picking the row up for https://github.com/Brevilabs/obsidian-copilot-private/issues/811", () => {
+      it("keeps Enter for opening a pinned chat or a project's home instead of picking the row up for https://github.com/Brevilabs/obsidian-copilot-private/issues/811 and https://github.com/Brevilabs/obsidian-copilot-private/issues/840", () => {
         const props = renderPanel({ items: pins, projects: projects(1) });
         const pin = screen.getByRole("button", { name: "Pin A" });
         const folder = screen.getByRole("button", { name: "Project 1" });
@@ -895,7 +942,7 @@ describe("SessionsSidebarPanel", () => {
         fireEvent.click(folder);
 
         expect(props.onOpenChat).toHaveBeenCalledWith("chats/pin-a.md");
-        expect(props.onToggleProject).toHaveBeenCalledWith("p1");
+        expect(props.onOpenProject).toHaveBeenCalledWith("p1");
       });
 
       it("offers reordering on Pinned and project rows only, not on Recents, project chats or search results, for https://github.com/Brevilabs/obsidian-copilot-private/issues/811", () => {
@@ -936,6 +983,106 @@ describe("SessionsSidebarPanel", () => {
         expect(chatTitles(section("Recents"))).toEqual(["Rec 1", "Rec 2"]);
         expect(onSetChatPinned).not.toHaveBeenCalled();
         expect(props.onReorderProjects).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("selecting several chats", () => {
+      const ISSUE = "https://github.com/logancyang/obsidian-copilot/issues/3553";
+      const mixedItems = () => [
+        sidebarChat("chats/pin.md", "Pinned chat", 1, { pinnedAt: 5 }),
+        ...projectChats("p1", 2),
+        sidebarChat("chats/rec-1.md", "Recent chat 1", 3),
+        sidebarChat("chats/rec-2.md", "Recent chat 2", 4),
+      ];
+      const row = (title: string) => screen.getByRole("button", { name: title });
+      const menuItems = () =>
+        within(screen.getByRole("menu"))
+          .getAllByRole("menuitem")
+          .map((item) => item.textContent);
+
+      beforeEach(() => mockConfirms.splice(0));
+
+      it(`${ISSUE} selects every shown chat between a Pinned chat and a Recents chat, project chats included, without opening any`, () => {
+        const onDeleteChats = jest.fn(async () => {});
+        const props = renderPanel({
+          items: mixedItems(),
+          projects: projects(1),
+          expandedProjectIds: new Set(["p1"]),
+          actions: inertChatActions({ onDeleteChats }),
+        });
+
+        fireEvent.click(row("Pinned chat"), { metaKey: true });
+        fireEvent.click(row("Recent chat 1"), { shiftKey: true });
+        fireEvent.contextMenu(row("Chat p1 2"));
+        act(() => {
+          fireEvent.click(
+            within(screen.getByRole("menu")).getByRole("menuitem", { name: "Delete 4 chats" })
+          );
+        });
+        expect(mockConfirms.at(-1)?.title).toBe("Delete 4 chats");
+        void mockConfirms.at(-1)?.onConfirm();
+
+        expect(props.onOpenChat).not.toHaveBeenCalled();
+        expect(onDeleteChats).toHaveBeenCalledWith([
+          "chats/pin.md",
+          "chats/p1-0.md",
+          "chats/p1-1.md",
+          "chats/rec-1.md",
+        ]);
+      });
+
+      it(`${ISSUE} skips the chats of a folded group in a Shift-click range`, () => {
+        const onArchiveChats = jest.fn(async () => {});
+        renderPanel({
+          items: mixedItems(),
+          projects: projects(1),
+          expandedProjectIds: new Set(["p1"]),
+          collapsedGroups: new Set(["projects"]),
+          actions: inertChatActions({ onArchiveChats }),
+        });
+
+        fireEvent.click(row("Pinned chat"), { metaKey: true });
+        fireEvent.click(row("Recent chat 2"), { shiftKey: true });
+        fireEvent.contextMenu(row("Recent chat 2"));
+        expect(menuItems()).toEqual(["Archive 3 chats", "Delete 3 chats"]);
+        act(() => {
+          fireEvent.click(
+            within(screen.getByRole("menu")).getByRole("menuitem", { name: "Archive 3 chats" })
+          );
+        });
+        void mockConfirms.at(-1)?.onConfirm();
+
+        expect(onArchiveChats).toHaveBeenCalledWith([
+          "chats/pin.md",
+          "chats/rec-1.md",
+          "chats/rec-2.md",
+        ]);
+      });
+
+      it(`${ISSUE} opens a plain-clicked chat and drops the selection`, () => {
+        const props = renderPanel({ items: mixedItems() });
+
+        fireEvent.click(row("Recent chat 1"), { metaKey: true });
+        fireEvent.click(row("Recent chat 2"), { metaKey: true });
+        fireEvent.click(row("Pinned chat"));
+        fireEvent.contextMenu(row("Recent chat 1"));
+
+        expect(props.onOpenChat).toHaveBeenCalledWith("chats/pin.md");
+        expect(menuItems()).toContain("Rename");
+      });
+
+      it(`${ISSUE} drops the selection when the search text changes`, () => {
+        renderPanel({ items: mixedItems() });
+
+        fireEvent.click(row("Recent chat 1"), { metaKey: true });
+        fireEvent.click(row("Recent chat 2"), { metaKey: true });
+        fireEvent.click(screen.getByRole("button", { name: "Search chats" }));
+        fireEvent.change(screen.getByPlaceholderText("Search chats..."), {
+          target: { value: "Recent" },
+        });
+        fireEvent.contextMenu(row("Recent chat 1"));
+
+        expect(menuItems()).toContain("Rename");
       });
     });
   });

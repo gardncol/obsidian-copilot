@@ -15,6 +15,7 @@ import { AcpBackend, AcpSpawnDescriptor } from "@/agentMode/acp/types";
 import type { CopilotMode } from "@/agentMode/session/types";
 import { composeDenyList, getManagedSkills, SkillManager } from "@/agentMode/skills";
 import { buildAgentSystemPrompt } from "@/agentMode/backends/shared/agentSystemPrompt";
+import { pythonUtf8Env } from "@/agentMode/backends/shared/pythonUtf8Env";
 import {
   buildBuiltinSkillEnv,
   sanitizeBuiltinSkillEnvOverrides,
@@ -110,20 +111,12 @@ export class OpencodeBackend implements AcpBackend {
     );
     const configOverride = envOverrides.OPENCODE_CONFIG_CONTENT;
     delete envOverrides.OPENCODE_CONFIG_CONTENT;
+    const pluginDir =
+      this.#deps.getCopilotPluginDir &&
+      (await installOpencodeCopilotPlugin(this.#deps.getCopilotPluginDir()));
     let configContent =
-      configOverride ??
-      JSON.stringify(
-        await buildOpencodeConfig(
-          settings,
-          this.#deps,
-          this.#deps.getCopilotPluginDir &&
-            (await installOpencodeCopilotPlugin(this.#deps.getCopilotPluginDir()))
-        )
-      );
-    if (settings.enableSelfHostMode === true && configOverride !== undefined) {
-      // An explicit config override must not reopen agent-native web tools while
-      // Self-Host mode promises that queries stay on the configured route.
-      // https://github.com/Brevilabs/obsidian-copilot-private/issues/558
+      configOverride ?? JSON.stringify(await buildOpencodeConfig(settings, this.#deps, pluginDir));
+    if (configOverride !== undefined && (pluginDir || settings.enableSelfHostMode === true)) {
       let overriddenConfig: Record<string, unknown>;
       try {
         const parsed = JSON.parse(configOverride) as unknown;
@@ -132,18 +125,17 @@ export class OpencodeBackend implements AcpBackend {
       } catch {
         throw new Error("opencode OPENCODE_CONFIG_CONTENT must be a JSON object.");
       }
-      const legacyKeys = OPENCODE_1_PERMISSION_KEYS.filter(
-        (key) => overriddenConfig[key] !== undefined
-      );
-      if (legacyKeys.length > 0) {
-        throw new Error(
-          `opencode OPENCODE_CONFIG_CONTENT uses OpenCode 1 keys (${legacyKeys.join(", ")}); ` +
-            "Self-Host Mode requires the OpenCode 2 `permissions` and `agents` keys."
-        );
+      if (pluginDir) {
+        // ACP-added MCP servers need the same direct-call policy even with a user's custom configuration.
+        // https://github.com/Brevilabs/obsidian-copilot-private/issues/875
+        const plugins = (overriddenConfig.plugins as OpencodeConfig["plugins"]) ?? [];
+        overriddenConfig.plugins = [...new Set([...plugins, pluginDir])];
       }
-      overriddenConfig.permissions = appendNativeWebDenies(overriddenConfig.permissions);
-      for (const agent of agentConfigs(overriddenConfig.agents)) {
-        agent.permissions = appendNativeWebDenies(agent.permissions);
+      if (settings.enableSelfHostMode === true) {
+        overriddenConfig.permissions = appendNativeWebDenies(overriddenConfig.permissions);
+        for (const agent of agentConfigs(overriddenConfig.agents)) {
+          agent.permissions = appendNativeWebDenies(agent.permissions);
+        }
       }
       configContent = JSON.stringify(overriddenConfig);
     }
@@ -171,6 +163,7 @@ export class OpencodeBackend implements AcpBackend {
       env: {
         ...process.env,
         PATH: await agentShellPath(),
+        ...pythonUtf8Env(),
         ...builtinSkillEnv,
         // OpenCode's level filters its file log and stderr together, and its
         // server logs request-failure causes at INFO, so WARN hid every cause.
@@ -211,8 +204,6 @@ const NATIVE_WEB_DENIES: readonly PermissionRule[] = [
   { action: "websearch", resource: "*", effect: "deny" },
   { action: "webfetch", resource: "*", effect: "deny" },
 ];
-
-const OPENCODE_1_PERMISSION_KEYS = ["permission", "tools", "agent", "mode"] as const;
 
 export async function buildOpencodeConfig(
   s: CopilotSettings,

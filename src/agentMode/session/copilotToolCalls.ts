@@ -1,3 +1,5 @@
+import { describeConnectorTool } from "@/connectors/connectorTools";
+import { humanizeToolName, serviceToolName } from "@/lib/toolName";
 import { COPILOT_MCP_SERVER_NAME } from "@/agentMode/session/copilotMcpServer";
 
 export type CopilotToolCall = { name: string } & (
@@ -6,7 +8,7 @@ export type CopilotToolCall = { name: string } & (
 );
 
 export interface CopilotToolUse {
-  runs: string | null;
+  wrapper?: string;
   calls: readonly CopilotToolCall[];
 }
 
@@ -20,5 +22,18 @@ export function directCopilotToolUse(
   input: unknown
 ): CopilotToolUse | undefined {
   if (mcpServer !== COPILOT_MCP_SERVER_NAME || !toolName) return undefined;
-  return { runs: toolName, calls: [{ name: toolName, args: toolInputRecord(input) }] };
+  return { calls: [{ name: toolName, args: toolInputRecord(input) }] };
+}
+
+function copilotToolNameLabel(name: string): string {
+  const tool = describeConnectorTool(name);
+  return tool
+    ? `${tool.serviceName} · ${serviceToolName(tool.serviceName, tool.toolName)}`
+    : `${COPILOT_MCP_SERVER_NAME} · ${humanizeToolName(name)}`;
+}
+
+export function toolUseLabel(use: CopilotToolUse | undefined): string | null {
+  const label = [...new Set(use?.calls.map(({ name }) => copilotToolNameLabel(name)))].join(", ");
+  if (!label) return null;
+  return use?.wrapper ? `${use.wrapper} · ${label}` : label;
 }

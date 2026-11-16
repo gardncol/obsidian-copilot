@@ -716,27 +716,6 @@ describe("AgentSession", () => {
         expect(session.getStatus()).toBe("idle");
       });
 
-      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/643 restores the last replayed task list as the current todo list", async () => {
-        const mock = makeMockBackend();
-        const session = makeAwaitingResumeSession(mock);
-        const onCurrentTodoListChanged = jest.fn();
-        subscribeTo(session, { onCurrentTodoListChanged });
-
-        mock.emitUpdate({
-          sessionUpdate: "plan",
-          entries: [{ content: "step", status: "pending", priority: "medium" }],
-        });
-        mock.emitUpdate({
-          sessionUpdate: "plan",
-          entries: [{ content: "step", status: "completed", priority: "medium" }],
-        });
-        session.completeResume(emptyState());
-        await session.ready;
-
-        expect(session.getCurrentTodoList()).toEqual([{ content: "step", status: "completed" }]);
-        expect(onCurrentTodoListChanged).toHaveBeenCalled();
-      });
-
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/175 gives a replayed reply the agent started on its own its own bubble when the replay ends the turn before it", () => {
         const mock = makeMockBackend();
         const session = makeAwaitingResumeSession(mock);
@@ -2943,6 +2922,33 @@ describe("AgentSession", () => {
           }
         });
 
+        it("tells mentioned agents at most 48,000 characters of earlier turns, dropping the oldest, without a notice", async () => {
+          const mock = makeMockBackend();
+          const runFanoutTurn = fanoutRunner(twoAgentTurn());
+          const session = makeSession(mock, { runFanoutTurn });
+          session.loadDisplayMessages(
+            Array.from({ length: 20 }, (_, i) => ({
+              id: `h${i}`,
+              sender: i % 2 === 0 ? USER_SENDER : AI_SENDER,
+              message: `turn-${i}-${"x".repeat(5_000)}`,
+              isVisible: true,
+              timestamp: null,
+            }))
+          );
+          jest.mocked(Notice).mockClear();
+
+          await session.sendPrompt("review", undefined, undefined, BOTH_AGENTS).turn;
+
+          const history = fanoutPromptText(runFanoutTurn).match(
+            /<conversation_history>[\s\S]*<\/conversation_history>/
+          )![0];
+          expect(history.length).toBeLessThan(49_000);
+          expect(history).toContain("[earlier conversation truncated]");
+          expect(history).not.toContain("turn-0-");
+          expect(history).toContain("turn-19-");
+          expect(Notice).not.toHaveBeenCalled();
+        });
+
         it("hands the turn to the fan-out runner instead of backend.prompt for an entitled user", async () => {
           const mock = makeMockBackend();
           const runFanoutTurn = fanoutRunner(
@@ -3071,6 +3077,28 @@ describe("AgentSession", () => {
           expect(text).toContain("the master plan is X");
           expect(text).toContain("<user-message>\nexpand on that plan\n</user-message>");
           expect((text.match(/expand on that plan/g) ?? []).length).toBe(1);
+        });
+
+        it("https://github.com/Brevilabs/obsidian-copilot-private/issues/908 tells agents mentioned in a continued chat which notes hold the earlier chat they must not read", async () => {
+          const mock = makeMockBackend();
+          const runFanoutTurn = fanoutRunner(twoAgentTurn());
+          const session = makeSession(mock, { runFanoutTurn });
+          session.loadDisplayMessages([
+            {
+              id: "m0",
+              sender: USER_SENDER,
+              message: "the plan is X",
+              isVisible: true,
+              timestamp: null,
+            },
+          ]);
+          session.setContinuedFrom(["chats/original.md"]);
+
+          await session.sendPrompt("expand on that plan", undefined, undefined, BOTH_AGENTS).turn;
+
+          expect(fanoutPromptText(runFanoutTurn)).toContain(
+            "ignore their content if a search returns them:\n- chats/original.md\n"
+          );
         });
 
         it("injects the buffered question + summary on the next single-agent turn, then clears", async () => {
@@ -4998,6 +5026,100 @@ describe("AgentSession", () => {
         expect(promptTexts(mock)[2]).toBe("and backwards?");
       });
 
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/907 names the saved file of an image the reopened chat's note embeds instead of sending the embed", async () => {
+        const name = `copilot-image-${"a".repeat(64)}.png`;
+        const saved = mockTFile({ path: `copilot/attachments/${name}`, name });
+        const app = {
+          vault: { adapter: new FileSystemAdapter(), getAbstractFileByPath: () => null },
+          metadataCache: {
+            getFirstLinkpathDest: (link: string) => (link === name ? saved : null),
+          },
+        } as unknown as App;
+        const mock = makeMockBackend();
+        const session = makeSession(mock, { getApp: () => app });
+        session.loadDisplayMessages([
+          { ...savedChat[0], message: `what does this show?\n\n![[${name}]]` },
+          savedChat[1],
+        ]);
+        session.resendSavedHistoryOnNextTurn();
+
+        await session.sendPrompt("describe the screenshot").turn;
+
+        expect(promptTexts(mock)[0]).toContain(
+          `<turn role="user">\nwhat does this show?\n[image attachment saved at /vault/copilot/attachments/${name}]\n</turn>`
+        );
+      });
+
+      const longSavedChat = (turns: number, turnChars: number): AgentChatMessage[] =>
+        Array.from({ length: turns }, (_, i) => ({
+          id: `h${i}`,
+          sender: i % 2 === 0 ? USER_SENDER : AI_SENDER,
+          message: `turn-${i}-${"x".repeat(turnChars)}`,
+          isVisible: true,
+          timestamp: null,
+        }));
+      const sentHistory = (text: string): string =>
+        text.match(/<conversation_history>[\s\S]*<\/conversation_history>/)![0];
+      const ISSUE_908 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/908";
+      const TRIM_NOTICE =
+        "This chat is too long to send in full, so the agent wasn't told its oldest messages.";
+
+      it(`${ISSUE_908} sends a saved history longer than 48,000 characters in full and raises no notice`, async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock);
+        session.loadDisplayMessages(longSavedChat(20, 5_000));
+        session.resendSavedHistoryOnNextTurn();
+        jest.mocked(Notice).mockClear();
+
+        await session.sendPrompt("what came first?").turn;
+
+        const history = sentHistory(promptTexts(mock)[0]);
+        expect(history.length).toBeGreaterThan(100_000);
+        expect(history).toContain("turn-0-");
+        expect(history).toContain("turn-19-");
+        expect(history).not.toContain("[earlier conversation truncated]");
+        expect(Notice).not.toHaveBeenCalled();
+      });
+
+      it(`${ISSUE_908} drops the oldest turns past 200,000 characters and tells the user once, when the trimmed history is sent`, async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock);
+        session.loadDisplayMessages(longSavedChat(50, 5_000));
+        session.resendSavedHistoryOnNextTurn();
+        jest.mocked(Notice).mockClear();
+
+        await session.sendPrompt("what came first?").turn;
+        await session.sendPrompt("and then?").turn;
+
+        const [first, second] = promptTexts(mock);
+        const history = sentHistory(first);
+        expect(history.length).toBeLessThan(201_000);
+        expect(history.length).toBeGreaterThan(190_000);
+        expect(history).toContain("[earlier conversation truncated]");
+        expect(history).not.toContain("turn-0-");
+        expect(history).toContain("turn-49-");
+        expect(second).toBe("and then?");
+        expect(Notice).toHaveBeenCalledTimes(1);
+        expect(Notice).toHaveBeenCalledWith(TRIM_NOTICE);
+      });
+
+      it(`${ISSUE_908} tells the agent which notes hold the chat this one continues, with the saved turns, and never again`, async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock);
+        session.loadDisplayMessages(savedChat);
+        session.setContinuedFrom(["chats/original.md"]);
+        session.resendSavedHistoryOnNextTurn();
+
+        await session.sendPrompt("what is my secret word?").turn;
+        await session.sendPrompt("and backwards?").turn;
+
+        const [first, second] = promptTexts(mock);
+        expect(sentHistory(first)).toContain(
+          "ignore their content if a search returns them:\n- chats/original.md\n"
+        );
+        expect(second).toBe("and backwards?");
+      });
+
       it("sends no conversation_history when no saved history is queued", async () => {
         const mock = makeMockBackend();
         const session = makeSession(mock);
@@ -5006,6 +5128,31 @@ describe("AgentSession", () => {
         await session.sendPrompt("what is my secret word?").turn;
 
         expect(promptTexts(mock)).toEqual(["what is my secret word?"]);
+      });
+    });
+
+    describe("setContinuedFrom()", () => {
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/908 sends the chat's own agent an ordinary message unchanged when no saved history is queued", async () => {
+        const mock = makeMockBackend();
+        const session = makeSession(mock);
+        session.loadDisplayMessages([
+          {
+            id: "m0",
+            sender: USER_SENDER,
+            message: "the plan is X",
+            isVisible: true,
+            timestamp: null,
+          },
+        ]);
+        session.setContinuedFrom(["chats/original.md"]);
+
+        await session.sendPrompt("and then?").turn;
+
+        expect(
+          mock.prompt.mock.calls.map(
+            (call) => (call[0] as { prompt: Array<{ text: string }> }).prompt[0].text
+          )
+        ).toEqual(["and then?"]);
       });
     });
 
@@ -6944,39 +7091,6 @@ describe("AgentSession", () => {
         expect(session.getTaskMessages("tool-agent")[0]?.parts).toEqual([
           expect.objectContaining({ id: "tool-bash", status: "cancelled" }),
           expect.objectContaining({ id: "tool-write", status: "completed" }),
-        ]);
-      });
-    });
-
-    describe("getCurrentTodoList()", () => {
-      const planUpdate = (entries: { content: string; status: string; priority?: string }[]) => ({
-        sessionId: "acp-1",
-        update: { sessionUpdate: "plan", entries } as never,
-      });
-
-      const makeLiveSession = (mock: MockBackend): AgentSession => {
-        const session = makeSession(mock);
-        session.loadDisplayMessages([]);
-        return session;
-      };
-
-      it("starts null, snapshots plan entries, and notifies the dedicated channel", () => {
-        const mock = makeMockBackend();
-        const session = makeLiveSession(mock);
-        expect(session.getCurrentTodoList()).toBeNull();
-
-        let notified = 0;
-        subscribeTo(session, { onCurrentTodoListChanged: () => notified++ });
-        mock.emit(
-          planUpdate([
-            { content: "step A", status: "in_progress", priority: "medium" },
-            { content: "step B", status: "pending", priority: "medium" },
-          ])
-        );
-        expect(notified).toBe(1);
-        expect(session.getCurrentTodoList()).toEqual([
-          { content: "step A", status: "in_progress" },
-          { content: "step B", status: "pending" },
         ]);
       });
     });

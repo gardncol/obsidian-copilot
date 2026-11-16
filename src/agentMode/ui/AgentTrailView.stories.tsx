@@ -107,7 +107,6 @@ const CONNECTOR_TOOLS: AgentMessagePart[] = [
     mcpServer: "obsidian-copilot",
     input: { query: "Orion" },
     copilotTools: {
-      runs: "notion_notion-search",
       calls: [{ name: "notion_notion-search", args: { query: "Orion" } }],
     },
     output: [{ type: "text", text: "Orion kickoff plan" }],
@@ -123,48 +122,32 @@ const CONNECTOR_TOOLS: AgentMessagePart[] = [
       arguments: { title: "Orion retro" },
     },
     copilotTools: {
-      runs: "linear_create_issue",
       calls: [{ name: "linear_create_issue", args: { title: "Orion retro" } }],
     },
   }),
-  say("OpenCode's execute code that calls one Copilot tool is named after that tool."),
-  tool("opencode-notion-create", "execute", {
+  say("OpenCode calls each connected tool directly, with its own name and arguments."),
+  tool("opencode-notion-create", "obsidian-copilot_notion_notion-create-pages", {
     vendorToolName: undefined,
-    title: "execute",
+    title: "obsidian-copilot_notion_notion-create-pages",
     toolKind: "other",
-    input: {
-      code: 'const res = await tools["obsidian-copilot"]["notion_notion-create-pages"]({ title: "Orion" });\nreturn res;',
-    },
-    copilotTools: {
-      runs: "notion_notion-create-pages",
-      calls: [
-        {
-          name: "notion_notion-create-pages",
-          code: 'tools["obsidian-copilot"]["notion_notion-create-pages"]({ title: "Orion" });\nreturn res;',
-        },
-      ],
-    },
+    input: { title: "Orion" },
+    copilotTools: { calls: [{ name: "notion_notion-create-pages", args: { title: "Orion" } }] },
   }),
-  say("Code that calls several tools keeps OpenCode's execute name."),
-  tool("opencode-notion-both", "execute", {
+  say("Native OpenCode code execution keeps its own Execute step."),
+  tool("opencode-native", "execute", {
     vendorToolName: undefined,
     title: "execute",
     toolKind: "other",
-    input: {
-      code: 'return Promise.all([\n  tools["obsidian-copilot"].notion_search({ query: "Orion" }),\n  tools["obsidian-copilot"].notion_create_page({ title: "Orion" }),\n]);',
-    },
+    input: { code: "return await tools.opencode.list_mcp_resources({});" },
+  }),
+  say("Older saved chats keep the tool labels recorded for their wrapped calls."),
+  tool("saved-wrapped-notion", "execute", {
+    vendorToolName: undefined,
+    title: "execute",
+    toolKind: "other",
     copilotTools: {
-      runs: null,
-      calls: [
-        {
-          name: "notion_search",
-          code: 'tools["obsidian-copilot"].notion_search({ query: "Orion" })',
-        },
-        {
-          name: "notion_create_page",
-          code: 'tools["obsidian-copilot"].notion_create_page({ title: "Orion" })',
-        },
-      ],
+      wrapper: "Execute",
+      calls: [{ name: "notion_search", args: { query: "Orion" } }],
     },
   }),
   say("Another server's tools keep the server's name."),

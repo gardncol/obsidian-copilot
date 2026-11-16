@@ -8,6 +8,8 @@ import {
   type ModelInfo,
   type Options,
   type PermissionMode,
+  type Query,
+  type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { App } from "obsidian";
 import { v4 as uuidv4 } from "uuid";
@@ -49,7 +51,7 @@ import { createClaudeTaskPlanState, type ClaudeTaskPlanState } from "./claudeTod
 import { ClaudeLiveQuery } from "./claudeLiveQuery";
 import {
   createTranslatorState,
-  replayClaudeTranscript,
+  createClaudeTranscriptReplay,
   type TranslatorState,
 } from "./sdkMessageTranslator";
 import { PermissionBridge, type AskUserQuestionPrompter } from "./permissionBridge";
@@ -105,6 +107,7 @@ export interface ClaudeSdkBackendProcessOptions {
   clientVersion: string;
   descriptor: BackendDescriptor;
   getEnableThinking?: () => boolean;
+  getAutoMemoryEnabled?: () => boolean | undefined;
   isPlanModePlanFilePath?: (absolutePath: string) => boolean;
   getDefaultModelId?: () => string | undefined;
   getSystemPromptAppend?: () => string | undefined;
@@ -115,6 +118,66 @@ export interface ClaudeSdkBackendProcessOptions {
 }
 
 const THINKING_BUDGET_TOKENS = 31_999;
+
+// Claude Code reads this variable before its own settings, so Copilot's On or Off wins and the
+// Claude Code default leaves it untouched. https://github.com/logancyang/obsidian-copilot/issues/2892
+function autoMemoryEnv(enabled: boolean | undefined): Record<string, string> {
+  return enabled === undefined ? {} : { CLAUDE_CODE_DISABLE_AUTO_MEMORY: enabled ? "0" : "1" };
+}
+
+type ClaudeChatEnvOptions = Pick<
+  ClaudeSdkBackendProcessOptions,
+  "getManagedEnv" | "getEnvOverrides" | "getAutoMemoryEnabled"
+>;
+
+async function claudeChatEnv(opts: ClaudeChatEnvOptions): Promise<Options["env"]> {
+  const managedEnv = (await opts.getManagedEnv?.()) ?? {};
+  const shellPath = await agentShellPath();
+  return {
+    ...process.env,
+    PATH: shellPath,
+    // Claude reports when it has finished its subagents and its replies about them only when asked. https://github.com/Brevilabs/obsidian-copilot-private/issues/757
+    CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
+    ...managedEnv,
+    ...opts.getEnvOverrides?.(),
+    ...autoMemoryEnv(opts.getAutoMemoryEnabled?.()),
+  };
+}
+
+const AUTO_MEMORY_FILE_TYPE = "AutoMem";
+
+// Claude Code names the memory index it loads for a folder, so Copilot asks it instead of
+// recomputing where Claude keeps memory. https://github.com/logancyang/obsidian-copilot/issues/2892
+export async function probeClaudeAutoMemoryFolder(
+  opts: ClaudeChatEnvOptions & Pick<ClaudeSdkBackendProcessOptions, "pathToClaudeCodeExecutable">,
+  cwd: string
+): Promise<string | undefined> {
+  // eslint-disable-next-line require-yield -- the async generator matches the SDK hook contract without yielding
+  const noopPrompt = (async function* (): AsyncIterable<SDKUserMessage> {
+    await new Promise<void>(() => {});
+  })();
+  let probe: Query | undefined;
+  try {
+    probe = query({
+      prompt: noopPrompt,
+      options: {
+        pathToClaudeCodeExecutable: opts.pathToClaudeCodeExecutable,
+        cwd,
+        env: await claudeChatEnv(opts),
+      },
+    });
+    await probe.initializationResult();
+    const usage = await probe.getContextUsage({ detail: "summary" });
+    const index = usage.memoryFiles.find((file) => file.type === AUTO_MEMORY_FILE_TYPE);
+    const path = requireNodeModule<typeof import("node:path")>("path");
+    return index && path.dirname(index.path);
+  } catch (e) {
+    logWarn("[AgentMode] Claude auto memory probe failed", e);
+    return undefined;
+  } finally {
+    probe?.close();
+  }
+}
 
 const STATIC_SDK_MODES: RawModeState = {
   currentModeId: "default",
@@ -298,8 +361,7 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
     session: SessionState
   ): Promise<ClaudeLiveQuery> {
     // Settings are read after the last await, so a change made while the query starts still reaches it. https://github.com/Brevilabs/obsidian-copilot-private/issues/175
-    const managedEnv = (await this.opts.getManagedEnv?.()) ?? {};
-    const shellPath = await agentShellPath();
+    const env = await claudeChatEnv(this.opts);
     const permissionBridge = new PermissionBridge(sessionId, {
       getPrompter: () => this.permissionPrompter,
       getAskUserQuestionPrompter: () => this.askUserQuestionPrompter,
@@ -361,15 +423,7 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
     options.thinking = session.thinking
       ? { type: "adaptive", display: "summarized" }
       : { type: "disabled" };
-    const envOverrides = this.opts.getEnvOverrides?.();
-    options.env = {
-      ...process.env,
-      PATH: shellPath,
-      // Claude reports when it has finished its subagents and its replies about them only when asked. https://github.com/Brevilabs/obsidian-copilot-private/issues/757
-      CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
-      ...managedEnv,
-      ...envOverrides,
-    };
+    options.env = env;
 
     if (this.sessions.get(sessionId) !== session) {
       throw new Error(`Session ${sessionId} closed before its prompt was sent`);
@@ -558,10 +612,16 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
     }
     const claudeTaskPlan = createClaudeTaskPlanState();
     const opened = await this.reopenSession("loadSession", params, claudeTaskPlan);
-    const transcript = await this.readTranscript(params.sessionId, params.cwd);
-    for (const event of replayClaudeTranscript(transcript, params.sessionId, claudeTaskPlan)) {
-      this.dispatchEvent(event);
+    const replay = createClaudeTranscriptReplay(params.sessionId, claudeTaskPlan);
+    try {
+      for await (const line of await this.transcriptLines(params.sessionId, params.cwd)) {
+        for (const event of replay.line(line)) this.dispatchEvent(event);
+      }
+    } catch (err) {
+      // An unreadable transcript still reopens the chat, with whatever it read, so the user can keep talking to it. https://github.com/Brevilabs/obsidian-copilot-private/issues/643
+      logWarn(`[AgentMode] could not read Claude transcript for ${params.sessionId}`, err);
     }
+    for (const event of replay.finish()) this.dispatchEvent(event);
     return opened;
   }
 
@@ -600,15 +660,11 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
     return { sessionId: params.sessionId, state };
   }
 
-  private async readTranscript(sessionId: SessionId, cwd: string): Promise<string> {
-    try {
-      const { readFile } = requireNodeModule<typeof import("node:fs/promises")>("fs/promises");
-      return await readFile(await this.claudeTranscriptPath(sessionId, cwd), "utf8");
-    } catch (err) {
-      // An unreadable transcript still reopens the chat, empty, so the user can keep talking to it. https://github.com/Brevilabs/obsidian-copilot-private/issues/643
-      logWarn(`[AgentMode] could not read Claude transcript for ${sessionId}`, err);
-      return "";
-    }
+  private async transcriptLines(sessionId: SessionId, cwd: string): Promise<AsyncIterable<string>> {
+    const { createReadStream } = requireNodeModule<typeof import("node:fs")>("fs");
+    const { createInterface } = requireNodeModule<typeof import("node:readline")>("readline");
+    const input = createReadStream(await this.claudeTranscriptPath(sessionId, cwd), "utf8");
+    return createInterface({ input, crlfDelay: Infinity });
   }
 
   async shutdown(): Promise<void> {

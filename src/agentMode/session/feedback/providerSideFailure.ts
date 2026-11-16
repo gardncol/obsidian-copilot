@@ -1,4 +1,7 @@
 const PROVIDER_SIDE_CATEGORIES: ReadonlySet<string> = new Set([
+  // Rejected provider credentials need account repair rather than a Copilot bug report.
+  // https://github.com/logancyang/obsidian-copilot/issues/4244
+  "provider.auth",
   // OpenCode and Codex name the failure in the JSON-RPC error data, so a provider's new wording needs no new pattern.
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/810
   "provider.quota",
@@ -12,9 +15,17 @@ const PROVIDER_SIDE_CATEGORIES: ReadonlySet<string> = new Set([
   // A provider API that refuses or drops the connection is the user's network or endpoint state.
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/826
   "provider.transport",
+  // A model the provider rejects for the request, such as one without function calling or one that cannot take a PDF, needs another model or chat, not a Copilot report.
+  // https://github.com/logancyang/obsidian-copilot/issues/4116
+  // https://github.com/logancyang/obsidian-copilot/issues/4268
+  "provider.invalid-request",
+  "provider.unknown",
 ]);
 
 const PROVIDER_SIDE_PATTERNS: readonly RegExp[] = [
+  // OpenCode can reject authentication with empty error data, leaving only this response prefix.
+  // https://github.com/logancyang/obsidian-copilot/issues/4244
+  /^Authentication required(?::|$)/i,
   // Claude sends no category, and OpenCode files OpenRouter's max_tokens affordability error as an invalid request.
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/810
   /hit your (?:\w+ )?limit/i,

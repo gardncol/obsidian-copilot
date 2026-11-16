@@ -24,6 +24,7 @@ export interface ConnectorCatalogEntry {
   readonly category: ConnectorCategory;
   readonly serverUrl: string;
   readonly logoUrl?: string;
+  readonly useDynamicClientRegistration?: boolean;
 }
 
 const LOGO_BASE_URL = "https://images.brevilabs.com/newsletters/copilot-plugin/connectors";
@@ -35,6 +36,8 @@ const CATALOG_ENTRIES: readonly Omit<ConnectorCatalogEntry, "logoUrl">[] = [
     description: "Bases, tables and records",
     category: "Tasks & projects",
     serverUrl: "https://mcp.airtable.com/mcp",
+    // Airtable advertises metadata support but rejects URL client IDs: https://github.com/NangoHQ/nango/issues/7142
+    useDynamicClientRegistration: true,
   },
   {
     id: "apify",
@@ -149,6 +152,13 @@ const CATALOG_ENTRIES: readonly Omit<ConnectorCatalogEntry, "logoUrl">[] = [
     serverUrl: "https://mcp.make.com",
   },
   {
+    id: "mercury",
+    name: "Mercury",
+    description: "Bank accounts, transactions and cards",
+    category: "Business",
+    serverUrl: "https://mcp.mercury.com/mcp",
+  },
+  {
     id: "miro",
     name: "Miro",
     description: "Boards and diagrams",
@@ -196,6 +206,13 @@ const CATALOG_ENTRIES: readonly Omit<ConnectorCatalogEntry, "logoUrl">[] = [
     description: "Item debugging and Link analytics",
     category: "Business",
     serverUrl: "https://api.dashboard.plaid.com/mcp/",
+  },
+  {
+    id: "podwise",
+    name: "Podwise",
+    description: "Podcast summaries and transcripts",
+    category: "Notes & docs",
+    serverUrl: "https://mcp.podwise.ai/mcp",
   },
   {
     id: "posthog",

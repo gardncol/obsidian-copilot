@@ -10,6 +10,9 @@ export type { PlanUsage, UsageWindow } from "@/agentMode/session/planUsage";
 import type { ProjectScopeId } from "./scope";
 
 export type {
+  ApprovedRule,
+  ApprovedRuleScope,
+  ApprovedRuleStore,
   BackendAuth,
   BackendAuthStatus,
   BackendDescriptor,
@@ -202,11 +205,6 @@ export interface AgentPlanEntry {
   content: string;
   priority: "high" | "medium" | "low";
   status: "pending" | "in_progress" | "completed";
-}
-
-export interface AgentTodoListEntry {
-  content: string;
-  status: AgentPlanEntry["status"];
 }
 
 export interface AgentToolProgress {
@@ -573,6 +571,7 @@ export interface AgentChatMessage {
   turnDurationMs?: number;
   fanout?: FanoutTurn;
   fileChanges?: TurnFileChange[];
+  toolsUsed?: readonly string[];
 }
 
 export interface TurnFileChange {

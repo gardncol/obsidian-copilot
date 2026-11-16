@@ -77,7 +77,12 @@ export { openSessionsSidebar } from "./navigator/openSessionsSidebar";
 export { default as SessionsSidebarView } from "./navigator/ui/SessionsSidebarView";
 export { useBackendInstallState, useManagedInstallActionState } from "./ui/useBackendDescriptor";
 export type { AgentSessionManager } from "./session/AgentSessionManager";
-export type { BackendDescriptor, BackendId } from "./session/types";
+export type {
+  ApprovedRule,
+  ApprovedRuleStore,
+  BackendDescriptor,
+  BackendId,
+} from "./session/types";
 export { partitionOpencodeOnlyWireIds } from "./backends/opencode/opencodeProbePartition";
 export { mapProviderToOpencodeId } from "./backends/opencode/opencodeModelResolve";
 export type { CopilotMode, ModelSelection } from "./session/types";
@@ -429,16 +434,19 @@ export function createAgentSessionManager(app: App, plugin: CopilotPlugin): Agen
     }
     const prevFolder = deriveSkillsFolder(prev);
     const nextFolder = deriveSkillsFolder(next);
-    const miyoAvailabilityChanged =
+    // Removing a key must refresh relay skills even before paid status updates.
+    // https://github.com/logancyang/obsidian-copilot/issues/4239
+    const builtinSkillAvailabilityChanged =
       prev.enableMiyoSearchSkill !== next.enableMiyoSearchSkill ||
       prev.enableMiyoDocumentProcessing !== next.enableMiyoDocumentProcessing ||
       prev.enableMiyo !== next.enableMiyo ||
       prev.miyoConnectionMode !== next.miyoConnectionMode ||
       prev.miyoServerUrl !== next.miyoServerUrl ||
-      prev.isPaidUser !== next.isPaidUser;
+      prev.isPaidUser !== next.isPaidUser ||
+      prev.plusLicenseKey !== next.plusLicenseKey;
     if (
       prevFolder !== nextFolder ||
-      miyoAvailabilityChanged ||
+      builtinSkillAvailabilityChanged ||
       prev.agentMode.skills.builtinPreferences !== next.agentMode.skills.builtinPreferences
     ) {
       void seedManagedBuiltins()

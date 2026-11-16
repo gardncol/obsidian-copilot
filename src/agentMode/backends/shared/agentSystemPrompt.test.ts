@@ -1,3 +1,4 @@
+import { PROJECT_WORKSPACE_POLICY } from "@/projects/projectContextBlock";
 import { getSettings, resetSettings, updateSetting, type CopilotSettings } from "@/settings/model";
 import { isObsidianCliEnabled } from "@/services/obsidianCli/ObsidianCliClient";
 import {
@@ -16,9 +17,11 @@ import {
   COPILOT_FEEDBACK_POINTER,
   COPILOT_OBSIDIAN_CLI_STEERING,
   COPILOT_PROMPT_BASE,
+  COPILOT_SKILL_FIRST_LEAD,
   COPILOT_SKILL_FALLBACK,
   COPILOT_VAULT_HYGIENE,
   COPILOT_WEB_RESEARCH_STEERING,
+  COPILOT_WINDOWS_SHELL_STEERING,
 } from "./agentSystemPrompt";
 
 jest.mock("@/logger", () => ({
@@ -45,6 +48,7 @@ const ISSUE_740 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/
 const ISSUE_833 = "https://github.com/Brevilabs/obsidian-copilot-private/issues/833";
 const ISSUE_3816 = "https://github.com/logancyang/obsidian-copilot/issues/3816";
 const ISSUE_3868 = "https://github.com/logancyang/obsidian-copilot/issues/3868";
+const ISSUE_3867 = "https://github.com/logancyang/obsidian-copilot/issues/3867";
 const AGENT = "opencode";
 const APP = {} as App;
 const EXCALIDRAW_APP = {
@@ -74,6 +78,8 @@ describe("agentSystemPrompt", () => {
   describe("buildAgentSystemPrompt()", () => {
     beforeEach(() => {
       resetSettings();
+      updateSetting("isPaidUser", true);
+      updateSetting("plusLicenseKey", "test-license");
       updateSetting("enableMiyoDocumentProcessing", false);
       resetPromptState();
       mockIsObsidianCliEnabled.mockReturnValue(true);
@@ -85,13 +91,23 @@ describe("agentSystemPrompt", () => {
         updateSetting("enableMiyoDocumentProcessing", enableMiyoDocumentProcessing);
         for (const enableMiyoSearchSkill of [false, true]) {
           updateSetting("enableMiyoSearchSkill", enableMiyoSearchSkill);
-          const prompt = buildAgentSystemPrompt(AGENT, APP);
+          const prompt = buildAgentSystemPrompt(AGENT, APP, undefined, "win32");
           expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(3000);
           expect(prompt).not.toMatch(
             /NEVER search for the same|After 1-2 searches|Never claim you do not have access|delimiter row of dashes|## Task planning/
           );
         }
       }
+    });
+
+    it("omits every relay skill while Plus is inactive and restores enabled skills after renewal https://github.com/logancyang/obsidian-copilot/issues/4239", () => {
+      setBuiltinPreferences({});
+      updateSetting("isPaidUser", false);
+      for (const agent of ["claude", "codex", "opencode"] as const) {
+        expect(buildAgentSystemPrompt(agent, APP)).not.toContain(COPILOT_SKILL_FIRST_LEAD);
+      }
+      updateSetting("isPaidUser", true);
+      expect(buildAgentSystemPrompt("codex", APP)).toContain(COPILOT_SKILL_FIRST_LEAD);
     });
 
     it("starts with the Copilot base prompt and includes the folder-mention directive by default", () => {
@@ -137,7 +153,7 @@ describe("agentSystemPrompt", () => {
 
     it(`places a backend's own steering after the always-on lines and before the settings-dependent ones (${ISSUE_441})`, () => {
       const steering = "Backend-specific steering.";
-      const prompt = buildAgentSystemPrompt(AGENT, APP, steering);
+      const prompt = buildAgentSystemPrompt(AGENT, APP, steering, "darwin");
 
       expect(prompt).toContain(
         `${COPILOT_FOLDER_MENTION_DIRECTIVE}\n\n${COPILOT_VAULT_HYGIENE}\n\n${steering}\n\n${COPILOT_FEEDBACK_POINTER}`
@@ -147,10 +163,10 @@ describe("agentSystemPrompt", () => {
       expect(buildAgentSystemPrompt(AGENT, APP, steering)).toContain(steering);
     });
 
-    it("leaves the project outputs/ policy out of the prompt every chat shares, so non-project chats never save there https://github.com/logancyang/obsidian-copilot/issues/3801", () => {
-      expect(buildAgentSystemPrompt(AGENT, APP)).not.toContain("outputs/");
+    it("leaves the project workspace policy out of the prompt every chat shares, so non-project chats never treat their folder as a project workspace https://github.com/logancyang/obsidian-copilot/issues/3801", () => {
+      expect(buildAgentSystemPrompt(AGENT, APP)).not.toContain(PROJECT_WORKSPACE_POLICY);
       setDisableBuiltinSystemPrompt(true);
-      expect(buildAgentSystemPrompt(AGENT, APP)).not.toContain("outputs/");
+      expect(buildAgentSystemPrompt(AGENT, APP)).not.toContain(PROJECT_WORKSPACE_POLICY);
     });
 
     it("tells each agent to edit vault files with its own edit tools so Copilot can show a diff (https://github.com/Brevilabs/obsidian-copilot-private/issues/701)", () => {
@@ -185,6 +201,33 @@ describe("agentSystemPrompt", () => {
       }
       setDisableBuiltinSystemPrompt(true);
       expect(buildAgentSystemPrompt(AGENT, APP)).not.toContain(COPILOT_VAULT_HYGIENE);
+    });
+
+    it(`tells every agent on Windows to run code from a file or here-string, double-quote paths and save non-ASCII scripts as UTF-8 with BOM, right after the vault hygiene line (${ISSUE_3867})`, () => {
+      const steering = "Backend-specific steering.";
+      for (const backendId of ["claude", "codex", "opencode"] as const) {
+        expect(buildAgentSystemPrompt(backendId, APP, steering, "win32")).toContain(
+          `${COPILOT_VAULT_HYGIENE}\n\nPowerShell: run code from a file or piped here-string, not -e/-c; double-quote paths; save non-ASCII scripts as UTF-8 with BOM.\n\n${steering}`
+        );
+      }
+    });
+
+    it.each(["darwin", "linux"] as const)(
+      `leaves the %s prompt exactly as it is without the Windows shell line (${ISSUE_3867})`,
+      (platform) => {
+        const windows = buildAgentSystemPrompt(AGENT, APP, undefined, "win32");
+        const prompt = buildAgentSystemPrompt(AGENT, APP, undefined, platform);
+
+        expect(prompt).not.toContain(COPILOT_WINDOWS_SHELL_STEERING);
+        expect(prompt).toBe(windows.replace(`\n\n${COPILOT_WINDOWS_SHELL_STEERING}`, ""));
+      }
+    );
+
+    it(`drops the Windows shell line when the builtin prompt is disabled (${ISSUE_3867})`, () => {
+      setDisableBuiltinSystemPrompt(true);
+      expect(buildAgentSystemPrompt(AGENT, APP, undefined, "win32")).not.toContain(
+        COPILOT_WINDOWS_SHELL_STEERING
+      );
     });
 
     it("keeps the edit-tool policy when the builtin prompt is disabled, because turn diffs depend on it (https://github.com/Brevilabs/obsidian-copilot-private/issues/701)", () => {

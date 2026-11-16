@@ -438,8 +438,51 @@ describe("AcpBackendProcess", () => {
         expect(handler).toHaveBeenCalledTimes(1);
       });
 
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/875 gives the backend a direct tool name and arguments without reading terminal output metadata", async () => {
+        const uses = { calls: [{ name: "everything_echo", args: { message: "hello" } }] };
+        const readCopilotTools = jest.fn(() => uses);
+        const backend = new AcpBackendProcess(
+          buildApp(),
+          { ...buildStubBackend(), readCopilotTools },
+          "1.0.0",
+          buildStubDescriptor()
+        );
+        await backend.start();
+        const handler = jest.fn();
+        backend.registerSessionHandler("s1", handler);
+        const client = getVaultClient(backend);
+        await client.sessionUpdate({
+          sessionId: "s1",
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: "direct",
+            title: "obsidian-copilot_everything_echo",
+            rawInput: { message: "hello" },
+          },
+        } as unknown as Parameters<typeof client.sessionUpdate>[0]);
+        await client.sessionUpdate({
+          sessionId: "s1",
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "direct",
+            status: "completed",
+            rawOutput: { metadata: { ignored: true } },
+          },
+        } as unknown as Parameters<typeof client.sessionUpdate>[0]);
+        expect(readCopilotTools).toHaveBeenCalledTimes(1);
+        expect(readCopilotTools).toHaveBeenCalledWith(
+          { message: "hello" },
+          "obsidian-copilot_everything_echo"
+        );
+        expect(handler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            update: expect.objectContaining({ toolCallId: "direct", copilotTools: uses }),
+          })
+        );
+      });
+
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/735 tags each tool call, live or replayed, with the Copilot tools the backend reads from its input", async () => {
-        const uses = { runs: "notion_search", calls: [{ name: "notion_search", args: {} }] };
+        const uses = { calls: [{ name: "notion_search", args: {} }] };
         const readCopilotTools = jest.fn((input: unknown) =>
           (input as { code?: string }).code === "copilot" ? uses : null
         );

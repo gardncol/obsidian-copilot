@@ -11,14 +11,17 @@ import {
   OUTPUT_LIMIT_CONTINUATION_PROMPT,
   stripUserMessageWrapper,
 } from "@/agentMode/session/promptEnvelope";
-import type { AgentPlanEntry, CompactionSnapshot, SessionEvent } from "@/agentMode/session/types";
+import type { CompactionSnapshot, SessionEvent } from "@/agentMode/session/types";
 import { AI_SENDER, USER_SENDER } from "@/constants";
 import { formatDateTime, type FormattedDateTime } from "@/utils";
+
+// Codex replays a pasted image inside the user message's text as a data URL; the note keeps the image as a saved file, so the text must match the note and never carry the image bytes into it.
+// https://github.com/Brevilabs/obsidian-copilot-private/issues/921
+const REPLAYED_DATA_URL_IMAGE = /\[[^\]\r\n]*\]\(data:image\/[^)\s]*\)/g;
 
 export interface SessionHistoryReplayDeps {
   store: AgentMessageStore;
   scheduleNotifyMessages(): void;
-  applyTodoList(entries: AgentPlanEntry[]): void;
 }
 
 export class SessionHistoryReplay {
@@ -98,8 +101,6 @@ export class SessionHistoryReplay {
         if (this.deps.store.upsertAgentPart(this.aiBubbleId(occurredAt), planToPart(update))) {
           this.deps.scheduleNotifyMessages();
         }
-        // The last replayed task list is the one the chat closed with, so the project popover shows it again. https://github.com/Brevilabs/obsidian-copilot-private/issues/643
-        this.deps.applyTodoList(update.entries);
         return true;
       case "compaction": {
         // A replayed compaction is already over, so one that never reports an end settles as cancelled rather than spinning. https://github.com/Brevilabs/obsidian-copilot-private/issues/638
@@ -123,7 +124,7 @@ export class SessionHistoryReplay {
     // The plugin's own continuation is not something the user typed. https://github.com/Brevilabs/obsidian-copilot-private/issues/739
     if (stripUserMessageWrapper(pending.raw).trim() === OUTPUT_LIMIT_CONTINUATION_PROMPT) return;
     this.deps.store.addMessage({
-      message: stripUserMessageWrapper(pending.raw),
+      message: stripUserMessageWrapper(pending.raw).replace(REPLAYED_DATA_URL_IMAGE, ""),
       sender: USER_SENDER,
       timestamp: historyTimestamp(pending.occurredAt),
       isVisible: true,

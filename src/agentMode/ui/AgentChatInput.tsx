@@ -19,7 +19,7 @@ import ChatInput, {
 } from "@/components/chat-components/ChatInput";
 import { EMPTY_AGENT_MENTION_BRANDS } from "@/components/chat-components/hooks/useAtMentionCategories";
 import { useActiveWebTabState } from "@/components/chat-components/hooks/useActiveWebTabState";
-import { ACTIVE_WEB_TAB_MARKER, EVENT_NAMES } from "@/constants";
+import { ACTIVE_NOTE_MENTION, ACTIVE_WEB_TAB_MARKER, EVENT_NAMES } from "@/constants";
 import { EventTargetContext } from "@/context";
 import { logError, logWarn } from "@/logger";
 import {
@@ -64,6 +64,8 @@ interface AgentChatInputProps {
   modePickerOverride: ChatInputProps["modePickerOverride"];
   onCycleMode: () => void;
   disabled?: boolean;
+  projectFolderPath?: string;
+  hasChatMovedFrom: (backend: AgentChatBackend) => boolean;
 }
 
 const dedupeBy = <T,>(items: Iterable<T>, key: (item: T) => string): T[] => {
@@ -81,12 +83,15 @@ const dedupeBy = <T,>(items: Iterable<T>, key: (item: T) => string): T[] => {
 const buildMessageContext = (
   notes: TFile[],
   selected: readonly SelectedTextContext[],
-  webTabs: readonly WebTabContext[] = []
+  webTabs: readonly WebTabContext[],
+  folders: readonly string[]
 ): MessageContext | undefined => {
-  if (notes.length === 0 && selected.length === 0 && webTabs.length === 0) return undefined;
+  if (notes.length === 0 && selected.length === 0 && webTabs.length === 0 && folders.length === 0)
+    return undefined;
   return {
     notes,
     urls: [],
+    folders: folders.length > 0 ? [...folders] : undefined,
     selectedTextContexts: selected.length > 0 ? [...selected] : undefined,
     webTabs: webTabs.length > 0 ? [...webTabs] : undefined,
   };
@@ -98,6 +103,7 @@ const combineQueuedMessages = (items: QueuedAgentMessage[]): QueuedAgentMessage 
   const allNotes = items.flatMap((i) => i.context?.notes ?? []);
   const allSelected = items.flatMap((i) => i.context?.selectedTextContexts ?? []);
   const allWebTabs = items.flatMap((i) => i.context?.webTabs ?? []);
+  const allFolders = items.flatMap((i) => i.context?.folders ?? []);
   const allPromptContent = items.flatMap((i) => i.promptContent ?? []);
   const mergedAgents = dedupeBy(
     items.flatMap((i) => i.mentionedAgents ?? []),
@@ -111,7 +117,8 @@ const combineQueuedMessages = (items: QueuedAgentMessage[]): QueuedAgentMessage 
     context: buildMessageContext(
       dedupeBy(allNotes, (n) => n.path),
       dedupeBy(allSelected, (s) => s.id),
-      mergeWebTabContexts(allWebTabs)
+      mergeWebTabContexts(allWebTabs),
+      dedupeBy(allFolders, (folder) => folder)
     ),
     promptContent: allPromptContent.length > 0 ? allPromptContent : undefined,
     mentionedAgents: mergedAgents.length > 0 ? mergedAgents : undefined,
@@ -165,6 +172,8 @@ export const AgentChatInput = memo(function AgentChatInput({
   modePickerOverride,
   onCycleMode,
   disabled = false,
+  projectFolderPath,
+  hasChatMovedFrom,
 }: AgentChatInputProps) {
   const eventTarget = useContext(EventTargetContext);
   const chatInputRef = useRef<ChatInputHandle>(null);
@@ -191,11 +200,13 @@ export const AgentChatInput = memo(function AgentChatInput({
     input: inputMessage,
     images: selectedImages,
     contextNotes,
+    contextFolders,
     includeActiveNote,
     includeActiveWebTab,
     queue: queuedMessages,
     setInput: setInputMessage,
     setContextNotes,
+    setContextFolders,
     setSelectedImages,
     addImages,
     setIncludeActiveNote,
@@ -246,6 +257,10 @@ export const AgentChatInput = memo(function AgentChatInput({
       if (notes.length > 0) {
         setContextNotes((previous) => dedupeBy([...notes, ...previous], (note) => note.path));
       }
+      const folders = restored.context?.folders ?? [];
+      if (folders.length > 0) {
+        setContextFolders((previous) => dedupeBy([...folders, ...previous], (folder) => folder));
+      }
       const images = (restored.promptContent ?? [])
         .map(imageBlockToFile)
         .filter((file): file is File => file !== null);
@@ -255,6 +270,7 @@ export const AgentChatInput = memo(function AgentChatInput({
       activeWebTabForMentions,
       app,
       setContextNotes,
+      setContextFolders,
       setIncludeActiveNote,
       setIncludeActiveWebTab,
       setSelectedImages,
@@ -319,7 +335,11 @@ export const AgentChatInput = memo(function AgentChatInput({
   );
 
   const handleSendMessage = useCallback(
-    async (webTabs?: WebTabContext[]) => {
+    async ({
+      webTabs,
+      contextNotes: mentionedNotes = [],
+      contextFolders: mentionedFolders = [],
+    }: Parameters<ChatInputProps["handleSendMessage"]>[0] = {}) => {
       if (disabled) return;
       const text = inputMessage.trim();
       if (!text && selectedImages.length === 0) return;
@@ -328,11 +348,14 @@ export const AgentChatInput = memo(function AgentChatInput({
       const activeFile = app.workspace.getActiveFile();
 
       const candidateNotes: TFile[] = [];
-      if (includeActiveNote && activeFile) {
+      // An active note mentioned in the text is sent as context even when its badge is off.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/932
+      if ((includeActiveNote || ACTIVE_NOTE_MENTION.test(text)) && activeFile) {
         candidateNotes.push(activeFile);
       }
-      candidateNotes.push(...contextNotes);
+      candidateNotes.push(...contextNotes, ...mentionedNotes);
       const notes = dedupeBy(candidateNotes, (n) => n.path);
+      const folders = dedupeBy([...contextFolders, ...mentionedFolders], (folder) => folder);
 
       const noteSelection = selectedTextContexts.find(isNoteSelectedTextContext);
       const expanded = await expandCustomCommandPrefix(
@@ -394,10 +417,24 @@ export const AgentChatInput = memo(function AgentChatInput({
         id: `queued-${uuidv4()}`,
         text: resolvedText,
         rawInput,
-        context: buildMessageContext(notes, selectedTextContexts, resolvedWebTabs),
+        context: buildMessageContext(notes, selectedTextContexts, resolvedWebTabs, folders),
         promptContent: content.length > 0 ? content : undefined,
         mentionedAgents,
       };
+
+      // A chat moved to another agent while its images were read is closing, and a message sent to it would vanish. The composer remounts for the new chat, so the draft goes back through the store.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+      if (hasChatMovedFrom(backend)) {
+        setInputMessage((current) =>
+          [rawInput, current].filter((part) => part.trim()).join("\n\n")
+        );
+        setContextNotes((previous) => dedupeBy([...contextNotes, ...previous], (n) => n.path));
+        setContextFolders((previous) =>
+          dedupeBy([...contextFolders, ...previous], (folder) => folder)
+        );
+        setSelectedImages((previous) => [...selectedImages, ...previous]);
+        return;
+      }
 
       if (loading || isStarting || queuedPrompts.length > 0) {
         // Compaction and multi-agent questions are whole turns of their own, so Copilot holds them until the agent finishes. https://github.com/Brevilabs/obsidian-copilot-private/issues/509
@@ -421,6 +458,7 @@ export const AgentChatInput = memo(function AgentChatInput({
       inputMessage,
       selectedImages,
       contextNotes,
+      contextFolders,
       includeActiveNote,
       includeActiveWebTab,
       selectedTextContexts,
@@ -436,6 +474,12 @@ export const AgentChatInput = memo(function AgentChatInput({
       setQueuedMessages,
       mainAgentId,
       installedAgentIds,
+      backend,
+      hasChatMovedFrom,
+      setInputMessage,
+      setContextNotes,
+      setContextFolders,
+      setSelectedImages,
     ]
   );
 
@@ -499,7 +543,7 @@ export const AgentChatInput = memo(function AgentChatInput({
           placeholder="Ask anything • @ to add context • / for commands"
           inputMessage={inputMessage}
           setInputMessage={setInputMessage}
-          handleSendMessage={safeAsyncHandler((meta) => handleSendMessage(meta?.webTabs))}
+          handleSendMessage={safeAsyncHandler(handleSendMessage)}
           isGenerating={isReplyRunning}
           onStopGenerating={safeAsyncHandler(handleStopGenerating)}
           onEscape={isReplyRunning ? safeAsyncHandler(handleStopGenerating) : undefined}
@@ -507,6 +551,8 @@ export const AgentChatInput = memo(function AgentChatInput({
           app={app}
           contextNotes={contextNotes}
           setContextNotes={setContextNotes}
+          contextFolders={contextFolders}
+          setContextFolders={setContextFolders}
           includeActiveNote={includeActiveNote}
           setIncludeActiveNote={setIncludeActiveNote}
           includeActiveWebTab={includeActiveWebTab}
@@ -523,6 +569,7 @@ export const AgentChatInput = memo(function AgentChatInput({
           agentBrands={agentBrands}
           cloudAgentIds={getCloudAgentIds()}
           onMentionedAgentsChange={handleMentionedAgentsChange}
+          projectFolderPath={projectFolderPath}
         />
       </div>
     </>

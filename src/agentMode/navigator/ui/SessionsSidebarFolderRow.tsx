@@ -16,7 +16,9 @@ interface SessionsSidebarFolderRowProps {
   project: ProjectConfig;
   expanded: boolean;
   active: boolean;
+  current: boolean;
   hiddenStatus: SessionStatus;
+  onOpen: () => void;
   onToggle: () => void;
   onNewChat: () => void;
   onDeleted: (projectId: string) => void;
@@ -27,7 +29,9 @@ export const SessionsSidebarFolderRow: React.FC<SessionsSidebarFolderRowProps> =
   project,
   expanded,
   active,
+  current,
   hiddenStatus,
+  onOpen,
   onToggle,
   onNewChat,
   onDeleted,
@@ -38,7 +42,7 @@ export const SessionsSidebarFolderRow: React.FC<SessionsSidebarFolderRowProps> =
   const { keyboardFocused, focusWithinProps } = useKeyboardFocusWithin();
   const revealed = menuOpen || keyboardFocused;
   const hoverHidden = revealed ? "tw-invisible" : "group-hover:tw-invisible";
-  const hoverShown = revealed ? "tw-block" : "tw-hidden group-hover:tw-block";
+  const hoverShown = revealed ? "tw-visible" : "tw-invisible group-hover:tw-visible";
   return (
     <div
       className={cn(
@@ -57,9 +61,8 @@ export const SessionsSidebarFolderRow: React.FC<SessionsSidebarFolderRowProps> =
         ref={sortHandle?.ref}
         {...sortHandle?.attributes}
         type="button"
-        aria-expanded={expanded}
         aria-current={active ? "true" : undefined}
-        onClick={onToggle}
+        onClick={onOpen}
         className={cn(
           "clickable-icon tw-flex tw-h-auto tw-min-w-0 tw-flex-1 tw-items-center tw-gap-2",
           "tw-rounded-md tw-bg-transparent tw-p-2 tw-text-left tw-shadow-none hover:tw-bg-transparent"
@@ -67,10 +70,15 @@ export const SessionsSidebarFolderRow: React.FC<SessionsSidebarFolderRowProps> =
       >
         <Folder className="tw-size-4 tw-shrink-0 tw-text-muted" />
         {/* A hidden chat's unseen result bolds the folder name, as it bolds a chat title.
-            https://github.com/Brevilabs/obsidian-copilot-private/issues/802 */}
+            https://github.com/Brevilabs/obsidian-copilot-private/issues/802
+            The name dims like a chat title unless the current chat is in the project or a hidden chat needs the user.
+            https://github.com/Brevilabs/obsidian-copilot-private/issues/890 */}
         <span
           className={cn(
-            "tw-min-w-0 tw-flex-1 tw-truncate tw-text-ui-small tw-text-normal",
+            "tw-min-w-0 tw-flex-1 tw-truncate tw-text-ui-small",
+            current || hiddenStatus === "waiting" || hiddenStatus === "unread"
+              ? "tw-text-normal"
+              : "tw-text-muted",
             hiddenStatus === "unread" && "tw-font-semibold",
             revealed
               ? "[mask-image:linear-gradient(to_left,transparent_3.25rem,black_4.25rem)]"
@@ -90,18 +98,11 @@ export const SessionsSidebarFolderRow: React.FC<SessionsSidebarFolderRowProps> =
         >
           <SessionStatusIcon status={hiddenStatus} />
         </span>
-        <ChevronRight
-          className={cn(
-            "tw-absolute tw-right-2 tw-size-4 tw-text-muted",
-            hoverShown,
-            expanded && "tw-rotate-90"
-          )}
-        />
       </button>
       <div
         className={cn(
           "tw-absolute tw-right-8 tw-top-1/2 tw-flex -tw-translate-y-1/2 tw-items-center tw-gap-1.5",
-          revealed ? "tw-visible" : "tw-invisible group-hover:tw-visible"
+          hoverShown
         )}
       >
         <RowActionButton label={`New chat in ${project.name}`} onClick={onNewChat}>
@@ -115,6 +116,19 @@ export const SessionsSidebarFolderRow: React.FC<SessionsSidebarFolderRowProps> =
           onOpenChange={setMenuOpen}
         />
       </div>
+      {/* Clicking the row opens the project's home, so folding gets its own control.
+          https://github.com/Brevilabs/obsidian-copilot-private/issues/840 */}
+      <RowActionButton
+        label={`${expanded ? "Hide" : "Show"} chats in ${project.name}`}
+        aria-expanded={expanded}
+        onClick={onToggle}
+        className={cn(
+          "tw-absolute tw-right-1.5 tw-top-1/2 tw-size-5 -tw-translate-y-1/2 tw-p-0 tw-text-muted",
+          hoverShown
+        )}
+      >
+        <ChevronRight className={cn("tw-size-4", expanded && "tw-rotate-90")} />
+      </RowActionButton>
     </div>
   );
 };

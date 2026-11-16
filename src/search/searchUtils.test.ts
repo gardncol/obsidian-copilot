@@ -8,6 +8,10 @@ import {
   createPatternSettingsValue,
   getDecodedPatterns,
   getMatchingPatterns,
+  getNotesWithProperty,
+  isFileIncluded,
+  getNotesWithTag,
+  getPropertyLabel,
   getPropertyPattern,
   getSystemExcludedFolders,
   isInternalExcludedPath,
@@ -16,6 +20,7 @@ import {
 } from "./searchUtils";
 
 jest.mock("obsidian", () => ({
+  getAllTags: jest.requireActual<typeof obsidian>("obsidian").getAllTags,
   normalizePath: (path: string) => path.replace(/\/+/g, "/").replace(/^\/|\/$/g, ""),
   Platform: { isWin: false, isMacOS: true, isIosApp: false },
   TFile: class TFile {
@@ -205,6 +210,17 @@ describe("searchUtils", () => {
         tagPatterns: ["#important"],
       };
       expect(shouldIndexFile(window.app, file, inclusions, null)).toBe(true);
+    });
+
+    it("indexes notes with inline nested tags selected by the project tag picker — https://github.com/Brevilabs/obsidian-copilot-private/issues/838", () => {
+      const file = createTestFile("notes/press.md");
+      (utils.getTagsFromNote as jest.Mock).mockImplementation(
+        (_app, _file, frontmatterOnly = true) => (frontmatterOnly ? [] : ["Launch/Press"])
+      );
+
+      expect(shouldIndexFile(window.app, file, { tagPatterns: ["#launch"] }, null)).toBe(true);
+      expect(shouldIndexFile(window.app, file, { tagPatterns: ["#laun"] }, null)).toBe(false);
+      expect(shouldIndexFile(window.app, file, null, { tagPatterns: ["#launch"] })).toBe(false);
     });
 
     it("skips a note carrying an excluded tag", () => {
@@ -714,6 +730,129 @@ describe("searchUtils", () => {
 
     it("returns [key:] when value is empty string", () => {
       expect(getPropertyPattern("Topics", "")).toBe("[Topics:]");
+    });
+  });
+
+  describe("getPropertyLabel()", () => {
+    it("labels a property pattern as `key: value`", () => {
+      expect(getPropertyLabel("[Topics:Physics]")).toBe("Topics: Physics");
+    });
+
+    it("labels a key-only property pattern as `key: (any)`", () => {
+      expect(getPropertyLabel("[Topics:]")).toBe("Topics: (any)");
+    });
+
+    it("returns the raw pattern when it is not a property pattern", () => {
+      expect(getPropertyLabel("not-a-property")).toBe("not-a-property");
+    });
+  });
+
+  describe("getNotesWithTag()", () => {
+    function taggedVault(caches: Record<string, unknown>) {
+      const files = Object.keys(caches).map(createTestFile);
+      return {
+        vault: { getMarkdownFiles: () => files },
+        metadataCache: { getFileCache: (file: TFile) => caches[file.path] ?? null },
+      } as unknown as typeof window.app;
+    }
+
+    it("lists the notes that carry the tag in their properties or inline in the text, by path", () => {
+      const app = taggedVault({
+        "Work/standup.md": { tags: [{ tag: "#launch" }] },
+        "Plans/brief.md": { frontmatter: { tags: ["launch", "q4"] } },
+        "Plans/budget.md": { frontmatter: { tags: "q4" } },
+        "Inbox/unindexed.md": null,
+      });
+
+      expect(getNotesWithTag(app, "#launch").map((file) => file.path)).toEqual([
+        "Plans/brief.md",
+        "Work/standup.md",
+      ]);
+    });
+
+    it("matches the tag in any case and every tag nested under it, as Obsidian's tag search does, but not a longer tag that only starts the same — https://github.com/Brevilabs/obsidian-copilot-private/issues/838", () => {
+      const app = taggedVault({
+        "a.md": { tags: [{ tag: "#Launch" }] },
+        "b.md": { frontmatter: { tags: ["launch/press"] } },
+        "c.md": { tags: [{ tag: "#launchpad" }] },
+      });
+
+      expect(getNotesWithTag(app, "#launch").map((file) => file.path)).toEqual(["a.md", "b.md"]);
+      expect(getNotesWithTag(app, "#launch/press").map((file) => file.path)).toEqual(["b.md"]);
+    });
+  });
+
+  describe("isFileIncluded()", () => {
+    it("includes a file that matches one of the given folder, note, tag or property patterns", () => {
+      expect(
+        isFileIncluded(window.app, createTestFile("Research/pricing.md"), {
+          folderPatterns: ["Research"],
+        })
+      ).toBe(true);
+      expect(
+        isFileIncluded(window.app, createTestFile("Plans/brief.md"), {
+          folderPatterns: ["Research"],
+        })
+      ).toBe(false);
+    });
+
+    it("leaves out instruction files even when a pattern matches them", () => {
+      expect(
+        isFileIncluded(window.app, createTestFile("README.md"), { notePatterns: ["[[README]]"] })
+      ).toBe(true);
+      expect(
+        isFileIncluded(window.app, createTestFile("AGENTS.md"), { notePatterns: ["[[AGENTS]]"] })
+      ).toBe(false);
+    });
+  });
+
+  describe("getNotesWithProperty()", () => {
+    beforeEach(() => {
+      const actual = jest.requireActual<typeof utils>("@/utils");
+      jest
+        .mocked(utils.getPropertyValuesFromNote)
+        .mockImplementation(actual.getPropertyValuesFromNote);
+      jest.mocked(utils.noteHasProperty).mockImplementation(actual.noteHasProperty);
+    });
+
+    function propertyVault(frontmatters: Record<string, Record<string, unknown> | null>) {
+      const files = Object.keys(frontmatters).map(createTestFile);
+      return {
+        vault: { getMarkdownFiles: () => files },
+        metadataCache: {
+          getFileCache: (file: TFile) => {
+            const frontmatter = frontmatters[file.path];
+            return frontmatter ? { frontmatter } : null;
+          },
+        },
+      } as unknown as typeof window.app;
+    }
+
+    it("lists the notes whose property has the saved value in any case, by path", () => {
+      const app = propertyVault({
+        "Work/standup.md": { status: "Active" },
+        "Plans/brief.md": { status: ["draft", "active"] },
+        "Plans/budget.md": { status: "done" },
+        "Inbox/unindexed.md": null,
+      });
+
+      expect(getNotesWithProperty(app, "[status:active]").map((file) => file.path)).toEqual([
+        "Plans/brief.md",
+        "Work/standup.md",
+      ]);
+    });
+
+    it("lists every note that declares the property when the saved pattern has no value", () => {
+      const app = propertyVault({
+        "b.md": { status: "done" },
+        "a.md": { status: "active" },
+        "c.md": { owner: "Ada" },
+      });
+
+      expect(getNotesWithProperty(app, "[status:]").map((file) => file.path)).toEqual([
+        "a.md",
+        "b.md",
+      ]);
     });
   });
 });

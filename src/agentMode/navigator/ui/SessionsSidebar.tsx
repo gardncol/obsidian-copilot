@@ -1,7 +1,7 @@
 import type { AgentSessionManager } from "@/agentMode/session/AgentSessionManager";
 import type { RecentChatActions } from "@/agentMode/ui/RecentChatMenu";
-import { createProjectAndEnter } from "@/agentMode/ui/AgentProjectCreateForm";
-import { leaveDeletedProject } from "@/agentMode/ui/AgentProjectRowActions";
+import { createProjectAndEnter } from "@/projects/ui/AgentProjectCreateForm";
+import { leaveDeletedProject } from "@/projects/ui/AgentProjectRowActions";
 import { ArchivedChatsModal, createProjectArchiveActions } from "@/agentMode/ui/ArchivedChatsModal";
 import { useAgentHistoryControls } from "@/agentMode/ui/hooks/useAgentHistoryControls";
 import { useAttentionChatIds } from "@/agentMode/ui/hooks/useAttentionChatIds";
@@ -31,8 +31,10 @@ export const SessionsSidebar: React.FC<SessionsSidebarProps> = ({ manager, plugi
     loadChat,
     updateChatTitle,
     deleteChat,
+    deleteChats,
     setChatPinned,
     setChatArchived,
+    archiveChats,
     openSourceFile,
     copyChatLink,
     getChatBookmarkState,
@@ -143,6 +145,8 @@ export const SessionsSidebar: React.FC<SessionsSidebarProps> = ({ manager, plugi
       onCloseSession: handleCloseSession,
       onSetChatPinned: setChatPinned,
       onSetChatArchived: setChatArchived,
+      onDeleteChats: deleteChats,
+      onArchiveChats: archiveChats,
     }),
     [
       updateChatTitle,
@@ -154,6 +158,8 @@ export const SessionsSidebar: React.FC<SessionsSidebarProps> = ({ manager, plugi
       handleCloseSession,
       setChatPinned,
       setChatArchived,
+      deleteChats,
+      archiveChats,
     ]
   );
 

@@ -784,8 +784,8 @@ export class AcpBackendProcess implements BackendProcess {
     if (update.sessionUpdate !== "tool_call" && update.sessionUpdate !== "tool_call_update") {
       return event;
     }
-    if (update.rawInput === undefined || !this.backend.readCopilotTools) return event;
-    const copilotTools = this.backend.readCopilotTools(update.rawInput);
+    if (!this.backend.readCopilotTools || update.rawInput === undefined) return event;
+    const copilotTools = this.backend.readCopilotTools(update.rawInput, update.title);
     return copilotTools ? { ...event, update: { ...update, copilotTools } } : event;
   }
 

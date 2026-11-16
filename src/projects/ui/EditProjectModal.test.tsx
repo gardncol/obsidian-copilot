@@ -1,0 +1,212 @@
+import React from "react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+
+const getCachedProjectRecordById = jest.fn((): ProjectFileRecord | undefined => undefined);
+jest.mock("@/projects/state", () => ({
+  getCachedProjectRecordById: () => getCachedProjectRecordById(),
+}));
+
+const readAgentsFile = jest.fn(async (): Promise<string> => "");
+const agentsFileIsUninitialized = jest.fn(async (): Promise<boolean> => true);
+const captureInstructionFiles = jest.fn(
+  async (_app: unknown, _folder: string): Promise<InstructionFilesSnapshot> => ({
+    agents: null,
+  })
+);
+const restoreInstructionFiles = jest.fn(
+  async (_app: unknown, _folder: string, _snapshot: InstructionFilesSnapshot): Promise<void> => {}
+);
+const writeAgentsFile = jest.fn(
+  async (_app: unknown, _folder: string, _content: string): Promise<void> => {}
+);
+jest.mock("@/instructions/agentsFile", () => ({
+  readAgentsFile: () => readAgentsFile(),
+  agentsFileIsUninitialized: () => agentsFileIsUninitialized(),
+  captureInstructionFiles: (app: unknown, folder: string) => captureInstructionFiles(app, folder),
+  restoreInstructionFiles: (app: unknown, folder: string, snapshot: InstructionFilesSnapshot) =>
+    restoreInstructionFiles(app, folder, snapshot),
+  writeAgentsFile: (app: unknown, folder: string, content: string) =>
+    writeAgentsFile(app, folder, content),
+}));
+
+/* eslint-disable @eslint-react/hooks-extra/no-unnecessary-use-prefix -- module mocks must keep
+   the mocked hooks' exported names. */
+jest.mock("@/context", () => ({ useApp: () => ({ vault: {} }) }));
+jest.mock("@/utils", () => ({
+  ...jest.requireActual<Record<string, unknown>>("@/utils"),
+  randomUUID: () => "new-project-id",
+}));
+/* eslint-enable @eslint-react/hooks-extra/no-unnecessary-use-prefix */
+
+import {
+  EditProjectModalContent,
+  type EditProjectModalContentProps,
+} from "@/projects/ui/EditProjectModal";
+import type { ProjectConfig } from "@/aiParams";
+import type { ProjectFileRecord } from "@/projects/type";
+import type { InstructionFilesSnapshot } from "@/instructions/agentsFile";
+
+const PROJECT = {
+  id: "proj-1",
+  name: "My Research",
+  description: "",
+  systemPrompt: "Cite only #verified notes.",
+  contextSource: { inclusions: "", exclusions: "", webUrls: "", youtubeUrls: "" },
+} as unknown as ProjectConfig;
+
+const PROJECT_FOLDER = "copilot/projects/proj-1";
+
+function renderModal(overrides: Partial<EditProjectModalContentProps> = {}) {
+  const onSave = overrides.onSave ?? jest.fn().mockResolvedValue(undefined);
+  render(
+    <EditProjectModalContent
+      initialProject={PROJECT}
+      onSave={onSave}
+      onCancel={jest.fn()}
+      {...overrides}
+    />
+  );
+  return { onSave };
+}
+
+function findInstructionsBox(): Promise<HTMLTextAreaElement> {
+  return screen.findByLabelText<HTMLTextAreaElement>("Project instructions");
+}
+
+describe("EditProjectModal", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    readAgentsFile.mockResolvedValue("");
+    agentsFileIsUninitialized.mockResolvedValue(true);
+    captureInstructionFiles.mockResolvedValue({ agents: null });
+    writeAgentsFile.mockResolvedValue(undefined);
+    getCachedProjectRecordById.mockReturnValue({
+      folderName: "proj-1",
+      filePath: `${PROJECT_FOLDER}/project.md`,
+      project: PROJECT,
+    });
+  });
+
+  describe("EditProjectModalContent", () => {
+    it("focuses the project name when the dialog opens, so typing edits it right away", async () => {
+      renderModal();
+      await findInstructionsBox();
+
+      expect(document.activeElement).toBe(screen.getByDisplayValue("My Research"));
+    });
+
+    it("shows legacy project.md instructions, so an upgraded project is not edited blank", async () => {
+      renderModal();
+
+      expect((await findInstructionsBox()).value).toBe("Cite only #verified notes.");
+    });
+
+    it("writes nothing while the dialog is merely open, so Cancel leaves the project untouched", async () => {
+      renderModal();
+      await findInstructionsBox();
+
+      expect(writeAgentsFile).not.toHaveBeenCalled();
+    });
+
+    it("clears the legacy copy on save, completing the move the editor previewed", async () => {
+      const { onSave } = renderModal();
+      fireEvent.change(await findInstructionsBox(), { target: { value: "New rules" } });
+
+      fireEvent.click(screen.getByText("Save"));
+
+      await waitFor(() =>
+        expect(writeAgentsFile).toHaveBeenCalledWith(expect.anything(), PROJECT_FOLDER, "New rules")
+      );
+      expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ systemPrompt: "" }));
+    });
+
+    it("respects an AGENTS.md the user deliberately emptied, rather than resurrecting the legacy text", async () => {
+      readAgentsFile.mockResolvedValue("");
+      agentsFileIsUninitialized.mockResolvedValue(false);
+      const { onSave } = renderModal();
+
+      expect((await findInstructionsBox()).value).toBe("");
+
+      fireEvent.click(screen.getByText("Save"));
+
+      await waitFor(() => expect(onSave).toHaveBeenCalled());
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({ systemPrompt: "Cite only #verified notes." })
+      );
+    });
+
+    it("keeps the legacy copy when AGENTS.md already had its own body", async () => {
+      readAgentsFile.mockResolvedValue("Rules the user wrote directly.");
+      agentsFileIsUninitialized.mockResolvedValue(false);
+      const { onSave } = renderModal();
+      await findInstructionsBox();
+
+      fireEvent.click(screen.getByText("Save"));
+
+      await waitFor(() => expect(onSave).toHaveBeenCalled());
+      expect(onSave).toHaveBeenCalledWith(
+        expect.objectContaining({ systemPrompt: "Cite only #verified notes." })
+      );
+    });
+
+    it("restores the folder's instruction files when the project update is rejected", async () => {
+      readAgentsFile.mockResolvedValue("Old rules");
+      agentsFileIsUninitialized.mockResolvedValue(false);
+      const snapshot = { agents: "Old rules" };
+      captureInstructionFiles.mockResolvedValue(snapshot);
+      const onSave = jest.fn().mockRejectedValue(new Error("A project with that name exists"));
+      renderModal({ onSave });
+      fireEvent.change(await findInstructionsBox(), { target: { value: "New rules" } });
+
+      fireEvent.click(screen.getByText("Save"));
+
+      await waitFor(() =>
+        expect(restoreInstructionFiles).toHaveBeenCalledWith(
+          expect.anything(),
+          PROJECT_FOLDER,
+          snapshot
+        )
+      );
+    });
+
+    it("offers no instruction field for a project that has no folder record", async () => {
+      getCachedProjectRecordById.mockReturnValue(undefined);
+      renderModal();
+
+      await waitFor(() => expect(screen.getByText("Project name")).toBeTruthy());
+      expect(screen.queryByLabelText("Project instructions")).toBeNull();
+      expect(readAgentsFile).not.toHaveBeenCalled();
+    });
+
+    it("offers no context controls, only the name, description and instructions with Cancel and Save, since context is added from the Files tab https://github.com/Brevilabs/obsidian-copilot-private/issues/841", async () => {
+      renderModal();
+      await findInstructionsBox();
+
+      expect(screen.queryByText(/context/i)).toBeNull();
+      expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+        "Cancel",
+        "Save",
+      ]);
+    });
+
+    it("saves a renamed project with its saved context, file-type patterns and exclusions included, unchanged https://github.com/Brevilabs/obsidian-copilot-private/issues/841", async () => {
+      const contextSource = {
+        inclusions: "%23launch,*.pdf,%5Btopic%3Aphysics%5D,Research",
+        exclusions: "*.tmp,Research%2FPrivate",
+        webUrls: "https://example.com/spec",
+        youtubeUrls: "",
+      };
+      const { onSave } = renderModal({ initialProject: { ...PROJECT, contextSource } });
+      await findInstructionsBox();
+
+      fireEvent.change(screen.getByDisplayValue("My Research"), { target: { value: "Launch" } });
+      fireEvent.click(screen.getByText("Save"));
+
+      await waitFor(() =>
+        expect(onSave).toHaveBeenCalledWith(
+          expect.objectContaining({ name: "Launch", contextSource })
+        )
+      );
+    });
+  });
+});

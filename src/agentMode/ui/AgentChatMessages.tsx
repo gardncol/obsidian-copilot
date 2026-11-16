@@ -8,7 +8,7 @@ import type { ChatStates } from "@/agentMode/session/chatExtension";
 import type CopilotPlugin from "@/main";
 import { ToolPermissionCard } from "@/agentMode/ui/ToolPermissionCard";
 import type { ToolCallPart } from "@/agentMode/ui/agentTrail";
-import { copilotToolLabel } from "@/agentMode/ui/toolSummaries";
+import { toolUseLabel } from "@/agentMode/session/copilotToolCalls";
 import { useAgentTasks } from "@/agentMode/ui/AgentTasksContext";
 import { permissionRequesterName } from "@/agentMode/ui/taskDisplay";
 import { openTurnDiff } from "@/agentMode/ui/TurnDiffView";
@@ -17,6 +17,7 @@ import ChatSingleMessage from "@/components/chat-components/ChatSingleMessage";
 import { ChatTranscriptViewport } from "@/components/chat-components/ui/ChatTranscriptViewport";
 import { USER_SENDER } from "@/constants";
 import { useChatScrolling } from "@/hooks/useChatScrolling";
+import { useTailPaging } from "@/hooks/useTailPaging";
 import type { AgentChatBackend } from "@/agentMode/session/AgentChatBackend";
 import type {
   AgentChatMessage,
@@ -28,7 +29,7 @@ import type {
 import type { ChatMessage } from "@/types/message";
 import { logError } from "@/logger";
 import { App } from "obsidian";
-import React, { memo, useMemo } from "react";
+import React, { memo, useCallback, useMemo, useRef } from "react";
 
 const EMPTY_PARTS = Object.freeze([]) as unknown as AgentMessagePart[];
 
@@ -42,6 +43,7 @@ interface AgentChatMessagesProps {
   chatBackend: AgentChatBackend;
   isLoading: boolean;
   chatStates: ChatStates;
+  onContinueFrom?: (messageId: string) => Promise<unknown>;
 }
 
 function toChatMessageView(m: AgentChatMessage): ChatMessage {
@@ -81,6 +83,7 @@ interface AgentMessageRowProps {
   isLatestAssistant: boolean;
   isStreaming: boolean;
   trailingCard?: React.ReactNode;
+  onContinueFrom?: (messageId: string) => void;
 }
 
 // Completed messages retain their object identity across streaming updates, so
@@ -93,6 +96,7 @@ const AgentMessageRow = memo(function AgentMessageRow({
   isLatestAssistant,
   isStreaming,
   trailingCard,
+  onContinueFrom,
 }: AgentMessageRowProps) {
   const adaptedMessage = toChatMessageView(message);
   const isAssistant = message.sender !== USER_SENDER;
@@ -112,6 +116,7 @@ const AgentMessageRow = memo(function AgentMessageRow({
     ) : null;
   const isStreamingPlaceholder = isAssistant && isStreaming && !hasParts && !message.message;
   const fanoutTurn = isAssistant ? message.fanout : undefined;
+  const onContinue = isAssistant && onContinueFrom ? () => onContinueFrom(message.id) : undefined;
 
   return (
     // Off-screen turns skip paint so scrolling a long chat costs what is on screen, not the whole transcript.
@@ -124,6 +129,7 @@ const AgentMessageRow = memo(function AgentMessageRow({
             turn={fanoutTurn}
             app={app}
             footerStart={completedTurnDuration}
+            onContinue={onContinue}
           />
           {runningTurnDuration}
         </div>
@@ -142,6 +148,7 @@ const AgentMessageRow = memo(function AgentMessageRow({
             agentCancelCause={message.agentCancelCause}
             errorText={message.isErrorMessage ? message.message : undefined}
             fileChanges={message.fileChanges}
+            onContinue={onContinue}
             onOpenFileChange={(change) =>
               void openTurnDiff(app, change, message.id).catch((error: unknown) =>
                 logError("[AgentChatMessages] failed to open the turn diff", error)
@@ -157,6 +164,7 @@ const AgentMessageRow = memo(function AgentMessageRow({
             app={app}
             isStreaming={false}
             footerStart={completedTurnDuration}
+            onContinue={onContinue}
           />
           {runningTurnDuration ? <div className="tw-px-3">{runningTurnDuration}</div> : null}
         </>
@@ -177,10 +185,17 @@ const AgentChatMessages = memo(
     chatBackend,
     isLoading,
     chatStates,
+    onContinueFrom,
   }: AgentChatMessagesProps) => {
     const { app } = plugin;
     const visible = useMemo(() => messages.filter((m) => m.isVisible), [messages]);
     const adapted = useMemo(() => visible.map(toChatMessageView), [visible]);
+    const isUserMessageAt = useCallback(
+      (index: number) => visible[index]?.sender === USER_SENDER,
+      [visible]
+    );
+    // Rendering a long chat all at once on reopen exhausted Obsidian's memory; older turns load as the user scrolls up. https://github.com/logancyang/obsidian-copilot/issues/4248
+    const { first, sentinelRef } = useTailPaging(visible.length, isUserMessageAt);
     const {
       scrollContainerCallbackRef,
       contentCallbackRef,
@@ -203,11 +218,9 @@ const AgentChatMessages = memo(
           : undefined,
       [messages, pendingPermission]
     );
-    const pendingCopilotTool = pendingToolCall ? copilotToolLabel(pendingToolCall) : null;
+    const pendingCopilotTool = toolUseLabel(pendingToolCall?.copilotTools);
     // A connector tool's request names it by the service's id, which users don't know.
     // https://github.com/Brevilabs/obsidian-copilot-private/issues/857
-    // OpenCode's request names only its `execute` wrapper, which hides the Copilot tool about to run.
-    // https://github.com/Brevilabs/obsidian-copilot-private/issues/872
     const pendingRequest = useMemo(
       () =>
         pendingPermission && pendingCopilotTool
@@ -245,6 +258,20 @@ const AgentChatMessages = memo(
     );
 
     const latestAssistant = useMemo(() => lastAssistant(visible), [visible]);
+    // A second click before the new chat opens would open it twice.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+    const continuing = useRef(false);
+    const continueOnce = useCallback(
+      (messageId: string) => {
+        if (continuing.current || !onContinueFrom) return;
+        continuing.current = true;
+        void onContinueFrom(messageId).finally(() => (continuing.current = false));
+      },
+      [onContinueFrom]
+    );
+    // A chat is continued from a finished conversation, so the action waits for the reply in progress.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+    const continueFrom = isLoading || !onContinueFrom ? undefined : continueOnce;
     // The chat keeps running while Claude waits on its subagents with no reply open, so only an unfinished reply gets the live timer. https://github.com/Brevilabs/obsidian-copilot-private/issues/757
     const streamingMessageId =
       isLoading && !latestAssistant?.turnStopReason ? latestAssistant?.id : undefined;
@@ -258,7 +285,16 @@ const AgentChatMessages = memo(
           isScrollPaused={isScrollPaused}
           scrollToEnd={scrollToEnd}
         >
+          {first > 0 ? (
+            // The marker must not be the scroll anchor, or the view jumps when earlier turns load above it. https://github.com/logancyang/obsidian-copilot/issues/4248
+            <div
+              ref={sentinelRef}
+              aria-hidden="true"
+              className="tw-h-px tw-w-full [overflow-anchor:none]"
+            />
+          ) : null}
           {visible.map((message, index) => {
+            if (index < first) return null;
             return (
               <AgentMessageRow
                 key={getMessageKey(adapted[index], index)}
@@ -270,6 +306,7 @@ const AgentChatMessages = memo(
                 }
                 isStreaming={message.id === streamingMessageId}
                 trailingCard={chatCards.get(index)}
+                onContinueFrom={continueFrom}
               />
             );
           })}

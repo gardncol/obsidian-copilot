@@ -19,7 +19,7 @@ import {
   setSettings as mockedSetSettings,
 } from "@/settings/model";
 import * as projectsState from "@/projects/state";
-import { buildProjectContext } from "@/context/manifestBuilder";
+import { buildProjectContext } from "@/projects/projectContextBlock";
 import { ProjectFileManager } from "@/projects/ProjectFileManager";
 import { type ProjectConfig } from "@/aiParams";
 import type { ProjectFileRecord } from "@/projects/type";
@@ -70,7 +70,7 @@ jest.mock("@/projects/ProjectFileManager", () => ({
   },
 }));
 
-jest.mock("@/context/manifestBuilder", () => ({
+jest.mock("@/projects/projectContextBlock", () => ({
   buildProjectContext: jest.fn(() => "<project_context>\n</project_context>"),
 }));
 
@@ -175,6 +175,7 @@ interface MockSessionTestHandle {
   setTaskStatuses(statuses: AgentTask["status"][], kinds?: AgentTask["kind"][]): void;
   setPendingPermissionCount(count: number): void;
   setQueuedPromptCount(count: number): void;
+  setModel(current: { baseModelId: string; effort: string | null }): void;
   sendPrompt(): void;
   disconnect(): void;
 }
@@ -208,6 +209,7 @@ function makeMockSession(overrides: {
   let tasks: AgentTask[] = [];
   let pendingPermissions: unknown[] = [];
   let queuedPrompts: unknown[] = [];
+  let modelState: unknown = null;
   const listeners = new Set<{
     onMessagesChanged?: () => void;
     onStatusChanged?: (s: typeof status) => void;
@@ -215,6 +217,7 @@ function makeMockSession(overrides: {
     onTasksChanged?: () => void;
     onPromptSent?: () => void;
     onDisconnected?: () => void;
+    onModelChanged?: () => void;
   }>();
   const session = {
     internalId: overrides.internalId,
@@ -247,6 +250,7 @@ function makeMockSession(overrides: {
     }),
     seedSessionUsage: jest.fn(),
     resendSavedHistoryOnNextTurn: jest.fn(),
+    setContinuedFrom: jest.fn(),
     getReloadableChatStates: jest.fn(() => EMPTY_CHAT_STATES),
     restoreChatStates: jest.fn(),
     getSessionUsage: () => null,
@@ -255,7 +259,7 @@ function makeMockSession(overrides: {
       return () => listeners.delete(l);
     },
     hasUserVisibleMessages: () => hasUserVisibleMessages,
-    getState: () => null,
+    getState: () => modelState,
     getRawSnapshot: () => ({ models: null, modes: null, configOptions: null }),
     getTasks: () => tasks,
     getPendingToolPermissions: () => pendingPermissions,
@@ -300,6 +304,10 @@ function makeMockSession(overrides: {
     },
     setQueuedPromptCount: (count) => {
       queuedPrompts = Array.from({ length: count }, (_, i) => ({ id: `prompt-${i}` }));
+    },
+    setModel: (current) => {
+      modelState = { model: { current, availableModels: [] } };
+      for (const l of listeners) l.onModelChanged?.();
     },
     sendPrompt: () => {
       for (const l of listeners) l.onPromptSent?.();
@@ -429,6 +437,7 @@ interface ManagerOptions {
   app?: App;
   plugin?: unknown;
   descriptor?: BackendDescriptor;
+  otherDescriptors?: BackendDescriptor[];
   preloader?: Record<string, unknown>;
   persistence?: unknown;
   sessionIndex?: AgentSessionIndex;
@@ -440,7 +449,10 @@ interface ManagerOptions {
 const builtManagers: AgentSessionManager[] = [];
 
 function buildManager(options: ManagerOptions = {}): AgentSessionManager {
-  const descriptor = options.descriptor ?? buildDescriptor();
+  const descriptors = [
+    options.descriptor ?? buildDescriptor(),
+    ...(options.otherDescriptors ?? []),
+  ];
   const manager = new AgentSessionManager(
     options.app ?? buildApp(),
     (options.plugin ?? {
@@ -448,7 +460,7 @@ function buildManager(options: ManagerOptions = {}): AgentSessionManager {
     }) as ConstructorParameters<typeof AgentSessionManager>[1],
     {
       permissionPrompter: jest.fn(),
-      resolveDescriptor: (id) => (id === descriptor.id ? descriptor : undefined),
+      resolveDescriptor: (id) => descriptors.find((descriptor) => descriptor.id === id),
       modelPreloader: {
         getCachedModelCatalog: jest.fn(() => null),
         getEffortCatalog: jest.fn(() => null),
@@ -717,6 +729,77 @@ function savedNoteFixture(autosave = false) {
   };
 }
 
+interface SavedNote {
+  messages: AgentChatMessage[];
+  backendId: BackendId;
+  options: Record<string, unknown>;
+}
+
+function chatNoteFixture(opts: { autosave?: boolean } = {}) {
+  jest.useFakeTimers();
+  getSettingsMock.mockReturnValue({ ...getSettingsMock(), autosaveChat: !!opts.autosave });
+  const notes = new Map<string, SavedNote>();
+  const saveSession = jest.fn(
+    async (
+      messages: AgentChatMessage[],
+      backendId: BackendId,
+      options: Record<string, unknown> = {}
+    ): Promise<{ path: string } | null> => {
+      const path = (options.existingPath as string) ?? `chats/note-${notes.size + 1}.md`;
+      const kept = notes.get(path)?.options ?? {};
+      const given = Object.fromEntries(Object.entries(options).filter(([, v]) => v !== undefined));
+      notes.set(path, {
+        messages: messages.map(({ id, sender, message, timestamp, context }) => ({
+          id,
+          sender,
+          message,
+          timestamp,
+          context,
+          isVisible: true,
+        })),
+        backendId,
+        options: { ...kept, ...given },
+      });
+      return { path };
+    }
+  );
+  const loadFile = jest.fn(async (file: TFile) => {
+    const { messages, backendId, options } = notes.get(file.path)!;
+    return {
+      messages,
+      backendId,
+      label: options.label ?? undefined,
+      sessionId: options.sessionId ?? undefined,
+      projectId: options.projectId ?? GLOBAL_SCOPE,
+      model: options.model,
+      carriedMessages: options.carriedMessages,
+      continuedFrom: options.continuedFrom,
+    };
+  });
+  let agentWritten: (() => void) | null = null;
+  const nextAgentWrite = () =>
+    new Promise<void>((resolve) => {
+      agentWritten = resolve;
+    });
+  const setAgent = jest.fn(async (path: string, backendId: BackendId, model?: unknown) => {
+    const note = notes.get(path)!;
+    note.backendId = backendId;
+    if (model) note.options.model = model;
+    agentWritten?.();
+  });
+  const app = buildApp();
+  jest
+    .mocked(app.vault.getAbstractFileByPath)
+    .mockImplementation((path) => (notes.has(path) ? mockTFile({ path }) : null));
+  return {
+    app,
+    notes,
+    saveSession,
+    nextAgentWrite,
+    persistence: { saveSession, loadFile, setAgent },
+  };
+}
+
 beforeEach(() => {
   mockBackendIsRunning = true;
   mockNotificationSound = true;
@@ -790,6 +873,7 @@ function buildHistoryHarness(opts?: {
   installState?: InstallState;
   createBackendProcess?: jest.Mock;
   applyInitialSessionConfig?: BackendDescriptor["applyInitialSessionConfig"];
+  applySelection?: BackendDescriptor["applySelection"];
 }) {
   const frontmatterByPath = opts?.files ?? {};
   const hiddenByPath = opts?.hiddenFiles ?? {};
@@ -846,6 +930,7 @@ function buildHistoryHarness(opts?: {
     summarizesSessionTitle: opts?.summarizesSessionTitle ?? true,
     getProbeSessionId: jest.fn(() => opts?.probeSessionId),
     applyInitialSessionConfig: opts?.applyInitialSessionConfig,
+    applySelection: opts?.applySelection,
     ...(opts?.createBackendProcess
       ? { createBackendProcess: opts.createBackendProcess }
       : opts?.listSessions
@@ -2056,6 +2141,267 @@ describe("AgentSessionManager", () => {
         expect(closedSessions()).toEqual([worked]);
         expect(mgr.getSessions()).toContain(replacement);
       });
+
+      const ISSUE = "https://github.com/Brevilabs/obsidian-copilot-private/issues/908";
+      const codex = { baseModelId: "gpt-6", effort: "medium" };
+
+      async function continuedChat(beforeBackendStart?: ManagerOptions["beforeBackendStart"]) {
+        const fixture = chatNoteFixture({ autosave: true });
+        const mgr = buildManager({
+          app: fixture.app,
+          otherDescriptors: [buildDescriptor({ id: "codex" })],
+          persistence: fixture.persistence,
+          beforeBackendStart,
+        });
+        const source = await createWorkedSession(mgr);
+        source.restoreLabel("Heron chat", "user");
+        getSessionTestHandle(source).setMessages([
+          {
+            id: "u1",
+            sender: USER_SENDER,
+            message: "The codeword is HERON.",
+            timestamp: { epoch: 1_000, display: "2026/11/11 10:00:00", fileName: "" },
+            context: { notes: [{ path: "notes/a.md" }] },
+          },
+          { id: "a1", sender: AI_SENDER, message: "Noted.", timestamp: null },
+          { id: "u2", sender: USER_SENDER, message: "Later.", timestamp: null },
+        ] as never);
+        getSessionTestHandle(source).setHasUserVisibleMessages(true);
+        const continued = await mgr.continueChatFrom(source.internalId, "a1");
+        const note = mgr.getSessionSourcePath(continued.internalId);
+        const noteBefore: SavedNote = JSON.parse(JSON.stringify(fixture.notes.get(note)));
+        return { ...fixture, mgr, continued, note, noteBefore };
+      }
+
+      it(`${ISSUE} reopens a continued chat's note on the other agent and model in the same tab, with its messages, title and resent history, and points that one note at the new agent`, async () => {
+        const { mgr, notes, saveSession, continued, note, noteBefore } = await continuedChat();
+        const savesBefore = saveSession.mock.calls.length;
+        const tabs = mgr.getSessions();
+        const closed = untilClosed(mgr, continued);
+
+        const switched = await mgr.replaceSessionInPlace(continued.internalId, "codex", {
+          seedSelection: codex,
+        });
+        await closed;
+
+        expect(switched.backendId).toBe("codex");
+        expect(sessionCreateSpy).toHaveBeenLastCalledWith(
+          expect.objectContaining({ defaultModelSelection: codex })
+        );
+        expect(mgr.getSessions()).toEqual(tabs.map((s) => (s === continued ? switched : s)));
+        expect(mgr.getActiveSession()).toBe(switched);
+        expect(switched.store.getDisplayMessages()).toEqual(noteBefore.messages);
+        expect(switched.setLabel).toHaveBeenCalledWith("Heron chat");
+        expect(switched.resendSavedHistoryOnNextTurn).toHaveBeenCalledTimes(1);
+        expect(mgr.getSessionSourcePath(switched.internalId)).toBe(note);
+        expect(notes.get(note)).toEqual({
+          ...noteBefore,
+          backendId: "codex",
+          options: { ...noteBefore.options, model: codex },
+        });
+        expect(notes.size).toBe(2);
+        expect(saveSession.mock.calls.length).toBe(savesBefore);
+        expect(mgr.isTiedToAgent(switched.internalId)).toBe(false);
+      });
+
+      it(`${ISSUE} keeps one note and the same messages through several switches, the note naming the last agent`, async () => {
+        const { mgr, notes, continued, note, noteBefore } = await continuedChat();
+
+        const toCodex = await mgr.replaceSessionInPlace(continued.internalId, "codex", {
+          seedSelection: codex,
+        });
+        const back = await mgr.replaceSessionInPlace(toCodex.internalId, "opencode", {
+          seedSelection: { baseModelId: "big-pickle", effort: null },
+        });
+
+        expect(back.backendId).toBe("opencode");
+        expect(back.store.getDisplayMessages()).toEqual(noteBefore.messages);
+        expect(notes.size).toBe(2);
+        expect(notes.get(note)).toMatchObject({
+          backendId: "opencode",
+          options: { model: { baseModelId: "big-pickle", effort: null } },
+        });
+      });
+
+      it.each([
+        ["in the same tick as the switch starts", false],
+        ["while the other agent is starting", true],
+      ])(
+        `${ISSUE} keeps a continued chat on the agent that received its first message when it is sent %s, and leaves its note on that agent`,
+        async (_when, waitForStart) => {
+          const codexStarting = deferred();
+          const codexStarted = deferred();
+          const { mgr, notes, continued, note, noteBefore } = await continuedChat(async (id) => {
+            if (id !== "codex") return;
+            codexStarting.resolve();
+            await codexStarted.promise;
+          });
+
+          const switching = mgr.replaceSessionInPlace(continued.internalId, "codex", {
+            seedSelection: codex,
+          });
+          if (waitForStart) await codexStarting.promise;
+          getSessionTestHandle(continued).sendPrompt();
+          codexStarted.resolve();
+          const result = await switching;
+
+          expect(result).toBe(continued);
+          expect(mgr.getActiveSession()).toBe(continued);
+          expect(mgr.getSessions().map((s) => s.backendId)).not.toContain("codex");
+          expect(closedSessions()).not.toContain(continued);
+          expect(notes.get(note)).toEqual(noteBefore);
+          expect(mgr.isTiedToAgent(continued.internalId)).toBe(true);
+        }
+      );
+
+      it(`${ISSUE} records in the note the effort the switched chat settles on and any later effort change, until its first message is sent`, async () => {
+        const { mgr, notes, persistence, nextAgentWrite, continued, note } = await continuedChat();
+        const switched = await mgr.replaceSessionInPlace(continued.internalId, "codex", {
+          seedSelection: { baseModelId: "gpt-6", effort: null },
+        });
+        const handle = getSessionTestHandle(switched);
+
+        let written = nextAgentWrite();
+        handle.setModel({ baseModelId: "gpt-6", effort: "low" });
+        await written;
+        const settled = notes.get(note)?.options.model;
+        written = nextAgentWrite();
+        handle.setModel({ baseModelId: "gpt-6", effort: "high" });
+        await written;
+        const changed = notes.get(note)?.options.model;
+        const writesBeforeSend = persistence.setAgent.mock.calls.length;
+        handle.sendPrompt();
+        handle.setModel({ baseModelId: "gpt-6", effort: "medium" });
+
+        expect(settled).toEqual({ baseModelId: "gpt-6", effort: "low" });
+        expect(changed).toEqual({ baseModelId: "gpt-6", effort: "high" });
+        expect(notes.get(note)).toMatchObject({
+          backendId: "codex",
+          options: { model: { baseModelId: "gpt-6", effort: "high" } },
+        });
+        expect(persistence.setAgent).toHaveBeenCalledTimes(writesBeforeSend);
+      });
+
+      it(`${ISSUE} keeps the note's list of chats it continues through a switch and an effort change, and still tells the new agent about the original chat's note`, async () => {
+        const { mgr, notes, nextAgentWrite, continued, note, noteBefore } = await continuedChat();
+        const switched = await mgr.replaceSessionInPlace(continued.internalId, "codex", {
+          seedSelection: codex,
+        });
+
+        const written = nextAgentWrite();
+        getSessionTestHandle(switched).setModel({ baseModelId: "gpt-6", effort: "high" });
+        await written;
+
+        expect(noteBefore.options.continuedFrom).toEqual(["chats/note-1.md"]);
+        expect(notes.get(note)?.options).toMatchObject({
+          continuedFrom: ["chats/note-1.md"],
+          model: { baseModelId: "gpt-6", effort: "high" },
+        });
+        expect(switched.setContinuedFrom).toHaveBeenCalledWith(["chats/note-1.md"]);
+        expect(switched.resendSavedHistoryOnNextTurn).toHaveBeenCalled();
+      });
+
+      it(`${ISSUE} completes the switch when pointing the note at the new agent fails, since the chat has already moved`, async () => {
+        const { mgr, persistence, continued } = await continuedChat();
+        persistence.setAgent.mockRejectedValueOnce(new Error("disk full"));
+
+        const switched = await mgr.replaceSessionInPlace(continued.internalId, "codex", {
+          seedSelection: codex,
+        });
+
+        expect(switched.backendId).toBe("codex");
+        expect(mgr.getActiveSession()).toBe(switched);
+      });
+
+      it(`${ISSUE} saves a rename still waiting to be written before the switch, so the note keeps the new title and names the new agent`, async () => {
+        const { mgr, notes, continued, note, noteBefore } = await continuedChat();
+        continued.restoreLabel("Renamed heron chat", "user");
+        getSessionTestHandle(continued).setMessages(noteBefore.messages, true);
+        const closed = untilClosed(mgr, continued);
+
+        const switched = await mgr.replaceSessionInPlace(continued.internalId, "codex", {
+          seedSelection: codex,
+        });
+        await closed;
+
+        expect(switched.setLabel).toHaveBeenCalledWith("Renamed heron chat");
+        expect(notes.get(note)).toMatchObject({
+          backendId: "codex",
+          options: { label: "Renamed heron chat", model: codex },
+        });
+      });
+
+      it(`${ISSUE} saves the switched chat's first message, its session and the carried count into the same note`, async () => {
+        const { mgr, notes, continued, note } = await continuedChat();
+        const switched = await mgr.replaceSessionInPlace(continued.internalId, "codex", {
+          seedSelection: codex,
+        });
+        const handle = getSessionTestHandle(switched);
+
+        handle.sendPrompt();
+        handle.setMessages(
+          [...switched.store.getDisplayMessages(), { message: "What was it?" }],
+          true
+        );
+        await jest.advanceTimersByTimeAsync(2000);
+
+        expect(notes.size).toBe(2);
+        expect(notes.get(note)).toMatchObject({
+          backendId: "codex",
+          options: { sessionId: switched.getBackendSessionId(), carriedMessages: 2 },
+        });
+        expect(mgr.isTiedToAgent(switched.internalId)).toBe(true);
+      });
+    });
+
+    describe("isTiedToAgent()", () => {
+      const ISSUE = "https://github.com/Brevilabs/obsidian-copilot-private/issues/908";
+
+      it("leaves an empty chat free to move to another agent", async () => {
+        const mgr = buildManager();
+        const chat = await mgr.createSession();
+
+        expect(mgr.isTiedToAgent(chat.internalId)).toBe(false);
+      });
+
+      it("ties a chat with messages to its agent", async () => {
+        const mgr = buildManager();
+        const chat = await mgr.createSession();
+        getSessionTestHandle(chat).setHasUserVisibleMessages(true);
+
+        expect(mgr.isTiedToAgent(chat.internalId)).toBe(true);
+      });
+
+      it(`${ISSUE} leaves a chat opened from a note that names no agent session free to move until its first message is sent, and ties it as soon as that message is sent`, async () => {
+        const fixture = chatNoteFixture();
+        fixture.notes.set("chats/note.md", {
+          messages: [{ id: "u1", sender: USER_SENDER, message: "Hi", timestamp: null }] as never,
+          backendId: "opencode",
+          options: {},
+        });
+        const mgr = buildManager({ app: fixture.app, persistence: fixture.persistence });
+        const chat = await mgr.loadSessionFromHistory(mockTFile({ path: "chats/note.md" }));
+        const beforeSend = mgr.isTiedToAgent(chat.internalId);
+
+        getSessionTestHandle(chat).sendPrompt();
+
+        expect(beforeSend).toBe(false);
+        expect(mgr.isTiedToAgent(chat.internalId)).toBe(true);
+      });
+
+      it(`https://github.com/Brevilabs/obsidian-copilot-private/issues/814 ties a chat opened from a note naming an agent session it cannot resume here, since another computer still can`, async () => {
+        const fixture = chatNoteFixture();
+        fixture.notes.set("chats/note.md", {
+          messages: [{ id: "u1", sender: USER_SENDER, message: "Hi", timestamp: null }] as never,
+          backendId: "opencode",
+          options: { sessionId: "elsewhere-1" },
+        });
+        const mgr = buildManager({ app: fixture.app, persistence: fixture.persistence });
+        const chat = await mgr.loadSessionFromHistory(mockTFile({ path: "chats/note.md" }));
+
+        expect(chat.getBackendSessionId()).not.toBe("elsewhere-1");
+        expect(mgr.isTiedToAgent(chat.internalId)).toBe(true);
+      });
     });
     describe("startNewChatInPlace()", () => {
       it("puts the new chat in the replaced chat's tab slot, gives it its own chat input, and shows it", async () => {
@@ -2136,6 +2482,171 @@ describe("AgentSessionManager", () => {
 
         expect(closedSessions()).toEqual([read]);
         expect(mgr.getSessionsForScope(GLOBAL_SCOPE)).toEqual([created]);
+      });
+    });
+
+    describe("continueChatFrom()", () => {
+      const ISSUE = "https://github.com/Brevilabs/obsidian-copilot-private/issues/908";
+      const original: AgentChatMessage[] = [
+        {
+          id: "u1",
+          sender: USER_SENDER,
+          message: "The codeword is HERON.",
+          isVisible: true,
+          timestamp: { epoch: 1_000, display: "2026/11/11 10:00:00", fileName: "" },
+        },
+        {
+          id: "a1",
+          sender: AI_SENDER,
+          message: "It is about birds.",
+          isVisible: true,
+          timestamp: null,
+          parts: [
+            {
+              kind: "tool_call",
+              id: "tc1",
+              title: "Read",
+              toolKind: "read",
+              status: "completed",
+              input: { file_path: "notes/a.md" },
+            },
+            { kind: "text", text: "It is about birds." },
+          ],
+        },
+        {
+          id: "u2",
+          sender: USER_SENDER,
+          message: "Second fact: OTTER.",
+          isVisible: true,
+          timestamp: null,
+        },
+        { id: "a2", sender: AI_SENDER, message: "Got it.", isVisible: true, timestamp: null },
+      ];
+
+      async function continueFromFirstReply(opts: { autosave?: boolean } = {}) {
+        const fixture = chatNoteFixture(opts);
+        const mgr = buildManager({ app: fixture.app, persistence: fixture.persistence });
+        const source = await mgr.createSession();
+        getSessionTestHandle(source).setMessages(original);
+        getSessionTestHandle(source).setHasUserVisibleMessages(true);
+        jest.setSystemTime(5_000);
+        const continued = await mgr.continueChatFrom(source.internalId, "a1");
+        return { ...fixture, mgr, source, continued };
+      }
+
+      it(`${ISSUE} saves the original chat to its note even with autosave off, then opens the messages up to the chosen reply as a new chat note in a new tab, leaving the original open and unchanged`, async () => {
+        const { mgr, saveSession, notes, source, continued } = await continueFromFirstReply();
+
+        expect(saveSession.mock.calls.map(([messages]) => messages.length)).toEqual([4, 2]);
+        expect([...notes.keys()]).toEqual(["chats/note-1.md", "chats/note-2.md"]);
+        expect(mgr.getSessionSourcePath(continued.internalId)).toBe("chats/note-2.md");
+        expect(source.store.getDisplayMessages()).toBe(original);
+        expect(mgr.getSessions()).toEqual([source, continued]);
+        expect(mgr.getActiveSession()).toBe(continued);
+      });
+
+      it(`${ISSUE} saves the new chat's note with the original's title and project, the chosen messages, no agent session, and its own first-message time so its chat link is its own`, async () => {
+        const { saveSession, source } = await continueFromFirstReply();
+
+        const [messages, backendId, options] = saveSession.mock.calls[1];
+        expect(messages.map((m) => [m.id, m.timestamp?.epoch ?? null])).toEqual([
+          ["u1", 5_000],
+          ["a1", null],
+        ]);
+        expect(backendId).toBe(source.backendId);
+        expect(options).toEqual({
+          label: source.getLabel(),
+          projectId: GLOBAL_SCOPE,
+          model: undefined,
+          continuedFrom: ["chats/note-1.md"],
+        });
+        expect(source.store.getDisplayMessages()[0].timestamp?.epoch).toBe(1_000);
+      });
+
+      it(`${ISSUE} shows the messages up to the chosen reply as text rows and sends them as history with the first message`, async () => {
+        const { continued } = await continueFromFirstReply();
+
+        expect(senderAndText(continued)).toEqual([
+          [USER_SENDER, "The codeword is HERON."],
+          [AI_SENDER, "It is about birds."],
+        ]);
+        expect(continued.store.getDisplayMessages()[1].parts).toBeUndefined();
+        expect(continued.resendSavedHistoryOnNextTurn).toHaveBeenCalledTimes(1);
+        expect(continued.setContinuedFrom).toHaveBeenCalledWith(["chats/note-1.md"]);
+      });
+
+      it(`${ISSUE} records the whole line of chats a continued chat comes from when it is continued again, since each of their notes holds later messages`, async () => {
+        const { mgr, notes, continued } = await continueFromFirstReply();
+
+        const again = await mgr.continueChatFrom(
+          continued.internalId,
+          continued.store.getDisplayMessages()[1].id
+        );
+
+        expect(
+          notes.get(mgr.getSessionSourcePath(again.internalId))!.options.continuedFrom
+        ).toEqual(["chats/note-1.md", "chats/note-2.md"]);
+        expect(again.setContinuedFrom).toHaveBeenCalledWith(["chats/note-1.md", "chats/note-2.md"]);
+      });
+
+      it(`${ISSUE} saves the original chat even when its note looks current, waiting for the save under way and opening nothing when that save fails`, async () => {
+        const fixture = chatNoteFixture({ autosave: true });
+        const mgr = buildManager({ app: fixture.app, persistence: fixture.persistence });
+        const source = await mgr.createSession();
+        getSessionTestHandle(source).setMessages(original.slice(0, 2), true);
+        await jest.advanceTimersByTimeAsync(2000);
+        const failing = deferred<null>();
+        fixture.saveSession.mockImplementationOnce(() => failing.promise);
+        getSessionTestHandle(source).setMessages(original, true);
+        await jest.advanceTimersByTimeAsync(2000);
+
+        const continuing = mgr.continueChatFrom(source.internalId, "a1");
+        failing.resolve(null);
+        fixture.saveSession.mockResolvedValueOnce(null);
+
+        await expect(continuing).rejects.toThrow();
+        expect(mgr.getSessions()).toEqual([source]);
+        expect(fixture.notes.size).toBe(1);
+      });
+
+      it(`${ISSUE} opens the new chat on the original chat's agent, model and project`, async () => {
+        seedProjects(HISTORY_PROJECT_ID);
+        const fixture = chatNoteFixture();
+        const mgr = buildManager({
+          app: fixture.app,
+          otherDescriptors: [buildDescriptor({ id: "claude" })],
+          persistence: fixture.persistence,
+        });
+        await mgr.enterProject(HISTORY_PROJECT_ID);
+        const source = await mgr.createSession("claude", HISTORY_PROJECT_ID);
+        const model = { baseModelId: "sonnet", effort: "high" };
+        Object.assign(source, { getState: () => ({ model: { current: model } }) });
+        getSessionTestHandle(source).setMessages(original);
+        getSessionTestHandle(source).setHasUserVisibleMessages(true);
+
+        const continued = await mgr.continueChatFrom(source.internalId, "a1");
+
+        expect(continued.backendId).toBe("claude");
+        expect(continued.projectId).toBe(HISTORY_PROJECT_ID);
+        expect(sessionCreateSpy).toHaveBeenLastCalledWith(
+          expect.objectContaining({ defaultModelSelection: model })
+        );
+      });
+
+      it(`${ISSUE} keeps the new chat's note without a session until a message is sent, then saves its session and how many messages were carried`, async () => {
+        const { notes, continued } = await continueFromFirstReply({ autosave: true });
+        const handle = getSessionTestHandle(continued);
+        const beforeSend = { ...notes.get("chats/note-2.md")!.options };
+
+        handle.sendPrompt();
+        handle.setMessages([...original.slice(0, 2), { message: "What was it?" }], true);
+        await jest.advanceTimersByTimeAsync(2000);
+
+        expect(beforeSend).not.toHaveProperty("sessionId");
+        expect(notes.get("chats/note-2.md")!.options).toMatchObject({
+          sessionId: continued.getBackendSessionId(),
+          carriedMessages: 2,
+        });
       });
     });
 
@@ -2281,6 +2792,21 @@ describe("AgentSessionManager", () => {
 
         expect(closedSessions()).toEqual([]);
         expect(mgr.drafts.get(drafted.chatInputId)?.contextNotes).toEqual([note]);
+      });
+
+      it("keeps a chat without a sent message open while its composer holds an attached folder, which closing would discard, for https://github.com/logancyang/obsidian-copilot/issues/3858", async () => {
+        const mgr = buildManager();
+        const drafted = await mgr.createSession();
+        mgr.drafts.update(drafted.chatInputId, (draft) => ({
+          ...draft,
+          contextFolders: ["Research"],
+        }));
+        await mgr.createSession();
+
+        mgr.detachSessionFromTab(drafted.internalId);
+
+        expect(closedSessions()).toEqual([]);
+        expect(mgr.drafts.get(drafted.chatInputId)?.contextFolders).toEqual(["Research"]);
       });
 
       it("keeps an empty chat holding unsent text when a saved chat is opened from it, which would otherwise take its place and discard the text, for https://github.com/Brevilabs/obsidian-copilot-private/issues/812", async () => {
@@ -3030,6 +3556,44 @@ describe("AgentSessionManager", () => {
         expect(mgr.getActiveSession()?.chatInputId).toBe(landing.chatInputId);
         expect(mgr.getActiveProjectId()).toBe(projectId);
       });
+
+      it("keeps the reloaded chat selected instead of another agent's open chat while its agent restarts (https://github.com/Brevilabs/obsidian-copilot-private/issues/877)", async () => {
+        const mgr = buildManager({ otherDescriptors: [buildDescriptor({ id: "codex" })] });
+        const otherAgentChat = await createWorkedSession(mgr, "codex");
+        const reloaded = await createWorkedSession(mgr, "opencode");
+        await mgr.noteSpawnConfigChanged("opencode", "custom connector added");
+        const selected: (string | null)[] = [];
+        mgr.subscribe(() => selected.push(mgr.getActiveSession()?.chatInputId ?? null));
+
+        await mgr.applyHeldConfigChange("opencode");
+
+        expect(selected).not.toContain(otherAgentChat.chatInputId);
+        expect(mgr.getActiveSession()?.chatInputId).toBe(reloaded.chatInputId);
+      });
+
+      it("selects the other agent's open chat when the reloaded chat fails to come back (https://github.com/Brevilabs/obsidian-copilot-private/issues/877)", async () => {
+        const failingRestart = {
+          ...makeMockBackendProcess(),
+          start: jest.fn(async () => {
+            throw new Error("spawn failed");
+          }),
+        };
+        const createBackendProcess = jest
+          .fn()
+          .mockReturnValueOnce(makeMockBackendProcess())
+          .mockReturnValue(failingRestart);
+        const mgr = buildManager({
+          descriptor: buildDescriptor({ createBackendProcess }),
+          otherDescriptors: [buildDescriptor({ id: "codex" })],
+        });
+        const otherAgentChat = await createWorkedSession(mgr, "codex");
+        await createWorkedSession(mgr, "opencode");
+        await mgr.noteSpawnConfigChanged("opencode", "custom connector added");
+
+        await expect(mgr.applyHeldConfigChange("opencode")).rejects.toThrow("spawn failed");
+
+        expect(mgr.getActiveSession()?.chatInputId).toBe(otherAgentChat.chatInputId);
+      });
     });
 
     describe("restartBackend()", () => {
@@ -3084,6 +3648,49 @@ describe("AgentSessionManager", () => {
 
         expect(mockBackendShutdown).toHaveBeenCalled();
         expect(preload).toHaveBeenCalledWith("opencode");
+      });
+
+      it("keeps the reloaded chat selected when another agent's restart begins during its restart and finishes last (https://github.com/Brevilabs/obsidian-copilot-private/issues/877)", async () => {
+        const gatedShutdown = () => {
+          let markStarted!: () => void;
+          let release!: () => void;
+          const started = new Promise<void>((resolve) => (markStarted = resolve));
+          const released = new Promise<void>((resolve) => (release = resolve));
+          const process = {
+            ...makeMockBackendProcess(),
+            shutdown: jest.fn(() => {
+              markStarted();
+              return released;
+            }),
+          };
+          const createBackendProcess = jest
+            .fn()
+            .mockReturnValueOnce(process)
+            .mockImplementation(() => makeMockBackendProcess());
+          return { started, release, createBackendProcess };
+        };
+        const opencode = gatedShutdown();
+        const codex = gatedShutdown();
+        const mgr = buildManager({
+          descriptor: buildDescriptor({ createBackendProcess: opencode.createBackendProcess }),
+          otherDescriptors: [
+            buildDescriptor({ id: "codex", createBackendProcess: codex.createBackendProcess }),
+          ],
+        });
+        const otherAgentChat = await createWorkedSession(mgr, "codex");
+        const reloaded = await createWorkedSession(mgr, "opencode");
+
+        const opencodeRestart = mgr.restartBackend("opencode", "skills changed");
+        await opencode.started;
+        const codexRestart = mgr.restartBackend("codex", "skills changed");
+        await codex.started;
+        opencode.release();
+        await opencodeRestart;
+        codex.release();
+        await codexRestart;
+
+        expect(mgr.getActiveSession()?.chatInputId).toBe(reloaded.chatInputId);
+        expect(mgr.getSessions().map((s) => s.chatInputId)).toContain(otherAgentChat.chatInputId);
       });
 
       it("re-probes before creating the replacement so the effort catalog is rebuilt", async () => {
@@ -3503,12 +4110,9 @@ describe("AgentSessionManager", () => {
               emit(replayChunk("agent_message_chunk", "Two notes.", "a1"));
             },
           });
-          const { mgr, first, note, saveSession } = await restartSavedChat(replay);
+          const { mgr, note, saveSession, rebuilt } = await restartSavedChat(replay);
 
-          replay.emit(
-            first.getBackendSessionId()!,
-            replayChunk("agent_message_chunk", " Both are drafts.", "a1")
-          );
+          rebuilt.setLabel("Renamed after the restart");
           await jest.advanceTimersByTimeAsync(2000);
 
           const [messages, , options] = saveSession.mock.calls.at(-1)! as unknown as [
@@ -3595,6 +4199,44 @@ describe("AgentSessionManager", () => {
           expect(rebuilt.loadDisplayMessages).toHaveBeenCalledWith(noteTurns);
           expect(rebuilt.resendSavedHistoryOnNextTurn).toHaveBeenCalled();
           expect(mgr.getSessionSourcePath(rebuilt.internalId)).toBe(note.path);
+          await mgr.shutdown();
+        });
+
+        it("https://github.com/Brevilabs/obsidian-copilot-private/issues/908 rebuilds a chat opened from a note with no agent session as a fresh session that keeps its title, still shows the note's messages and sends them with the first message, even with autosave off", async () => {
+          jest.useFakeTimers();
+          getSettingsMock.mockReturnValue({ ...getSettingsMock(), autosaveChat: false });
+          const note = mockTFile({ path: "chats/agent__continued.md" });
+          const app = buildApp();
+          jest
+            .mocked(app.vault.getAbstractFileByPath)
+            .mockImplementation((path) => (path === note.path ? note : null));
+          const replay = buildReplayingBackend();
+          const mgr = buildManager({
+            app,
+            persistence: {
+              saveSession: jest.fn(async () => ({ path: note.path })),
+              loadFile: jest.fn(async () => ({
+                backendId: "opencode",
+                projectId: GLOBAL_SCOPE,
+                messages: noteTurns,
+              })),
+            },
+            descriptor: buildDescriptor({ createBackendProcess: () => replay.backend }),
+          });
+          const opened = await mgr.loadSessionFromHistory(note);
+          opened.restoreLabel("Continued chat", "agent");
+
+          await mgr.restartBackend("opencode", "managed skills changed");
+          const rebuilt = mgr.getActiveSession()!;
+
+          expect(rebuilt).not.toBe(opened);
+          expect(rebuilt.getLabel()).toBe("Continued chat");
+          expect(replay.backend.loadSession).not.toHaveBeenCalled();
+          expect(senderAndText(rebuilt)).toEqual([
+            [USER_SENDER, "list the notes"],
+            [AI_SENDER, "Two notes."],
+          ]);
+          expect(rebuilt.resendSavedHistoryOnNextTurn).toHaveBeenCalled();
           await mgr.shutdown();
         });
 
@@ -4001,6 +4643,39 @@ describe("AgentSessionManager", () => {
         expect(mockBackendShutdown).toHaveBeenCalled();
         expect(preloader.preload).toHaveBeenCalledWith("opencode");
       });
+
+      it.each([
+        [
+          "resuming them",
+          {
+            loadSession: jest.fn(async ({ sessionId }: { sessionId: string }) => ({
+              sessionId,
+              state: { model: null, mode: null },
+            })),
+          },
+        ],
+        ["starting them fresh", {}],
+      ])(
+        "keeps another agent's selected chat selected while the changed agent rebuilds its chats by %s (https://github.com/Brevilabs/obsidian-copilot-private/issues/877)",
+        async (_, backendOverrides) => {
+          const mgr = buildManager({
+            descriptor: buildDescriptor({
+              createBackendProcess: () => ({ ...makeMockBackendProcess(), ...backendOverrides }),
+            }),
+            otherDescriptors: [buildDescriptor({ id: "codex" })],
+          });
+          const rebuilt = await createWorkedSession(mgr, "opencode");
+          const selectedChat = await createWorkedSession(mgr, "codex");
+          const selected: (string | null)[] = [];
+          mgr.subscribe(() => selected.push(mgr.getActiveSession()?.chatInputId ?? null));
+
+          await mgr.onInstallStateChanged("opencode");
+
+          expect(mockBackendShutdown).toHaveBeenCalled();
+          expect(new Set(selected)).toEqual(new Set([selectedChat.chatInputId]));
+          expect(mgr.getSessions().map((s) => s.chatInputId)).toContain(rebuilt.chatInputId);
+        }
+      );
 
       it("tears down and drops the warm probe when the binary is no longer available", async () => {
         const { mgr, preloader, setInstallState } = buildInstallStateManager({
@@ -4527,6 +5202,32 @@ describe("AgentSessionManager", () => {
         await expect(mgr.saveActiveSession()).resolves.toEqual({ path: "chats/saved.md" });
 
         expect(saveSession).toHaveBeenCalledWith(messages, session.backendId, expect.anything());
+      });
+
+      it("saves again when the last reply gains a tool call without new text, so its note lists that tool (https://github.com/Brevilabs/obsidian-copilot-private/issues/906)", async () => {
+        const { mgr, saveSession } = savedNoteFixture();
+        const session = await mgr.createSession();
+        const handle = getSessionTestHandle(session);
+        handle.setMessages([{ message: "Question" }, { message: "Answer" }]);
+        await mgr.saveActiveSession();
+        const withTool = [
+          { message: "Question" },
+          {
+            message: "Answer",
+            parts: [{ kind: "tool_call", id: "tc1", title: "Edit a.md", status: "completed" }],
+          },
+        ];
+        handle.setMessages(withTool);
+
+        await mgr.saveActiveSession();
+
+        expect(saveSession).toHaveBeenCalledTimes(2);
+        expect(saveSession).toHaveBeenLastCalledWith(
+          withTool,
+          session.backendId,
+          expect.anything()
+        );
+        await mgr.shutdown();
       });
 
       it("persists changes during the first manual save for https://github.com/logancyang/obsidian-copilot/issues/3225", async () => {
@@ -5703,7 +6404,7 @@ describe("AgentSessionManager", () => {
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/671 gives replayed messages without send times the note's times so the next autosave keeps them", async () => {
         const replay = buildReplayingBackend({
           onLoad: (emit) => {
-            emit(replayChunk("user_message_chunk", "replayed question", "u1"));
+            emit(replayChunk("user_message_chunk", "saved question", "u1"));
             emit(replayChunk("agent_message_chunk", "replayed answer", "a1"));
           },
         });
@@ -5711,9 +6412,188 @@ describe("AgentSessionManager", () => {
         const session = await openSavedChat(replay);
 
         expect(session.store.getDisplayMessages().map((m) => [m.message, m.timestamp])).toEqual([
-          ["replayed question", savedAt],
+          ["saved question", savedAt],
           ["replayed answer", savedAt],
         ]);
+      });
+
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/908 shows a continued chat's carried messages as text followed by its replayed turns with their tool cards when its session reattaches, keeps the earlier chats' notes for later multi-agent mentions, and leaves the carried count its note holds", async () => {
+        const replay = buildReplayingBackend({
+          onLoad: (emit) => {
+            emit(replayChunk("user_message_chunk", "what was the codeword?", "u1"));
+            emit({
+              sessionUpdate: "tool_call",
+              toolCallId: "tool-read",
+              title: "Read note.md",
+              kind: "read",
+              status: "completed",
+            });
+            emit(replayChunk("agent_message_chunk", "HERON", "a1"));
+          },
+        });
+        const saveSession = jest.fn(async () => ({ path: "chat/Saved.md" }));
+        const manager = buildManager({
+          persistence: {
+            loadFile: jest.fn().mockResolvedValue({
+              backendId: "opencode",
+              sessionId: "native-1",
+              projectId: GLOBAL_SCOPE,
+              carriedMessages: 2,
+              continuedFrom: ["chats/original.md"],
+              messages: [
+                ...savedTurn,
+                { ...savedTurn[0], id: "s3", message: "what was the codeword?" },
+                { ...savedTurn[1], id: "s4", message: "HERON" },
+              ],
+            }),
+            saveSession,
+          },
+          descriptor: buildDescriptor({ createBackendProcess: () => replay.backend }),
+        });
+
+        const continuedFrom = jest.spyOn(AgentSession.prototype, "setContinuedFrom");
+        const session = await manager.loadSessionFromHistory(mockTFile({ path: "chat/Saved.md" }));
+        await manager.saveActiveSession();
+
+        expect(senderAndText(session)).toEqual([
+          [USER_SENDER, "saved question"],
+          [AI_SENDER, "saved answer"],
+          [USER_SENDER, "what was the codeword?"],
+          [AI_SENDER, "HERON"],
+        ]);
+        expect(session.store.getDisplayMessages()[3].parts?.map((p) => p.kind)).toEqual([
+          "tool_call",
+          "text",
+        ]);
+        expect(continuedFrom).toHaveBeenCalledWith(["chats/original.md"]);
+        continuedFrom.mockRestore();
+        expect(saveSession).toHaveBeenLastCalledWith(
+          expect.anything(),
+          "opencode",
+          expect.objectContaining({ sessionId: "native-1", carriedMessages: undefined })
+        );
+      });
+
+      describe("a reattached chat whose replay matches its note", () => {
+        const issue = "https://github.com/Brevilabs/obsidian-copilot-private/issues/921";
+        const embed = `![[copilot-image-${"b".repeat(64)}.png]]`;
+        const noteTurn: AgentChatMessage[] = [
+          {
+            id: "s1",
+            sender: USER_SENDER,
+            message: `look at this\n\n${embed}`,
+            isVisible: true,
+            timestamp: savedAt,
+            context: {
+              notes: [],
+              urls: [],
+              webTabs: [{ url: "https://example.com/", title: "Example" }],
+            },
+          },
+          {
+            id: "s2",
+            sender: AI_SENDER,
+            message: "read it",
+            isVisible: true,
+            timestamp: savedAt,
+            toolsUsed: ["Read (read): note.md"],
+          },
+        ];
+        const replayOf = (...extra: ReplayFrame[]) =>
+          buildReplayingBackend({
+            onLoad: (emit) => {
+              emit(replayChunk("user_message_chunk", "look at this", "u1"));
+              emit({
+                sessionUpdate: "tool_call",
+                toolCallId: "tool-read",
+                title: "Read /vault/note.md",
+                kind: "read",
+                status: "completed",
+              });
+              emit(replayChunk("agent_message_chunk", "read it", "a1"));
+              for (const frame of extra) emit(frame);
+            },
+          });
+        async function reopenAndWait(replay: ReturnType<typeof buildReplayingBackend>) {
+          jest.useFakeTimers();
+          getSettingsMock.mockReturnValue({ ...getSettingsMock(), autosaveChat: true });
+          const saveSession = jest.fn(async () => ({ path: "chat/Saved.md" }));
+          const session = await buildManager({
+            persistence: {
+              loadFile: jest.fn().mockResolvedValue({
+                backendId: "opencode",
+                sessionId: "native-1",
+                projectId: GLOBAL_SCOPE,
+                label: "Look at this",
+                usage: { usedTokens: 10, updatedAt: 5 },
+                messages: noteTurn,
+              }),
+              saveSession,
+            },
+            descriptor: buildDescriptor({ createBackendProcess: () => replay.backend }),
+          }).loadSessionFromHistory(mockTFile({ path: "chat/Saved.md" }));
+          await jest.advanceTimersByTimeAsync(5000);
+          return { session, saveSession };
+        }
+
+        it(`${issue} shows the replayed tool steps with the note's times, the image and context saved under the message and the reply's saved tools-used list`, async () => {
+          const { session } = await reopenAndWait(replayOf());
+
+          const [question, reply] = session.store.getDisplayMessages();
+          expect([question.message, question.timestamp, question.context]).toEqual([
+            `look at this\n\n${embed}`,
+            savedAt,
+            noteTurn[0].context,
+          ]);
+          expect([reply.message, reply.timestamp, reply.toolsUsed]).toEqual([
+            "read it",
+            savedAt,
+            ["Read (read): note.md"],
+          ]);
+          expect(reply.parts?.map((p) => p.kind)).toEqual(["tool_call", "text"]);
+        });
+
+        it(`${issue} gives a replayed message that Codex sent with its image as a data URL the note's time and image embed, and leaves the note unwritten`, async () => {
+          const codexReplay = buildReplayingBackend({
+            onLoad: (emit) => {
+              emit(
+                replayChunk(
+                  "user_message_chunk",
+                  "look at this[@image](data:image/png;base64,iVBORw0KGgo=)",
+                  "u1"
+                )
+              );
+              emit(replayChunk("agent_message_chunk", "read it", "a1"));
+            },
+          });
+
+          const { session, saveSession } = await reopenAndWait(codexReplay);
+
+          const [question, reply] = session.store.getDisplayMessages();
+          expect([question.message, question.timestamp, reply.timestamp]).toEqual([
+            `look at this\n\n${embed}`,
+            savedAt,
+            savedAt,
+          ]);
+          expect(saveSession).not.toHaveBeenCalled();
+        });
+
+        it(`${issue} leaves the note unwritten when the chat is reopened and left unchanged`, async () => {
+          const { saveSession } = await reopenAndWait(replayOf());
+
+          expect(saveSession).not.toHaveBeenCalled();
+        });
+
+        it(`${issue} saves the chat when its replay holds a turn the note lacks`, async () => {
+          const { saveSession } = await reopenAndWait(
+            replayOf(
+              replayChunk("user_message_chunk", "later question", "u2"),
+              replayChunk("agent_message_chunk", "later answer", "a2")
+            )
+          );
+
+          expect(saveSession).toHaveBeenCalledTimes(1);
+        });
       });
 
       it("https://github.com/logancyang/obsidian-copilot/issues/3643 opens a fresh session that sends the note's turns to the agent when the backend's store does not know the saved session", async () => {
@@ -5752,16 +6632,35 @@ describe("AgentSessionManager", () => {
         const issue = "https://github.com/Brevilabs/obsidian-copilot-private/issues/814";
         const NOTE = "chats/agent__browsed.md";
 
-        async function openBrowsedChat() {
+        async function openBrowsedChat(goneSessionId?: string) {
           jest.useFakeTimers();
           getSettingsMock.mockReturnValue({ ...getSettingsMock(), autosaveChat: true });
           const files: Record<string, FakeFrontmatter> = {
             [NOTE]: { epoch: 1_000, topic: "Browsed", backendId: "opencode" },
           };
-          const harness = buildHistoryHarness({ files });
+          if (goneSessionId) files[NOTE].sessionId = goneSessionId;
+          const { backend } = buildReplayingBackend({
+            loadSession: jest.fn(async () => {
+              throw new Error(`Invalid params: session not found: ${goneSessionId}`);
+            }),
+          });
+          const harness = buildHistoryHarness({
+            files,
+            createBackendProcess: jest.fn(() => backend),
+          });
+          if (goneSessionId) {
+            await harness.index.recordSession({
+              backendId: "opencode",
+              sessionId: goneSessionId,
+              title: "Browsed",
+              createdAtMs: 1_000,
+              lastAccessedAtMs: 1_000,
+            });
+          }
           Object.assign(harness.persistence, {
             loadFile: jest.fn(async () => ({
               backendId: "opencode",
+              sessionId: goneSessionId,
               projectId: GLOBAL_SCOPE,
               messages: savedTurn,
             })),
@@ -5794,12 +6693,43 @@ describe("AgentSessionManager", () => {
           expect((await manager.getChatHistoryItems()).map((i) => i.id)).toEqual([NOTE]);
         });
 
+        it("https://github.com/Brevilabs/obsidian-copilot-private/issues/908 records every saved message as told to the agent as history once a message is sent in the new session", async () => {
+          const { persistence, session } = await openBrowsedChat();
+          getSessionTestHandle(session).sendPrompt();
+          await autosave(session);
+
+          expect((persistence.saveSession as jest.Mock).mock.lastCall?.[2]).toMatchObject({
+            sessionId: session.getBackendSessionId(),
+            carriedMessages: savedTurn.length,
+          });
+        });
+
         it(`${issue} saves its new session into the note once a message is sent in it`, async () => {
           const { manager, files, session } = await openBrowsedChat();
           getSessionTestHandle(session).sendPrompt();
           await autosave(session);
 
           expect(files[NOTE].sessionId).toBe(session.getBackendSessionId());
+          expect((await manager.getChatHistoryItems()).map((i) => i.id)).toEqual([NOTE]);
+        });
+
+        it("https://github.com/Brevilabs/obsidian-copilot-private/issues/902 lists the chat once in history and forgets its unresumable session once a message is sent in the session that replaced it", async () => {
+          const { manager, index, session } = await openBrowsedChat("gone-1");
+          getSessionTestHandle(session).sendPrompt();
+          await autosave(session);
+
+          expect((await index.getEntries()).map((e) => e.sessionId)).toEqual([
+            session.getBackendSessionId(),
+          ]);
+          expect(await index.isTombstoned("opencode", "gone-1")).toBe(true);
+          expect((await manager.getChatHistoryItems()).map((i) => i.id)).toEqual([NOTE]);
+        });
+
+        it("https://github.com/Brevilabs/obsidian-copilot-private/issues/902 keeps its unresumable session in the session index when it is opened and left before a message is sent", async () => {
+          const { manager, index, session } = await openBrowsedChat("gone-1");
+          await autosave(session);
+
+          expect((await index.getEntries()).map((e) => e.sessionId)).toEqual(["gone-1"]);
           expect((await manager.getChatHistoryItems()).map((i) => i.id)).toEqual([NOTE]);
         });
       });
@@ -5951,6 +6881,52 @@ describe("AgentSessionManager", () => {
     });
 
     describe("loadNativeSessionFromHistory()", () => {
+      it("reopens a shut-down chat on the model and effort it last ran instead of the agent's default (https://github.com/logancyang/obsidian-copilot/issues/4274)", async () => {
+        jest.useFakeTimers();
+        getSettingsMock.mockReturnValue({ ...getSettingsMock(), autosaveChat: false });
+        const state = (baseModelId: string, effort: string): BackendState => ({
+          model: {
+            current: { baseModelId, effort },
+            availableModels: [],
+            apply: { kind: "setModel" },
+          },
+          mode: null,
+        });
+        const replay = buildReplayingBackend({
+          loadSession: jest.fn(async ({ sessionId }: { sessionId: string }) => ({
+            sessionId,
+            state: state("sonnet", "high"),
+          })),
+        });
+        const backend = {
+          ...replay.backend,
+          setSessionModel: jest.fn(async ({ modelId }: { modelId: string }) => {
+            const selection = JSON.parse(modelId);
+            return state(selection.baseModelId, selection.effort);
+          }),
+        };
+        const { manager } = buildHistoryHarness({
+          backendId: "claude",
+          createBackendProcess: jest.fn(() => backend),
+          applySelection: async (session, selection) =>
+            session.applyModelWireId(JSON.stringify(selection)),
+        });
+        const chat = await manager.createSession("claude");
+        const sessionId = chat.getBackendSessionId()!;
+        jest.spyOn(chat, "getState").mockReturnValue(state("opus", "high"));
+        getSessionTestHandle(chat).setMessages([{ message: "Read the PNG" }], true);
+        await jest.advanceTimersByTimeAsync(2000);
+        await manager.closeChatSession(buildNativeChatId("claude", sessionId));
+
+        const reopened = await manager.loadNativeSessionFromHistory("claude", sessionId);
+
+        expect(reopened).not.toBe(chat);
+        expect(reopened.getState()?.model?.current).toEqual({
+          baseModelId: "opus",
+          effort: "high",
+        });
+      });
+
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/602 keeps the frames replayed before the load response as history bubbles and drops out-of-turn frames that arrive after it", async () => {
         const replay = buildReplayingBackend({
           onLoad: (emit) => {

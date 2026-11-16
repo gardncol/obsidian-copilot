@@ -14,14 +14,12 @@ function startReplay(): {
   store: AgentMessageStore;
   replay: SessionHistoryReplay;
   scheduleNotifyMessages: jest.Mock;
-  applyTodoList: jest.Mock;
 } {
   const store = new AgentMessageStore();
   const scheduleNotifyMessages = jest.fn();
-  const applyTodoList = jest.fn();
-  const replay = new SessionHistoryReplay({ store, scheduleNotifyMessages, applyTodoList });
+  const replay = new SessionHistoryReplay({ store, scheduleNotifyMessages });
   replay.start();
-  return { store, replay, scheduleNotifyMessages, applyTodoList };
+  return { store, replay, scheduleNotifyMessages };
 }
 
 const replayText = (
@@ -46,7 +44,6 @@ describe("SessionHistoryReplay", () => {
         const replay = new SessionHistoryReplay({
           store,
           scheduleNotifyMessages: jest.fn(),
-          applyTodoList: jest.fn(),
         });
 
         replay.start();
@@ -63,7 +60,6 @@ describe("SessionHistoryReplay", () => {
         const replay = new SessionHistoryReplay({
           store: new AgentMessageStore(),
           scheduleNotifyMessages: jest.fn(),
-          applyTodoList: jest.fn(),
         });
         expect(replay.isOpen()).toBe(false);
 
@@ -166,6 +162,25 @@ describe("SessionHistoryReplay", () => {
         ]);
       });
 
+      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/921 leaves out the images Codex replays inside a user message's text as data URLs, so a saved chat never writes them into its note", () => {
+        const { store, replay } = startReplay();
+
+        replay.append(
+          replayText(
+            "user_message_chunk",
+            "Read notes/a.md. Do not describe the image.[@image](data:image/png;base64,iVBORw0KGgo=)[@image](data:image/jpeg;base64,/9j/4AAQ)",
+            "u1"
+          ),
+          undefined
+        );
+        replay.append(replayText("agent_message_chunk", "Done.", "a1"), undefined);
+
+        expect(bubbles(store)).toEqual([
+          { sender: USER_SENDER, message: "Read notes/a.md. Do not describe the image." },
+          { sender: AI_SENDER, message: "Done." },
+        ]);
+      });
+
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/602 renders replayed thoughts, tool calls with their updates, and plans as parts of the agent bubble", () => {
         const { store, replay } = startReplay();
 
@@ -199,17 +214,6 @@ describe("SessionHistoryReplay", () => {
         expect(ai.parts?.map((p) => p.kind)).toEqual(["thought", "tool_call", "plan", "text"]);
         const tool = ai.parts?.find((p) => p.kind === "tool_call");
         expect(tool).toMatchObject({ id: "t1", status: "completed" });
-      });
-
-      it("https://github.com/Brevilabs/obsidian-copilot-private/issues/643 hands each replayed task list to the todo list so the last one stays current", () => {
-        const { replay, applyTodoList } = startReplay();
-        const entries = [
-          { content: "step", status: "completed" as const, priority: "medium" as const },
-        ];
-
-        replay.append({ sessionUpdate: "plan", entries }, undefined);
-
-        expect(applyTodoList).toHaveBeenCalledWith(entries);
       });
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/638 opens a reply bubble for a replayed compaction that no reply precedes", () => {
@@ -340,7 +344,6 @@ describe("SessionHistoryReplay", () => {
         const replay = new SessionHistoryReplay({
           store,
           scheduleNotifyMessages: jest.fn(),
-          applyTodoList: jest.fn(),
         });
 
         expect(replay.append(replayText("agent_message_chunk", "live", "a1"), undefined)).toBe(
