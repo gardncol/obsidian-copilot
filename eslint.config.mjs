@@ -5,6 +5,7 @@ import tailwind from "eslint-plugin-tailwindcss";
 import boundaries from "eslint-plugin-boundaries";
 import globals from "globals";
 import { isBuiltin } from "node:module";
+import { architecture } from "./eslint.architecture.mjs";
 
 const NODE_IMPORT_GUIDANCE =
   "Use requireNodeModule() from '@/utils/desktopRuntime' for runtime access; use an import(\"node:...\") type query when only a type is needed.";
@@ -122,6 +123,7 @@ const copilotLintPlugin = {
   rules: {
     "no-direct-node-imports": noDirectNodeImportsRule,
     "issue-linked-comments": issueLinkedCommentsRule,
+    ...architecture.lintRules,
   },
 };
 
@@ -132,25 +134,32 @@ const OBSIDIANMD_UNRATCHETED = new Set([
   "rule-custom-message",
 ]);
 
+const OBSIDIANMD_RULES = (
+  Array.isArray(obsidianmd.configs.recommended)
+    ? obsidianmd.configs.recommended
+    : [obsidianmd.configs.recommended]
+).reduce((rules, block) => Object.assign(rules, block.rules), {});
+
+const [, ...OBSIDIANMD_RESTRICTED_DISABLES] =
+  OBSIDIANMD_RULES["eslint-comments/no-restricted-disable"];
+
 const OBSIDIANMD_RATCHET = Object.fromEntries(
-  Object.entries(
-    (Array.isArray(obsidianmd.configs.recommended)
-      ? obsidianmd.configs.recommended
-      : [obsidianmd.configs.recommended]
-    ).reduce((rules, block) => Object.assign(rules, block.rules), {})
-  )
+  Object.entries(OBSIDIANMD_RULES)
     .filter(([id]) => id.startsWith("obsidianmd/"))
     .filter(([, severity]) => severity !== "off" && severity !== 0)
     .filter(([id]) => !OBSIDIANMD_UNRATCHETED.has(id.slice("obsidianmd/".length)))
     .map(([id]) => [id, "error"])
 );
 
+const SOURCE_ROOTS = ["apps/obsidian/src", "packages/*/src"];
+const inSource = (glob) => SOURCE_ROOTS.map((root) => `${root}/${glob}`);
+
 const restrictedSourceImports = [
   {
     selector:
       "ImportDeclaration[source.value=/^\\.\\.($|\\u002f)/], ImportExpression[source.value=/^\\.\\.($|\\u002f)/]",
     message:
-      "Parent-relative imports (`../foo`) are banned. Use the `@/` path alias (e.g. `@/components/Foo`) instead.",
+      "Parent-relative imports (`../foo`) are banned. Use the `@/` path alias (e.g. `@/components/Foo`) or a package name (e.g. `@copilot/core/...`) instead.",
   },
   {
     selector:
@@ -304,8 +313,8 @@ export default [
   },
 
   {
-    files: ["src/**/*.{ts,tsx}"],
-    ignores: ["src/**/*.test.{ts,tsx}", "src/**/__mocks__/**"],
+    files: inSource("**/*.{ts,tsx}"),
+    ignores: [...inSource("**/*.test.{ts,tsx}"), ...inSource("**/__mocks__/**")],
     plugins: { copilot: copilotLintPlugin },
     rules: {
       "copilot/no-direct-node-imports": "error",
@@ -322,8 +331,8 @@ export default [
   },
 
   {
-    files: ["src/**/*.{ts,tsx}"],
-    ignores: ["src/utils/react/createPluginRoot.tsx"],
+    files: inSource("**/*.{ts,tsx}"),
+    ignores: ["apps/obsidian/src/utils/react/createPluginRoot.tsx"],
     rules: {
       "no-restricted-syntax": [
         "error",
@@ -336,7 +345,7 @@ export default [
   },
 
   {
-    files: ["src/utils/react/createPluginRoot.tsx"],
+    files: ["apps/obsidian/src/utils/react/createPluginRoot.tsx"],
     rules: {
       "no-restricted-syntax": [
         "error",
@@ -356,15 +365,15 @@ export default [
   },
 
   {
-    files: ["src/**/*.test.{js,jsx,ts,tsx}"],
+    files: inSource("**/*.test.{js,jsx,ts,tsx}"),
     rules: {
       "no-restricted-syntax": ["error", ...restrictedSourceImports],
     },
   },
 
   {
-    files: ["src/components/ui/**/*.{ts,tsx}"],
-    ignores: ["src/components/ui/**/*.test.{ts,tsx}"],
+    files: ["apps/obsidian/src/components/ui/**/*.{ts,tsx}"],
+    ignores: ["apps/obsidian/src/components/ui/**/*.test.{ts,tsx}"],
     rules: {
       "@typescript-eslint/consistent-type-imports": "error",
       "@typescript-eslint/no-restricted-imports": [
@@ -383,7 +392,7 @@ export default [
               ],
               allowTypeImports: true,
               message:
-                "src/components/ui must not import values outside @/components/ui, @/lib, " +
+                "apps/obsidian/src/components/ui must not import values outside @/components/ui, @/lib, " +
                 "and @/constants. Type-only imports are always fine. If a primitive needs " +
                 "plugin state, take it as a prop; if it needs a helper, move the helper to " +
                 "@/lib. Reaching into @/settings, @/aiParams, @/utils, or @/agentMode couples " +
@@ -397,7 +406,7 @@ export default [
   },
 
   {
-    files: ["dev/gallery/**/*.{ts,tsx}", "src/**/*.stories.{ts,tsx}"],
+    files: ["dev/gallery/**/*.{ts,tsx}", ...inSource("**/*.stories.{ts,tsx}")],
     ignores: ["dev/gallery/**/*.test.{ts,tsx}"],
     rules: {
       "@typescript-eslint/no-restricted-imports": [
@@ -430,7 +439,7 @@ export default [
   },
 
   {
-    files: ["**/*.test.{js,jsx,ts,tsx}", "jest.setup.js", "__mocks__/**"],
+    files: ["**/*.test.{js,jsx,ts,tsx}", "jest.setup.js", "apps/obsidian/__mocks__/**"],
     languageOptions: {
       globals: {
         ...globals.jest,
@@ -463,10 +472,8 @@ export default [
       "*.{js,mjs,cjs}",
       "scripts/**",
       "dev/gallery/esbuild.config.mjs",
-      "esbuild.config.mjs",
+      "apps/obsidian/*.{js,mjs,cjs}",
       "version-bump.mjs",
-      "wasmPlugin.mjs",
-      "nodeModuleShim.mjs",
       "jest.config.js",
       "tailwind.config.js",
     ],
@@ -491,6 +498,9 @@ export default [
       "scripts/patchRendererUnsafeUnref.js",
       "scripts/bundleSizeGuard.js",
       "scripts/bundleSizeGuard.test.js",
+      "scripts/architecture.js",
+      "scripts/architecture.test.js",
+      "scripts/workspacePackages.test.js",
     ],
     rules: {
       "@typescript-eslint/no-require-imports": "off",
@@ -498,132 +508,54 @@ export default [
   },
 
   {
-    files: ["src/**/*.{ts,tsx,js,jsx}"],
+    files: inSource("**/*.{ts,tsx,js,jsx}"),
     plugins: { boundaries },
     settings: {
       "import/resolver": {
         typescript: { project: "./tsconfig.json" },
         node: true,
       },
-      "boundaries/include": ["src/**/*"],
-      "boundaries/elements": [
-        { type: "registry", pattern: "src/agentMode/backends/registry.ts", mode: "file" },
-        { type: "barrel", pattern: "src/agentMode/index.ts", mode: "file" },
-        { type: "session", pattern: "src/agentMode/session" },
-        { type: "acp", pattern: "src/agentMode/acp" },
-        { type: "sdk", pattern: "src/agentMode/sdk" },
-        { type: "backend", pattern: "src/agentMode/backends/*", capture: ["name"] },
-        { type: "ui", pattern: "src/agentMode/ui" },
-        { type: "skills", pattern: "src/agentMode/skills" },
-        { type: "navigator", pattern: "src/agentMode/navigator" },
-        { type: "modelmgmt", pattern: "src/modelManagement" },
-        { type: "miyoAgent", pattern: "src/miyo/agentMode" },
-        { type: "excalidrawAgent", pattern: "src/excalidraw/agentMode" },
-        { type: "connectorsAgent", pattern: "src/connectors/agentMode" },
-        { type: "projectsUi", pattern: ["src/projects/ui", "src/projects/hooks"] },
-        { type: "host", pattern: "src/**" },
-      ],
+      "boundaries/include": inSource("**/*"),
+      "boundaries/elements": architecture.elements,
+      "boundaries/dependency-nodes": ["import", "dynamic-import", "export"],
     },
     rules: {
-      "boundaries/dependencies": [
+      "boundaries/dependencies": ["error", { default: "disallow", rules: architecture.rules }],
+      "boundaries/no-unknown-files": "error",
+      "eslint-comments/no-restricted-disable": [
+        "error",
+        ...OBSIDIANMD_RESTRICTED_DISABLES,
+        ...architecture.undisableableRules,
+      ],
+      "eslint-comments/no-use": [
         "error",
         {
-          default: "disallow",
-          rules: [
-            { from: { type: "session" }, allow: { to: { type: ["session", "host"] } } },
-            { from: { type: "acp" }, allow: { to: { type: ["acp", "session", "host"] } } },
-            { from: { type: "sdk" }, allow: { to: { type: ["sdk", "session", "host"] } } },
-            {
-              from: { type: "backend" },
-              allow: [
-                { to: { type: ["acp", "sdk", "session", "skills", "modelmgmt", "host"] } },
-                { to: { type: "backend", captured: { name: "{{from.captured.name}}" } } },
-                { to: { type: "backend", captured: { name: "shared" } } },
-              ],
-            },
-            { from: { type: "registry" }, allow: { to: { type: ["backend", "session", "host"] } } },
-            {
-              from: { type: "ui" },
-              allow: {
-                to: {
-                  type: [
-                    "ui",
-                    "session",
-                    "registry",
-                    "skills",
-                    "navigator",
-                    "miyoAgent",
-                    "excalidrawAgent",
-                    "connectorsAgent",
-                    "projectsUi",
-                    "host",
-                  ],
-                },
-              },
-            },
-            {
-              from: { type: "navigator" },
-              allow: { to: { type: ["navigator", "ui", "session", "projectsUi", "host"] } },
-            },
-            {
-              from: { type: "miyoAgent" },
-              allow: { to: { type: ["miyoAgent", "ui", "session", "host"] } },
-            },
-            {
-              from: { type: "excalidrawAgent" },
-              allow: { to: { type: ["excalidrawAgent", "ui", "session", "host"] } },
-            },
-            {
-              from: { type: "connectorsAgent" },
-              allow: { to: { type: ["connectorsAgent", "ui", "session", "host"] } },
-            },
-            {
-              from: { type: "projectsUi" },
-              allow: { to: { type: ["projectsUi", "ui", "session", "host"] } },
-            },
-            {
-              from: { type: "skills" },
-              allow: { to: { type: ["skills", "session", "host", "registry"] } },
-            },
-            {
-              from: { type: "barrel" },
-              allow: {
-                to: {
-                  type: [
-                    "acp",
-                    "session",
-                    "sdk",
-                    "backend",
-                    "registry",
-                    "ui",
-                    "skills",
-                    "navigator",
-                    "connectorsAgent",
-                    "host",
-                  ],
-                },
-              },
-            },
-            { from: { type: "modelmgmt" }, allow: { to: { type: ["modelmgmt", "host"] } } },
-            {
-              from: { type: "host" },
-              allow: { to: { type: ["host", "barrel", "modelmgmt"] } },
-            },
+          allow: [
+            "eslint-disable",
+            "eslint-disable-line",
+            "eslint-disable-next-line",
+            "eslint-enable",
           ],
         },
       ],
     },
   },
 
+  ...architecture.clientAccessConfigs.map((config) => ({
+    ...config,
+    plugins: { copilot: copilotLintPlugin },
+  })),
+
   {
-    files: ["**/*.test.{js,jsx,ts,tsx}", "jest.setup.js", "__mocks__/**"],
+    files: ["**/*.test.{js,jsx,ts,tsx}", "jest.setup.js", "apps/obsidian/__mocks__/**"],
     rules: {
       "boundaries/dependencies": "off",
+      "eslint-comments/no-restricted-disable": ["error", ...architecture.undisableableRules],
     },
   },
 
   {
-    files: ["src/**/*.{ts,tsx}"],
+    files: inSource("**/*.{ts,tsx}"),
     rules: {
       "no-restricted-imports": [
         "error",
@@ -632,14 +564,14 @@ export default [
             {
               name: "@agentclientprotocol/sdk",
               message:
-                "ACP wire types are confined to src/agentMode/acp/. session/, sdk/, ui/, backends/, and skills/ should depend on the session-domain types in @/agentMode/session/types instead. See src/agentMode/AGENTS.md.",
+                "ACP wire types are confined to apps/obsidian/src/agentMode/acp/. session/, sdk/, ui/, backends/, and skills/ should depend on the session-domain types in @/agentMode/session/types instead. See apps/obsidian/src/agentMode/AGENTS.md.",
             },
           ],
           patterns: [
             {
               group: ["@/modelManagement/*"],
               message:
-                "Import from @/modelManagement (the barrel) only. Deep imports of @/modelManagement/types/* are not allowed from outside the module. See src/modelManagement/AGENTS.md.",
+                "Import from @/modelManagement (the barrel) only. Deep imports of @/modelManagement/types/* are not allowed from outside the module. See apps/obsidian/src/modelManagement/AGENTS.md.",
             },
           ],
         },
@@ -647,13 +579,13 @@ export default [
     },
   },
   {
-    files: ["src/agentMode/acp/**/*.{ts,tsx}"],
+    files: ["apps/obsidian/src/agentMode/acp/**/*.{ts,tsx}"],
     rules: {
       "no-restricted-imports": "off",
     },
   },
   {
-    files: ["src/modelManagement/**/*.{ts,tsx}"],
+    files: ["apps/obsidian/src/modelManagement/**/*.{ts,tsx}"],
     rules: {
       "no-restricted-imports": "off",
     },
@@ -681,7 +613,10 @@ export default [
   },
 
   {
-    files: ["src/agentMode/**/*.test.{ts,tsx}", "src/projects/{ui,hooks}/**/*.test.{ts,tsx}"],
+    files: [
+      "apps/obsidian/src/agentMode/**/*.test.{ts,tsx}",
+      "apps/obsidian/src/projects/{ui,hooks}/**/*.test.{ts,tsx}",
+    ],
     rules: {
       "@typescript-eslint/no-unsafe-assignment": "off",
       "@typescript-eslint/no-unsafe-argument": "off",
@@ -698,7 +633,7 @@ export default [
   },
 
   {
-    files: ["**/package.json"],
+    files: ["package.json"],
     rules: {
       "depend/ban-dependencies": [
         "error",

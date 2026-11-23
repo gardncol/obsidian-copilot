@@ -1,0 +1,177 @@
+import type { ChatHistoryItem } from "@/components/chat-components/ChatHistoryPopover";
+import { sanitizeVaultPathSegment } from "@/projects/projectPaths";
+import { getCachedProjectRecords } from "@/projects/state";
+import type { RecentUsageManager } from "@/utils/recentUsageManager";
+import { formatDateTime } from "@/utils";
+import { readFrontmatterViaAdapter } from "@/utils/vaultAdapterUtils";
+import { App, TFile } from "obsidian";
+
+function hasKnownProjectPrefix(basename: string): boolean {
+  const records = getCachedProjectRecords();
+
+  const matchesCachedProject = records.some((r) => {
+    const sanitizedPrefix = `${sanitizeVaultPathSegment(r.project.id)}__`;
+    const rawPrefix = `${r.project.id}__`;
+    return basename.startsWith(sanitizedPrefix) || basename.startsWith(rawPrefix);
+  });
+  return matchesCachedProject;
+}
+
+function coerceProjectId(projectId: unknown): string | undefined {
+  if (typeof projectId === "string") return projectId.trim() || undefined;
+  if (typeof projectId === "number") return String(projectId);
+  return undefined;
+}
+
+async function readChatFileProjectId(app: App, file: TFile): Promise<string | undefined> {
+  const fm = app.metadataCache.getFileCache(file)?.frontmatter;
+  let projectId: unknown = fm?.projectId;
+
+  if (projectId === undefined && !fm) {
+    try {
+      const adapterFm = await readFrontmatterViaAdapter(app, file.path);
+      projectId = adapterFm?.projectId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  return coerceProjectId(projectId);
+}
+
+export async function readChatPathProjectId(
+  app: App,
+  filePath: string
+): Promise<string | undefined> {
+  const existingFile = app.vault.getAbstractFileByPath(filePath);
+  return existingFile instanceof TFile ? readChatFileProjectId(app, existingFile) : undefined;
+}
+
+export async function filterChatHistoryFiles(app: App, files: TFile[]): Promise<TFile[]> {
+  const results = await Promise.all(
+    files.map(async (file) => ({
+      file,
+      projectId: await readChatFileProjectId(app, file),
+    }))
+  );
+
+  return results
+    .filter(({ file, projectId }) => !projectId && !hasKnownProjectPrefix(file.basename))
+    .map(({ file }) => file);
+}
+
+export function extractChatTitle(app: App, file: TFile): string {
+  const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
+
+  // Agent Mode notes saved before their title moved to topic keep it only in agentLabel.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/815
+  for (const title of [frontmatter?.topic, frontmatter?.agentLabel]) {
+    if (typeof title === "string" && title.trim()) return title.trim();
+  }
+
+  let basename = file.basename;
+  const rawProjectId = frontmatter?.projectId;
+  const projectId =
+    typeof rawProjectId === "string"
+      ? rawProjectId.trim()
+      : typeof rawProjectId === "number"
+        ? String(rawProjectId)
+        : "";
+
+  const projectPrefixes = projectId
+    ? [`${sanitizeVaultPathSegment(projectId)}__`, `${projectId}__`]
+    : [];
+  const projectPrefix = projectPrefixes.find((prefix) => basename.startsWith(prefix));
+  // Agent Mode names project chat notes agent__…, like global ones, instead of <projectId>__….
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/809
+  basename = projectPrefix
+    ? basename.slice(projectPrefix.length)
+    : basename.replace(/^[a-zA-Z0-9_-]+__/, "");
+
+  return basename
+    .replace(/\{\$date\}|\d{8}/g, "")
+    .replace(/\{\$time\}|\d{6}/g, "")
+    .replace(/[@_]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function extractChatDate(app: App, file: TFile): Date {
+  const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
+
+  if (frontmatter && frontmatter.epoch) {
+    return new Date(frontmatter.epoch as number);
+  } else {
+    return new Date(file.stat.ctime);
+  }
+}
+
+export function extractChatLastAccessedAtMs(app: App, file: TFile): number | null {
+  const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
+  const rawValue = frontmatter?.lastAccessedAt;
+
+  if (typeof rawValue === "number" && Number.isFinite(rawValue) && rawValue > 0) {
+    return rawValue;
+  }
+
+  if (typeof rawValue === "string") {
+    const numeric = Number(rawValue);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric;
+    }
+
+    const parsedDate = Date.parse(rawValue);
+    if (Number.isFinite(parsedDate)) {
+      return parsedDate;
+    }
+  }
+
+  return null;
+}
+
+export function parseChatTimestamp(raw: unknown): number | undefined {
+  const value = typeof raw === "string" ? Number(raw) : raw;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+export function fileToHistoryItem(
+  app: App,
+  file: TFile,
+  lastAccessedAtManager: RecentUsageManager<string>
+): ChatHistoryItem {
+  const createdAt = extractChatDate(app, file);
+  const persistedLastAccessedAtMs = extractChatLastAccessedAtMs(app, file);
+  const effectiveLastAccessedAtMs = lastAccessedAtManager.getEffectiveLastUsedAt(
+    file.path,
+    persistedLastAccessedAtMs ?? createdAt.getTime()
+  );
+  const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
+  const rawBackendId = frontmatter?.backendId;
+  const backendId =
+    typeof rawBackendId === "string" && rawBackendId.trim() ? rawBackendId.trim() : undefined;
+  const projectId = coerceProjectId(frontmatter?.projectId);
+  const agent = typeof frontmatter?.teammate === "string" ? frontmatter.teammate.trim() : "";
+  return {
+    id: file.path,
+    title: extractChatTitle(app, file),
+    createdAt,
+    lastAccessedAt: new Date(effectiveLastAccessedAtMs),
+    backendId,
+    projectId,
+    agent: agent || undefined,
+  };
+}
+
+export function getChatDisplayText(app: App, file: TFile): string {
+  const title = extractChatTitle(app, file);
+  const date = extractChatDate(app, file);
+  const formattedDateTime = formatDateTime(date);
+  return `${title} - ${formattedDateTime.display}`;
+}
+
+const BLOCK_START = /^ {0,3}(?:`{3}|~{3}|#{1,6}(?:\s|$)|[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$)|>|\|)/;
+
+// A reply whose first line is a Markdown block (a fence, heading or list) stops being one after the sender label, so it gets its own paragraph; the label keeps its trailing space so every loader still recognizes it. https://github.com/Brevilabs/obsidian-copilot-private/issues/889
+export function formatChatNoteMessage(sender: string, body: string): string {
+  return BLOCK_START.test(body) ? `**${sender}**: \n\n${body}` : `**${sender}**: ${body}`;
+}

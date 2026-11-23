@@ -1,0 +1,223 @@
+{
+  "runsAnywhere": ["core", "protocol", "client/"],
+  "boxes": [
+    {
+      "box": "app",
+      "files": [
+        "apps/obsidian/src/main.ts",
+        "apps/obsidian/src/agentMode/index.ts",
+        "apps/obsidian/src/agentMode/agentModelDiscovery.ts",
+        "apps/obsidian/src/commands/index.ts",
+        "apps/obsidian/src/settings/SettingsPage.tsx",
+        "apps/obsidian/src/settings/settingsTabs.ts",
+        "apps/obsidian/src/settings/v2/SettingsMainV2.tsx",
+        "apps/obsidian/src/components/StartupLoadingView.ts",
+        "apps/obsidian/src/contexts/**"
+      ]
+    },
+    {
+      "box": "protocol",
+      "files": [
+        "apps/obsidian/src/agentMode/session/types.ts",
+        "apps/obsidian/src/agentMode/session/errors.ts",
+        "apps/obsidian/src/types/**",
+        "packages/protocol/**"
+      ]
+    },
+    {
+      "box": "host/chat",
+      "files": ["apps/obsidian/src/agentMode/session/**"]
+    },
+    {
+      "box": "host/backends",
+      "files": [
+        "apps/obsidian/src/agentMode/acp/**",
+        "apps/obsidian/src/agentMode/sdk/**",
+        "apps/obsidian/src/agentMode/backends/**"
+      ]
+    },
+    {
+      "box": "client/chat",
+      "files": ["apps/obsidian/src/agentMode/ui/**", "packages/client/src/index.ts"]
+    },
+    {
+      "box": "client/chatKit",
+      "files": [
+        "apps/obsidian/src/components/chat-components/**",
+        "apps/obsidian/src/components/Markdown.tsx",
+        "apps/obsidian/src/components/TruncatedText.tsx",
+        "apps/obsidian/src/components/recordViewTop.ts",
+        "apps/obsidian/src/context/ChatInputContext.tsx",
+        "apps/obsidian/src/hooks/{useChatFileDrop,useChatScrolling,useDayLabels,useNoteDrag,useSmoothedText,useTailPaging,useIncrementalPaging,useActiveFile,useChatBackendModelOptions,useResolvedChatBackendModel}.ts"
+      ]
+    },
+    {
+      "box": "client/features/navigator",
+      "files": [
+        "apps/obsidian/src/agentMode/navigator/**/*.tsx",
+        "apps/obsidian/src/agentMode/navigator/**/{ui,hooks}/**"
+      ]
+    },
+    {
+      "box": "host/features/navigator",
+      "files": ["apps/obsidian/src/agentMode/navigator/**"]
+    },
+    {
+      "box": "client/features/skills",
+      "files": [
+        "apps/obsidian/src/agentMode/skills/**/*.tsx",
+        "apps/obsidian/src/agentMode/skills/**/{ui,hooks}/**"
+      ]
+    },
+    {
+      "box": "host/features/skills",
+      "files": [
+        "apps/obsidian/src/agentMode/skills/**",
+        "apps/obsidian/src/builtinSkills/**",
+        "apps/obsidian/src/settings/{builtinSkillPreferences,skillLoadErrorState}.ts"
+      ]
+    },
+    {
+      "box": "client/features/teammates",
+      "files": ["apps/obsidian/src/agents/**/*.tsx", "apps/obsidian/src/agents/**/{ui,hooks}/**"]
+    },
+    {
+      "box": "host/features/teammates",
+      "files": ["apps/obsidian/src/agents/**"]
+    },
+    {
+      "box": "client/features/projects",
+      "files": [
+        "apps/obsidian/src/projects/**/*.tsx",
+        "apps/obsidian/src/projects/**/{ui,hooks}/**"
+      ]
+    },
+    {
+      "box": "host/features/projects",
+      "files": ["apps/obsidian/src/projects/**", "apps/obsidian/src/instructions/**"]
+    },
+    {
+      "box": "client/features/miyo",
+      "files": [
+        "apps/obsidian/src/miyo/**/*.tsx",
+        "apps/obsidian/src/miyo/**/{ui,hooks}/**",
+        "apps/obsidian/src/hooks/{useChatRelevantNotes,useLiveRelevantNotesRefresh}.ts"
+      ]
+    },
+    {
+      "box": "host/features/miyo",
+      "files": [
+        "apps/obsidian/src/miyo/**",
+        "apps/obsidian/src/components/RelevantNotesView.tsx",
+        "apps/obsidian/src/search/chatRelevantNotesContext.ts"
+      ]
+    },
+    {
+      "box": "client/features/connectors",
+      "files": [
+        "apps/obsidian/src/connectors/**/*.tsx",
+        "apps/obsidian/src/connectors/**/{ui,hooks}/**"
+      ]
+    },
+    {
+      "box": "host/features/connectors",
+      "files": [
+        "apps/obsidian/src/connectors/**",
+        "apps/obsidian/src/settings/v2/components/ConnectorsSettings.tsx"
+      ]
+    },
+    {
+      "box": "client/features/excalidraw",
+      "files": [
+        "apps/obsidian/src/excalidraw/**/*.tsx",
+        "apps/obsidian/src/excalidraw/**/{ui,hooks}/**"
+      ]
+    },
+    {
+      "box": "host/features/excalidraw",
+      "files": ["apps/obsidian/src/excalidraw/**"]
+    },
+    {
+      "box": "host/features/openArtifacts",
+      "files": [
+        "apps/obsidian/src/openArtifacts/**",
+        "apps/obsidian/src/components/modals/OpenArtifactsModal*"
+      ]
+    },
+    {
+      "box": "client/features/customCommands",
+      "files": [
+        "apps/obsidian/src/commands/**/*.tsx",
+        "apps/obsidian/src/commands/**/{ui,hooks}/**",
+        "apps/obsidian/src/components/command-ui/**",
+        "apps/obsidian/src/components/CustomPromptSyntaxInstruction.tsx"
+      ]
+    },
+    {
+      "box": "host/features/customCommands",
+      "files": [
+        "apps/obsidian/src/commands/**",
+        "apps/obsidian/src/settings/v2/components/CommandSettings.tsx"
+      ]
+    },
+    {
+      "box": "quickChat",
+      "files": [
+        "apps/obsidian/src/components/{Chat,CopilotView}.tsx",
+        "apps/obsidian/src/components/{quick-ask,composer}/**",
+        "apps/obsidian/src/settings/v2/components/{QuickChatPanel,ChatModelEnableList,LegacyChatPromptsNotice}*",
+        "apps/obsidian/src/{core,memory,tools,LLMProviders,state,mentions,imageProcessing,context,system-prompts,editor,pdf,cache}/**",
+        "apps/obsidian/src/search/v3/**",
+        "apps/obsidian/src/search/RetrieverFactory*",
+        "apps/obsidian/src/hooks/{use-streaming-chat-session,useChatManager,useRecentUsageManagerRevision,useLatestVersion}.ts",
+        "apps/obsidian/src/{chainType,chainUtils,chatUtils,langchainStream,contextProcessor,composerUtils,types,error,noteUtils}.ts",
+        "apps/obsidian/src/{chatUtils,composerUtils,contextProcessor,langchainStream}.*.ts"
+      ]
+    },
+    {
+      "box": "host/platform",
+      "files": [
+        "apps/obsidian/src/settings/**",
+        "apps/obsidian/src/{modelManagement,entitlement,services,selection,search}/**",
+        "apps/obsidian/src/{aiParams,plusUtils,logFileManager}.ts",
+        "apps/obsidian/src/{plusUtils,logFileManager}.*.ts",
+        "apps/obsidian/src/components/{modals,release-update}/**"
+      ]
+    },
+    {
+      "box": "core",
+      "files": [
+        "apps/obsidian/src/{utils,lib,hooks,styles,__tests__}/**",
+        "apps/obsidian/src/components/ui/**",
+        "apps/obsidian/src/components/gallery-hosts.*",
+        "apps/obsidian/src/{constants,context,errorFormat,logger,utils}.ts",
+        "apps/obsidian/src/**/*.test.{ts,tsx}",
+        "packages/core/**"
+      ]
+    }
+  ],
+  "edges": {
+    "core": [],
+    "protocol": ["core"],
+    "client/chatKit": ["core", "protocol"],
+    "client/chat": ["core", "protocol", "client/chatKit"],
+    "client/features/*": ["core", "protocol", "client/chatKit", "client/chat"],
+    "host/platform": ["core"],
+    "host/chat": ["core", "host/platform", "protocol"],
+    "host/backends": ["core", "host/platform", "protocol", "host/chat"],
+    "host/features/*": ["core", "host/platform", "protocol", "host/chat"],
+    "quickChat": ["core", "host/platform", "protocol", "client/chatKit"],
+    "app": [
+      "core",
+      "host/platform",
+      "protocol",
+      "client/chatKit",
+      "client/chat",
+      "host/chat",
+      "host/backends",
+      "client/features/*",
+      "host/features/*",
+      "quickChat"
+    ]
+  }
+}

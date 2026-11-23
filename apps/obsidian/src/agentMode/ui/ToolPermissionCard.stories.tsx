@@ -1,0 +1,180 @@
+import type { PermissionPrompt, SessionId } from "@/agentMode/session/types";
+import { ToolPermissionCard } from "@/agentMode/ui/ToolPermissionCard";
+import { AskedAgentRequester } from "@/agents/agentMode/ui/AskedAgentRequester";
+import { LEO } from "@/agents/ui/testing/rosterFixtures";
+import type { Meta, StoryObj } from "@/lib/story";
+import * as React from "react";
+
+type ToolPermissionCardProps = React.ComponentProps<typeof ToolPermissionCard>;
+
+const request = {
+  sessionId: "gallery-session" as SessionId,
+  toolCall: {
+    toolCallId: "gallery-permission",
+    status: "pending",
+    title: "Edit launch brief.md",
+  },
+  options: [
+    { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
+    {
+      optionId: "allow_always",
+      name: "Allow always",
+      kind: "allow_always",
+      description:
+        "Covers Edit(launch brief.md). Saved to .claude/settings.local.json in the vault folder (for a project chat, the project note's folder), for later chats there. Remove it there to undo.",
+    },
+    { optionId: "reject_once", name: "Deny once", kind: "reject_once" },
+  ],
+} satisfies PermissionPrompt;
+
+const meta = {
+  title: "Agent Mode/Tool Permission Card",
+  component: ToolPermissionCard,
+  args: {
+    request,
+    onResolve: () => undefined,
+  },
+  parameters: { gallery: { host: "leaf", layout: "padded" } },
+} satisfies Meta<ToolPermissionCardProps>;
+export default meta;
+
+export const Default: StoryObj<ToolPermissionCardProps> = {};
+
+export const MultipleFiles: StoryObj<ToolPermissionCardProps> = {
+  args: {
+    request: {
+      ...request,
+      toolCall: {
+        ...request.toolCall,
+        title: "Update the launch brief and project roadmap",
+        kind: "edit",
+        content: [
+          {
+            type: "diff",
+            path: "Projects/Launch brief.md",
+            oldText: "Draft review",
+            newText: "Review the launch brief on Friday.",
+          },
+          {
+            type: "diff",
+            path: "Projects/Roadmap.md",
+            oldText: "Launch planning",
+            newText: "Schedule the launch review.",
+          },
+        ],
+      },
+    },
+  },
+};
+
+export const WebSearchQuery: StoryObj<ToolPermissionCardProps> = {
+  args: {
+    toolName: "websearch",
+    request: {
+      ...request,
+      toolCall: {
+        ...request.toolCall,
+        title: "latest stable version of Node.js 2026",
+        kind: "other",
+        rawInput: { query: "latest stable version of Node.js 2026" },
+      },
+    },
+  },
+};
+
+export const OpencodeCopilotTool: StoryObj<ToolPermissionCardProps> = {
+  args: {
+    request: {
+      ...request,
+      toolCall: {
+        ...request.toolCall,
+        title: "execute",
+        kind: "other",
+        rawInput: {
+          code: 'const res = await tools["obsidian-copilot"].fakeremote_remember({ fact: "Orion ships Friday" });\nreturn res;',
+        },
+      },
+    },
+  },
+};
+
+const codexCommand =
+  'python3 -c \'from pathlib import Path; p = Path("/Users/me/Vault/launch-brief.md"); p.write_text("Review on Friday")\'';
+
+export const CodexCommandPrefix: StoryObj<ToolPermissionCardProps> = {
+  args: {
+    toolName: codexCommand,
+    request: {
+      ...request,
+      toolCall: {
+        ...request.toolCall,
+        title: "Run command",
+        kind: "execute",
+        rawInput: { command: codexCommand },
+      },
+      options: [
+        { optionId: "allow_once", name: "Yes, proceed", kind: "allow_once" },
+        {
+          optionId: "accept_execpolicy_amendment",
+          name: `Yes, and don't ask again for commands that start with \`${codexCommand}\``,
+          kind: "allow_always",
+          description:
+            "Saved to rules/default.rules in your Codex home (~/.codex by default) for all later Codex chats. Delete it there to undo.",
+        },
+        {
+          optionId: "cancel",
+          name: "No, and tell Codex what to do differently",
+          kind: "reject_once",
+        },
+      ],
+    },
+  },
+};
+
+export const SubagentRequester: StoryObj<ToolPermissionCardProps> = {
+  args: {
+    requester:
+      'general-purpose "Audit every project note for stale launch dates and summarize what changed since the last review"',
+    request: {
+      ...request,
+      toolCall: {
+        ...request.toolCall,
+        title: "Bash: wc -w Projects/Launch brief.md",
+        kind: "execute",
+        rawInput: { command: "wc -w 'Projects/Launch brief.md'" },
+      },
+    },
+  },
+};
+
+export const AskedAgentRequesterCard: StoryObj<ToolPermissionCardProps> = {
+  args: {
+    requester: <AskedAgentRequester agent={LEO} />,
+    request: {
+      ...request,
+      toolCall: {
+        ...request.toolCall,
+        title: "Edit Finance/October books.md",
+        kind: "edit",
+        rawInput: { file_path: "Finance/October books.md" },
+      },
+    },
+  },
+};
+
+const longCommand =
+  "cd /Users/me/Documents/Obsidian/Research-Vault/Projects/2026-launch && mv 'Drafts/launch-brief-final-final-v3.md' 'Archive/2026/launch-brief-final-final-v3.md' && ls";
+
+export const LongCommandDetails: StoryObj<ToolPermissionCardProps> = {
+  args: {
+    request: {
+      ...request,
+      toolCall: {
+        ...request.toolCall,
+        title: "Move the final launch brief into the archive",
+        kind: "execute",
+        rawInput: { command: longCommand, cwd: "/Users/me/Documents/Obsidian/Research-Vault" },
+      },
+    },
+  },
+};

@@ -1,0 +1,1869 @@
+import { AI_SENDER } from "@/constants";
+import { logInfo, logWarn } from "@/logger";
+import { AgentMessageStore } from "@/agentMode/session/AgentMessageStore";
+import { GLOBAL_SCOPE, type ProjectScopeId } from "@/agentMode/session/scope";
+import {
+  AgentChatMessage,
+  AgentMcpServer,
+  AgentMessagePart,
+  AgentToolKind,
+  AgentQuestionAnswers,
+  AskUserQuestionPrompt,
+  BackendDescriptor,
+  BackendId,
+  BackendProcess,
+  BackendState,
+  CopilotMode,
+  CurrentPlan,
+  EnabledModelEntry,
+  ModelSelection,
+  PermissionDecision,
+  PermissionPrompt,
+  PermissionRequester,
+  PlanDecisionAction,
+  PromptContent,
+  QueuedPrompt,
+  SessionAgent,
+  SessionEvent,
+  SessionId,
+  PlanUsage,
+  SessionUsage,
+  StopReason,
+  AgentToolStatus,
+  TaskEndStatus,
+  TaskStart,
+  ToolCallDelta,
+  ToolCallSnapshot,
+  TurnDiff,
+  TurnFileChange,
+} from "@/agentMode/session/types";
+import { MessageContext } from "@/types/message";
+import { err2String, formatDateTime } from "@/utils";
+import { Notice, type App, type DataAdapter } from "obsidian";
+import { MethodUnsupportedError } from "@/agentMode/session/errors";
+import {
+  diffTargetPaths,
+  editTargetPaths,
+  isCapturableVaultPath,
+  toVaultTargetPath,
+  type EditTargetSource,
+} from "@/agentMode/session/editTargets";
+import {
+  buildTurnFileChange,
+  filePatchesByVaultPath,
+  revertFilePatch,
+  type FileCaptures,
+} from "@/agentMode/session/turnFileChanges";
+import { TurnTracker, type TurnOutcome, type TurnSend } from "@/agentMode/session/TurnTracker";
+import { joinPosix } from "@/utils/pathUtils";
+import { getVaultBase } from "@/utils/vaultPath";
+import { savedChatImagePath } from "@/utils/chatImagePersistence";
+import { getEffectiveConversationsFolder } from "@/settings/copilotFolder";
+import { deriveChatTitleFromMessages } from "@/agentMode/session/chatHistoryMerge";
+import { isCompactCommand } from "@/commands/compactCommand";
+import {
+  buildConversationHistoryBlock,
+  type ConversationHistoryBlock,
+  SAVED_HISTORY_MAX_CHARS,
+} from "@/agentMode/session/conversationHistory";
+import { v4 as uuidv4 } from "uuid";
+import { getSettings } from "@/settings/model";
+import {
+  EMPTY_ENABLED_MODELS,
+  ENABLED_MODEL_WAIT_MS,
+  noEnabledModelError,
+  pickEnabledModel,
+} from "@/agentMode/session/enabledModelSelection";
+import {
+  buildPromptBlocks,
+  buildUserMessage,
+  extractText,
+  OUTPUT_LIMIT_CONTINUATION_PROMPT,
+  serializeWebTabContext,
+} from "@/agentMode/session/promptEnvelope";
+import {
+  findToolCallPart,
+  mergeToolCallUpdate,
+  planToPart,
+  toolCallToPart,
+  tryReadExitPlanModeCall,
+  upsertCompactionPart,
+} from "@/agentMode/session/messageParts";
+import { SessionHistoryReplay } from "@/agentMode/session/SessionHistoryReplay";
+import type { AgentMention } from "@/agents/agentMentions";
+import { InteractiveRequests } from "@/agentMode/session/InteractiveRequests";
+import { UsageTracker } from "@/agentMode/session/UsageTracker";
+import { replayPersistedMode } from "@/agentMode/session/replayPersistedMode";
+import type { FeedbackEvidence } from "@/agentMode/session/feedback/feedbackOffer";
+import {
+  EMPTY_CHAT_EXTENSIONS,
+  EMPTY_CHAT_STATES,
+  NO_SAVED_CHAT_STATES,
+  readChatState,
+  withChatState,
+  type ChatExtension,
+  type ChatStateHost,
+  type ChatStateKey,
+  type ChatStates,
+  type ChatView,
+  type PromptNote,
+  type SavedChatStates,
+  type TurnFailure,
+} from "@/agentMode/session/chatExtension";
+
+const DEFAULT_TITLE_PREFIX = "New session";
+const EMPTY_TASKS: readonly AgentTask[] = Object.freeze([]);
+const EMPTY_MESSAGES: readonly AgentChatMessage[] = Object.freeze([]);
+const NO_EARLIER_CHATS: readonly string[] = Object.freeze([]);
+const EMPTY_TOOL_CALL_IDS: ReadonlySet<string> = new Set();
+const LAUNCH_CARD_STATUS: Record<TaskEndStatus, AgentToolStatus> = {
+  completed: "completed",
+  failed: "failed",
+  stopped: "cancelled",
+};
+const UNSTARTED_TASK_END: Partial<Record<AgentToolStatus, TaskEndStatus>> = {
+  completed: "completed",
+  failed: "failed",
+  cancelled: "stopped",
+};
+
+export interface AgentTask extends TaskStart {
+  status: "running" | TaskEndStatus;
+  model?: string;
+  outputFile?: string;
+  summary?: string;
+}
+
+function isTaskLifecycleUpdate(update: SessionEvent["update"]): boolean {
+  return (
+    update.sessionUpdate === "task_started" ||
+    update.sessionUpdate === "task_progress" ||
+    update.sessionUpdate === "task_ended"
+  );
+}
+
+function toolCallTarget(call: ToolCallSnapshot | ToolCallDelta): EditTargetSource {
+  return {
+    locations: call.locations,
+    input: call.rawInput,
+    diffPaths: diffTargetPaths(call.content),
+  };
+}
+
+async function readVaultText(adapter: DataAdapter, path: string): Promise<string | null> {
+  try {
+    return await adapter.read(path);
+  } catch {
+    return null;
+  }
+}
+
+export type AgentSessionStatus =
+  | "starting"
+  | "idle"
+  | "running"
+  | "awaiting_permission"
+  | "error"
+  | "closed";
+
+export const ATTENTION_TRIGGER_STATUSES: ReadonlySet<AgentSessionStatus> = new Set([
+  "idle",
+  "error",
+  "awaiting_permission",
+]);
+
+export interface AgentSessionListener {
+  onMessagesChanged(): void;
+  onStatusChanged(status: AgentSessionStatus): void;
+  onModelChanged?(): void;
+  onLabelChanged?(): void;
+  onCurrentPlanChanged?(): void;
+  onNeedsAttentionChanged?(needsAttention: boolean): void;
+  onTasksChanged?(): void;
+  onQueuedPromptsChanged?(): void;
+  onPromptSent?(): void;
+  onDisconnected?(): void;
+}
+
+interface HeldPrompt {
+  settle: (outcome: StopReason | Promise<StopReason>) => void;
+  send: () => Promise<StopReason>;
+}
+
+export interface ProjectContextUpdates {
+  epoch: number;
+  block: string;
+}
+
+export interface ProjectContextUpdatesHooks {
+  getProjectContextUpdates?: () => ProjectContextUpdates | null;
+  markProjectContextUpdatesDelivered?: (epoch: number) => void;
+}
+
+export interface AgentSessionStartOptions extends ProjectContextUpdatesHooks {
+  backend: BackendProcess;
+  cwd: string;
+  internalId: string;
+  chatInputId?: string;
+  backendId: BackendId;
+  projectId?: ProjectScopeId;
+  defaultModelSelection?: ModelSelection;
+  defaultMode?: CopilotMode | null;
+  getDescriptor?: () => BackendDescriptor | undefined;
+  getDisplayName?: (backendId: BackendId) => string;
+  getApp?: () => App;
+  getProjectContextBlock?: () => string;
+  mcpServers?: ReadonlyArray<AgentMcpServer>;
+  chatExtensions?: readonly ChatExtension<unknown>[];
+  agentSlug?: string;
+  agent?: SessionAgent | null;
+  observeSessionEvent?: (event: SessionEvent) => void;
+}
+
+export interface AgentSessionStateOptions extends ProjectContextUpdatesHooks {
+  backend: BackendProcess;
+  backendSessionId: SessionId;
+  internalId: string;
+  chatInputId?: string;
+  backendId: BackendId;
+  projectId?: ProjectScopeId;
+  defaultModelSelection?: ModelSelection;
+  defaultMode?: CopilotMode | null;
+  cwd?: string | null;
+  getDescriptor?: () => BackendDescriptor | undefined;
+  getDisplayName?: (backendId: BackendId) => string;
+  getApp?: () => App;
+  chatExtensions?: readonly ChatExtension<unknown>[];
+  agentSlug?: string;
+  agent?: SessionAgent | null;
+  observeSessionEvent?: (event: SessionEvent) => void;
+}
+
+export class AgentSession implements ChatStateHost, ChatView {
+  readonly store = new AgentMessageStore();
+  readonly internalId: string;
+  readonly chatInputId: string;
+  readonly backendId: BackendId;
+  readonly planFeedbackDelivery: "permission" | "next_turn";
+  readonly projectId: ProjectScopeId;
+  readonly agentSlug: string | null;
+  private readonly observeSessionEvent: ((event: SessionEvent) => void) | null;
+  readonly ready: Promise<void>;
+  private backendSessionId: SessionId | null = null;
+  private readonly backend: BackendProcess;
+  readonly cwd: string | null;
+  private readonly getProjectContextBlockFn: (() => string) | null;
+  private firstPromptSent = false;
+  private lastSentWebTabBlock: string | null = null;
+  private readonly getDescriptor: (() => BackendDescriptor | undefined) | null;
+  private readonly getDisplayName: ((backendId: BackendId) => string) | null;
+  private readonly getApp: (() => App) | null;
+  private readonly getProjectContextUpdatesFn: (() => ProjectContextUpdates | null) | null;
+  private readonly markProjectContextUpdatesDeliveredFn: ((epoch: number) => void) | null;
+  private cachedStatus: AgentSessionStatus = "starting";
+  private cachedReplyRunning = false;
+  private startupFailed = false;
+  private startupSettled = false;
+  private agentBusy = false;
+  private resendSavedHistory = false;
+  private continuedFrom: readonly string[] = NO_EARLIER_CHATS;
+  private readonly turns: TurnTracker;
+  private readonly heldPrompts: HeldPrompt[] = [];
+  private readonly taskFiles = new Map<string, FileCaptures>();
+  private readonly tasks = new Map<string, AgentTask>();
+  private taskList: readonly AgentTask[] = EMPTY_TASKS;
+  private readonly taskContent = new Map<string, AgentMessageStore>();
+  private listeners = new Set<AgentSessionListener>();
+  private unregisterSessionHandler: (() => void) | null = null;
+  private currentState: BackendState | null = null;
+  private label: string | null = null;
+  private labelSource: "user" | "agent" | null = null;
+  private disposed = false;
+  private resumeSelection: ModelSelection | undefined;
+  private resumeMode: CopilotMode | null | undefined;
+  private settleReady: () => void = () => {};
+  private readonly historyReplay = new SessionHistoryReplay({
+    store: this.store,
+    scheduleNotifyMessages: () => this.scheduleNotifyMessages(),
+  });
+  private readonly requests: InteractiveRequests;
+  private readonly usageTracker: UsageTracker;
+  private chatStates: ChatStates = EMPTY_CHAT_STATES;
+  private readonly chatExtensions: readonly ChatExtension<unknown>[];
+
+  private needsAttention = false;
+  private notifyScheduled = false;
+  private notifyHandle: ReturnType<typeof setTimeout> | number | null = null;
+
+  constructor(opts: AgentSessionStateOptions | AgentSessionStartOptions) {
+    this.backend = opts.backend;
+    this.internalId = opts.internalId;
+    this.chatInputId = opts.chatInputId ?? uuidv4();
+    this.backendId = opts.backendId;
+    this.turns = new TurnTracker({
+      store: this.store,
+      backendId: this.backendId,
+      prompt: (input) => this.backend.prompt({ sessionId: this.backendSessionId!, ...input }),
+      notifyMessages: () => this.notifyMessages(),
+      notifyQueuedPrompts: () => this.notifyQueuedPromptsChanged(),
+      promptsWithdrawn: (prompts) => {
+        // A web page that rode only on a withdrawn message never reached the agent, so it goes in full next time. https://github.com/Brevilabs/obsidian-copilot-private/issues/747
+        if (prompts.some((p) => (p.context?.webTabs?.length ?? 0) > 0)) {
+          this.lastSentWebTabBlock = null;
+        }
+      },
+      notifyStatus: () => this.recomputeStatusIfChanged(),
+      runningTaskToolCallIds: () =>
+        new Set(
+          [...this.tasks.values()]
+            .filter((task) => task.status === "running" && task.taskId !== undefined)
+            .map((task) => task.toolCallId)
+        ),
+      endLaunches: (status) => this.endLaunchesOfEndedTurn(status),
+      captureFileChanges: (files, messageId, turnDiff) =>
+        this.finalizeFileChanges(files, this.store, messageId, turnDiff),
+      onTurnCompleted: () => void this.pollSessionTitle(),
+      onTurnFailed: (errorText, error) => this.applyTurnFailure({ errorText, error }),
+    });
+    this.planFeedbackDelivery = opts.getDescriptor?.()?.planFeedbackDelivery ?? "permission";
+    this.projectId = opts.projectId ?? GLOBAL_SCOPE;
+    this.agentSlug = opts.agentSlug ?? null;
+    this.observeSessionEvent =
+      "observeSessionEvent" in opts ? (opts.observeSessionEvent ?? null) : null;
+    this.cwd = opts.cwd ?? null;
+    this.getDescriptor = opts.getDescriptor ?? null;
+    this.getDisplayName = opts.getDisplayName ?? null;
+    this.getApp = opts.getApp ?? null;
+    this.getProjectContextUpdatesFn = opts.getProjectContextUpdates ?? null;
+    this.markProjectContextUpdatesDeliveredFn = opts.markProjectContextUpdatesDelivered ?? null;
+    this.chatExtensions = opts.chatExtensions ?? EMPTY_CHAT_EXTENSIONS;
+    this.getProjectContextBlockFn =
+      "getProjectContextBlock" in opts ? (opts.getProjectContextBlock ?? null) : null;
+    this.requests = new InteractiveRequests({
+      store: this.store,
+      internalId: this.internalId,
+      getReplyId: () => this.turns.getReplyId(),
+      hasLeftPlanMode: () => this.hasLeftPlanMode(),
+      recomputeStatus: () => this.recomputeStatusIfChanged(),
+      notifyMessages: () => this.notifyMessages(),
+      notifyPlanChanged: () => this.notifyCurrentPlanChanged(),
+    });
+    this.usageTracker = new UsageTracker({
+      backend: this.backend,
+      getModelId: () => this.currentState?.model?.current.baseModelId,
+      whenReady: () => this.ready,
+      notifyMessages: () => this.notifyMessages(),
+    });
+    if ("backendSessionId" in opts) {
+      this.backendSessionId = opts.backendSessionId;
+      this.resumeSelection = opts.defaultModelSelection;
+      this.resumeMode = opts.defaultMode;
+      // The backend replays the chat as live-shaped updates until its load response; collect them from the first frame. https://github.com/Brevilabs/obsidian-copilot-private/issues/602
+      this.historyReplay.start();
+      this.unregisterSessionHandler = this.backend.registerSessionHandler(
+        opts.backendSessionId,
+        (event) => this.handleSessionEvent(event)
+      );
+      this.ready = new Promise<void>((resolve) => {
+        this.settleReady = resolve;
+      });
+    } else {
+      this.currentState = null;
+      this.ready = this.initialize(opts);
+    }
+  }
+
+  completeResume(state: BackendState | null): void {
+    this.historyReplay.end();
+    this.currentState = state;
+    const settle = () => {
+      this.startupSettled = true;
+      this.recomputeStatusIfChanged();
+      this.settleReady();
+    };
+    const selection = this.resumeSelection ?? state?.model?.current;
+    if (!selection || !state) return settle();
+    void this.applyStartupSelection(selection, this.resumeMode)
+      // A resumed chat stays open to pick an enabled model; sends on any other model are refused.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/625
+      .catch((e) => logWarn(`[AgentMode] resumed ${this.backendId} session kept its model`, e))
+      .finally(settle);
+  }
+
+  static start(opts: AgentSessionStartOptions): AgentSession {
+    return new AgentSession(opts);
+  }
+
+  getBackendSessionId(): SessionId | null {
+    return this.backendSessionId;
+  }
+
+  private async initialize(opts: AgentSessionStartOptions): Promise<void> {
+    const { backend, cwd, defaultModelSelection } = opts;
+    try {
+      const resp = await backend.newSession({
+        cwd,
+        projectId: this.projectId,
+        mcpServers: opts.mcpServers,
+        agent: opts.agent ?? undefined,
+      });
+      // A new chat replaced before its session is up, as by picking another face on the new chat page, would leave that session running in the agent.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/588
+      if (this.disposed) {
+        void backend.closeSession?.({ sessionId: resp.sessionId }).catch((e) => {
+          logWarn(`[AgentMode] closing the session of a chat closed while it started failed`, e);
+        });
+        return;
+      }
+      const modelLog = resp.state.model
+        ? `model=${resp.state.model.current.baseModelId} (available: ${resp.state.model.availableModels
+            .map((m) => m.baseModelId)
+            .join(", ")})`
+        : "agent did not report model state";
+      logInfo(`[AgentMode] session ${resp.sessionId} ${modelLog}`);
+      this.backendSessionId = resp.sessionId;
+      this.currentState = resp.state;
+      this.unregisterSessionHandler = this.backend.registerSessionHandler(resp.sessionId, (event) =>
+        this.handleSessionEvent(event)
+      );
+      if (this.disposed) {
+        this.unregisterSessionHandler();
+        this.unregisterSessionHandler = null;
+        return;
+      }
+      this.recomputeStatusIfChanged();
+      this.notifyModelChanged();
+
+      const selection = defaultModelSelection ?? resp.state.model?.current;
+      if (selection) await this.applyStartupSelection(selection, opts.defaultMode);
+      this.startupSettled = true;
+      this.recomputeStatusIfChanged();
+    } catch (err) {
+      if (this.disposed) return;
+      logWarn(`[AgentMode] session/new failed for ${this.internalId}`, err);
+      this.startupFailed = true;
+      this.recomputeStatusIfChanged();
+      throw err instanceof Error ? err : new Error(err2String(err));
+    }
+  }
+
+  getState(): BackendState | null {
+    return this.currentState;
+  }
+
+  async setModel(modelId: string): Promise<void> {
+    if (this.getStatus() === "closed") throw new Error("Session is closed");
+    if (!this.backendSessionId) throw new Error("Session is still starting");
+    const next = await this.backend.setSessionModel({
+      sessionId: this.backendSessionId,
+      modelId,
+    });
+    void this.usageTracker.dropUsageWindowOnModelChange(next);
+    this.currentState = next;
+    this.notifyModelChanged();
+  }
+
+  async applyModelWireId(wireId: string): Promise<void> {
+    const apply = this.currentState?.model?.apply;
+    if (apply?.kind === "setConfigOption") {
+      await this.setConfigOption(apply.configId, wireId);
+      return;
+    }
+    await this.setModel(wireId);
+  }
+
+  private async applyStartupSelection(
+    selection: ModelSelection,
+    mode: CopilotMode | null = null
+  ): Promise<void> {
+    const descriptor = this.getDescriptor?.();
+    if (!descriptor) return;
+    if (this.runsOnlyEnabledModels()) {
+      await this.settleOnEnabledModel(descriptor, selection, mode);
+      return;
+    }
+    try {
+      await descriptor.applySelection(this, selection);
+    } catch (e) {
+      logWarn(
+        `[AgentMode] could not apply startup selection ${selection.baseModelId}; keeping the agent's model`,
+        e
+      );
+    }
+  }
+
+  // OpenCode answers session/new before Copilot's models and modes load and lists them in a later
+  // update, so wait for them; a chat must never show or run a model the user did not enable.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/625
+  private async settleOnEnabledModel(
+    descriptor: BackendDescriptor,
+    seed: ModelSelection,
+    mode: CopilotMode | null
+  ): Promise<void> {
+    const enabled = this.enabledModels();
+    const pick = () => pickEnabledModel(enabled, this.currentState?.model, seed);
+    await this.waitForState(
+      () => pick().settled && (!mode || this.currentState?.mode?.apply[mode] !== undefined)
+    );
+    if (this.disposed) return;
+    const { target } = pick();
+    if (!target) throw noEnabledModelError(descriptor.displayName);
+    await descriptor.applySelection(this, target);
+    await replayPersistedMode(this, mode);
+  }
+
+  private waitForState(isReady: () => boolean): Promise<void> {
+    if (isReady()) return Promise.resolve();
+    return new Promise((resolve) => {
+      const unsubscribe = this.subscribe({
+        onMessagesChanged: () => {},
+        onStatusChanged: (status) => {
+          if (status === "closed") finish();
+        },
+        onModelChanged: () => {
+          if (isReady()) finish();
+        },
+      });
+      const timer = window.setTimeout(() => finish(), ENABLED_MODEL_WAIT_MS);
+      const finish = (): void => {
+        window.clearTimeout(timer);
+        unsubscribe();
+        resolve();
+      };
+    });
+  }
+
+  private isOnModelNotEnabled(): boolean {
+    const current = this.currentState?.model?.current.baseModelId;
+    return (
+      this.runsOnlyEnabledModels() &&
+      current !== undefined &&
+      !this.enabledModels().some((entry) => entry.baseModelId === current)
+    );
+  }
+
+  private runsOnlyEnabledModels(): boolean {
+    return this.getDescriptor?.()?.routesCopilotModels === true;
+  }
+
+  private enabledModels(): readonly EnabledModelEntry[] {
+    return this.getDescriptor?.()?.getEnabledModelEntries?.(getSettings()) ?? EMPTY_ENABLED_MODELS;
+  }
+
+  async setConfigOption(configId: string, value: string): Promise<void> {
+    if (this.getStatus() === "closed") throw new Error("Session is closed");
+    if (!this.backendSessionId) throw new Error("Session is still starting");
+    const next = await this.backend.setSessionConfigOption({
+      sessionId: this.backendSessionId,
+      configId,
+      value,
+    });
+    void this.usageTracker.dropUsageWindowOnModelChange(next);
+    this.currentState = next;
+    this.notifyModelChanged();
+    this.clearCurrentPlanIfModeLeft();
+  }
+
+  async setMode(modeId: string): Promise<void> {
+    if (this.getStatus() === "closed") throw new Error("Session is closed");
+    if (!this.backendSessionId) throw new Error("Session is still starting");
+    const next = await this.backend.setSessionMode({
+      sessionId: this.backendSessionId,
+      modeId,
+    });
+    this.currentState = next;
+    this.notifyModelChanged();
+    this.clearCurrentPlanIfModeLeft();
+  }
+
+  canSwitchModel(): boolean | null {
+    if (this.getStatus() === "starting") return false;
+    return this.currentState?.model?.apply.kind === "setConfigOption"
+      ? this.backend.isSetSessionConfigOptionSupported()
+      : this.backend.isSetSessionModelSupported();
+  }
+
+  canSwitchEffort(): boolean | null {
+    if (this.getStatus() === "starting") return false;
+    const descriptor = this.getDescriptor?.();
+    if (!descriptor) return null;
+    if (descriptor.wire.effortConfigFor) return this.backend.isSetSessionConfigOptionSupported();
+    return this.currentState?.model?.apply.kind === "setConfigOption"
+      ? this.backend.isSetSessionConfigOptionSupported()
+      : this.backend.isSetSessionModelSupported();
+  }
+
+  canSwitchMode(): boolean | null {
+    if (this.getStatus() === "starting") return false;
+    const mode = this.currentState?.mode;
+    if (!mode) return null;
+    const sample = mode.options[0];
+    if (!sample) return null;
+    const spec = mode.apply[sample.value];
+    if (!spec) return null;
+    // One picker choice may need both Codex collaboration and approval settings.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/551
+    const steps = spec.kind === "sequence" ? spec.steps : [spec];
+    const capabilities = steps.map((step) =>
+      step.kind === "setConfigOption"
+        ? this.backend.isSetSessionConfigOptionSupported()
+        : this.backend.isSetSessionModeSupported()
+    );
+    if (capabilities.includes(false)) return false;
+    if (capabilities.includes(null)) return null;
+    return true;
+  }
+
+  getStatus(): AgentSessionStatus {
+    if (this.disposed) return "closed";
+    if (this.startupFailed) return "error";
+    if (this.backendSessionId === null || !this.startupSettled) return "starting";
+    // The chat is not finished while its subagents work, although the agent's replies end between them. https://github.com/Brevilabs/obsidian-copilot-private/issues/757
+    const working = this.turns.isMainTurnRunning() || this.agentBusy;
+    // A background task can ask while the agent is idle; its request must not hold the composer or show Stop. https://github.com/Brevilabs/obsidian-copilot-private/issues/175
+    if (working && this.requests.hasPending()) {
+      return "awaiting_permission";
+    }
+    if (working) return "running";
+    if (this.turns.hasLastTurnFailed()) return "error";
+    return "idle";
+  }
+
+  getNeedsAttention(): boolean {
+    return this.needsAttention;
+  }
+
+  markNeedsAttention(): void {
+    if (this.needsAttention) return;
+    this.needsAttention = true;
+    this.notifyNeedsAttentionChanged();
+  }
+
+  clearNeedsAttention(): void {
+    if (!this.needsAttention) return;
+    this.needsAttention = false;
+    this.notifyNeedsAttentionChanged();
+  }
+
+  private notifyNeedsAttentionChanged(): void {
+    for (const l of this.listeners) {
+      try {
+        l.onNeedsAttentionChanged?.(this.needsAttention);
+      } catch (e) {
+        logWarn(`[AgentMode] needs-attention listener threw`, e);
+      }
+    }
+  }
+
+  hasUserVisibleMessages(): boolean {
+    return this.store.getDisplayMessages().length > 0;
+  }
+
+  loadDisplayMessages(messages: AgentChatMessage[]): void {
+    this.store.loadMessages(messages);
+    this.notifyMessages();
+  }
+
+  resendSavedHistoryOnNextTurn(): void {
+    this.resendSavedHistory = true;
+  }
+
+  setContinuedFrom(continuedFrom: readonly string[] = NO_EARLIER_CHATS): void {
+    this.continuedFrom = continuedFrom;
+  }
+
+  getLabel(): string | null {
+    return this.label;
+  }
+
+  getLabelSource(): "user" | "agent" | null {
+    return this.labelSource;
+  }
+
+  setLabel(label: string | null): void {
+    const next = label?.trim() ? label.trim() : null;
+    if (next === this.label) return;
+    this.label = next;
+    this.labelSource = next ? "user" : null;
+    this.notifyLabelChanged();
+  }
+
+  restoreLabel(label: string, source: "user" | "agent"): void {
+    if (source === "user") this.setLabel(label);
+    else this.applyAgentLabel(label);
+  }
+
+  private backendSummarizesTitle(): boolean {
+    return this.getDescriptor?.()?.summarizesSessionTitle ?? true;
+  }
+
+  private applyAgentLabel(label: string | null | undefined): void {
+    if (this.labelSource === "user") return;
+    const next = label?.trim() ? label.trim() : null;
+    if (next === this.label) return;
+    this.label = next;
+    this.labelSource = next ? "agent" : null;
+    this.notifyLabelChanged();
+  }
+
+  private notifyLabelChanged(): void {
+    for (const l of this.listeners) {
+      try {
+        l.onLabelChanged?.();
+      } catch (e) {
+        logWarn(`[AgentMode] label listener threw`, e);
+      }
+    }
+  }
+
+  subscribe(listener: AgentSessionListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  sendPrompt(
+    displayText: string,
+    context?: MessageContext,
+    promptContent?: PromptContent[]
+  ): { userMessageId: string; turn: Promise<StopReason> } {
+    // Agents only compact when /compact is the whole prompt, so nothing rides along with it.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/634
+    const sendsCompact = isCompactCommand(displayText);
+    if (sendsCompact) {
+      displayText = displayText.trim();
+      context = undefined;
+      promptContent = undefined;
+    }
+    const status = this.getStatus();
+    if (status === "starting") {
+      throw new Error("Session is still starting");
+    }
+    if (status === "closed") {
+      throw new Error("Session is closed");
+    }
+    // Compaction is a whole turn of its own, so it waits for the agent to finish. https://github.com/Brevilabs/obsidian-copilot-private/issues/509
+    const busy =
+      status === "running" ||
+      status === "awaiting_permission" ||
+      this.turns.getQueuedPrompts().length > 0;
+    if (busy) {
+      // A plugin message must reach a busy agent that cannot read it mid-turn, so it waits for the turn to end. https://github.com/Brevilabs/obsidian-copilot-private/issues/943
+      if (!this.acceptsMidTurnPrompts()) {
+        return this.holdPrompt(displayText, context, promptContent, sendsCompact);
+      }
+      if (sendsCompact) throw new Error("Session already has a turn in flight");
+      const queued = this.queuePrompt(displayText, context, promptContent);
+      this.notifyPromptSent();
+      return queued;
+    }
+    return this.startPrompt(uuidv4(), displayText, context, promptContent, sendsCompact);
+  }
+
+  private holdPrompt(
+    displayText: string,
+    context: MessageContext | undefined,
+    promptContent: PromptContent[] | undefined,
+    sendsCompact: boolean
+  ): { userMessageId: string; turn: Promise<StopReason> } {
+    const promptId = uuidv4();
+    let settle!: (outcome: StopReason | Promise<StopReason>) => void;
+    const turn = new Promise<StopReason>((resolve) => (settle = resolve));
+    this.heldPrompts.push({
+      settle,
+      send: () =>
+        this.startPrompt(promptId, displayText, context, promptContent, sendsCompact).turn,
+    });
+    return { userMessageId: promptId, turn };
+  }
+
+  private dropHeldPrompts(): void {
+    for (const held of this.heldPrompts.splice(0)) held.settle("cancelled");
+  }
+
+  private startPrompt(
+    promptId: string,
+    displayText: string,
+    context: MessageContext | undefined,
+    promptContent: PromptContent[] | undefined,
+    sendsCompact: boolean
+  ): { userMessageId: string; turn: Promise<StopReason> } {
+    const userMessageId = this.store.addMessage(
+      buildUserMessage(promptId, displayText, context, promptContent)
+    );
+    this.notifyPromptSent();
+    this.turns.openReply();
+
+    if (this.label === null && !this.backendSummarizesTitle()) {
+      this.applyAgentLabel(deriveChatTitleFromMessages(this.store.getDisplayMessages()));
+    }
+
+    const send = this.turns.startSend();
+    const turn = this.runTurn(
+      displayText,
+      userMessageId,
+      context,
+      promptContent,
+      sendsCompact,
+      send
+    );
+    return { userMessageId, turn };
+  }
+
+  acceptsMidTurnPrompts(): boolean {
+    return this.getDescriptor?.()?.midTurnDelivery === true;
+  }
+
+  getQueuedPrompts(): readonly QueuedPrompt[] {
+    return this.turns.getQueuedPrompts();
+  }
+
+  canWithdrawPrompts(): boolean {
+    return this.getDescriptor?.()?.withdraw === true;
+  }
+
+  takeWithdrawnPrompts(): readonly QueuedPrompt[] {
+    return this.turns.takeWithdrawnPrompts();
+  }
+
+  withdrawPrompt(promptId: string): Promise<void> {
+    return this.turns.withdrawQueued(promptId, () =>
+      this.backend.withdraw?.({ sessionId: this.backendSessionId!, promptId })
+    );
+  }
+
+  canStopTasks(): boolean {
+    return this.getDescriptor?.()?.stopTask === true;
+  }
+
+  async stopTask(taskId: string): Promise<void> {
+    await this.backend.stopTask?.({ sessionId: this.backendSessionId!, taskId });
+  }
+
+  private queuePrompt(
+    text: string,
+    context: MessageContext | undefined,
+    promptContent: PromptContent[] | undefined
+  ): { userMessageId: string; turn: Promise<StopReason> } {
+    const prompt: QueuedPrompt = { id: uuidv4(), text, context, promptContent };
+    const turn = this.turns.queue(prompt, async () => {
+      const webTabBlock =
+        (context?.webTabs?.length ?? 0) > 0 ? await serializeWebTabContext(context) : "";
+      return () => {
+        const blocks = buildPromptBlocks(
+          text,
+          context,
+          promptContent,
+          webTabBlock === this.lastSentWebTabBlock ? "" : webTabBlock,
+          null,
+          null,
+          null
+        );
+        if (webTabBlock) this.lastSentWebTabBlock = webTabBlock;
+        return blocks;
+      };
+    });
+    return { userMessageId: prompt.id, turn };
+  }
+
+  private notifyPromptSent(): void {
+    for (const l of this.listeners) {
+      try {
+        l.onPromptSent?.();
+      } catch (e) {
+        logWarn(`[AgentMode] prompt sent listener threw`, e);
+      }
+    }
+  }
+
+  private notifyQueuedPromptsChanged(): void {
+    for (const l of this.listeners) {
+      try {
+        l.onQueuedPromptsChanged?.();
+      } catch (e) {
+        logWarn(`[AgentMode] queued prompts listener threw`, e);
+      }
+    }
+  }
+
+  private async runTurn(
+    displayText: string,
+    userMessageId: string,
+    context: MessageContext | undefined,
+    promptContent: PromptContent[] | undefined,
+    sendsCompact: boolean,
+    send: TurnSend
+  ): Promise<StopReason> {
+    const outcome = await this.runPrompt(
+      displayText,
+      userMessageId,
+      context,
+      promptContent,
+      sendsCompact,
+      send
+    );
+    if (outcome.error !== undefined) throw outcome.error;
+    return outcome.stopReason;
+  }
+
+  private async runPrompt(
+    displayText: string,
+    userMessageId: string,
+    context: MessageContext | undefined,
+    promptContent: PromptContent[] | undefined,
+    sendsCompact: boolean,
+    { signal, pushed: onPushed }: TurnSend
+  ): Promise<TurnOutcome> {
+    try {
+      const stoppedTurnEnded = this.turns.whenStoppedTurnEnds(signal);
+      if (stoppedTurnEnded) await stoppedTurnEnded;
+
+      const hasWebTabs = (context?.webTabs?.length ?? 0) > 0;
+      const webTabBlock = hasWebTabs ? await serializeWebTabContext(context) : "";
+      // Stop already closed this prompt's reply, so nothing after it may run or open another. https://github.com/Brevilabs/obsidian-copilot-private/issues/175
+      if (signal.aborted || this.disposed) return { stopReason: "cancelled" };
+      if (this.isOnModelNotEnabled()) {
+        return this.turns.refuse(
+          `This chat's model isn't enabled for ${this.displayNameFor(this.backendId)}. Pick an enabled model to continue.`
+        );
+      }
+      // Project context and its updates ride the next normal turn.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/634
+      const isFirstTurn = !this.firstPromptSent && !sendsCompact;
+      const projectContextBlock = isFirstTurn ? (this.getProjectContextBlockFn?.() ?? null) : null;
+      const projectContextUpdates = sendsCompact
+        ? null
+        : (this.getProjectContextUpdatesFn?.() ?? null);
+      const projectContextUpdatesBlock = projectContextUpdates?.block ?? null;
+
+      // A reopened chat whose agent session is gone from this device sends its saved turns once.
+      // https://github.com/logancyang/obsidian-copilot/issues/3643
+      const sendsSavedHistory = this.resendSavedHistory && !sendsCompact;
+      const savedHistory = sendsSavedHistory ? this.priorHistoryBlock(userMessageId) : null;
+      const historyBlock = savedHistory?.text ?? null;
+      // A feature card's tool call returns before the user answers it, so the answer rides their next message.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/860
+      const promptNotes = sendsCompact ? [] : this.takePromptNotes();
+      const leadingContextBlock = sendsCompact
+        ? null
+        : [historyBlock, ...promptNotes.map(({ note }) => note.note)]
+            .filter(Boolean)
+            .join("\n\n") || null;
+      // The agent keeps every earlier turn, so resending an unchanged page fills its context
+      // window with copies. https://github.com/Brevilabs/obsidian-copilot-private/issues/667
+      const webTabPromptBlock = webTabBlock === this.lastSentWebTabBlock ? "" : webTabBlock;
+      const promptBlocks = buildPromptBlocks(
+        displayText,
+        context,
+        promptContent,
+        webTabPromptBlock,
+        projectContextBlock,
+        leadingContextBlock,
+        projectContextUpdatesBlock
+      );
+
+      // The agent answers without the oldest saved messages, so the user learns why it may not know them.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+      if (savedHistory?.truncated) {
+        new Notice("This chat is too long to send in full, so its oldest messages were left out.");
+      }
+      const outcome = await this.turns.submit(
+        { promptId: userMessageId, prompt: promptBlocks },
+        true,
+        onPushed
+      );
+      if (outcome.error !== undefined) return outcome;
+      // A note counts as told only once the backend accepts the prompt.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/860
+      for (const { extension, note } of promptNotes) {
+        this.updateChatState(extension.key, note.delivered);
+      }
+      if (sendsSavedHistory && outcome.stopReason !== "cancelled") {
+        this.resendSavedHistory = false;
+      }
+      if (isFirstTurn) this.firstPromptSent = true;
+      if (webTabBlock) this.lastSentWebTabBlock = webTabBlock;
+      if (projectContextUpdates) {
+        this.markProjectContextUpdatesDeliveredFn?.(projectContextUpdates.epoch);
+      }
+      if (outcome.stopReason === "max_tokens" && !signal.aborted) {
+        return await this.turns.submit(
+          {
+            promptId: uuidv4(),
+            prompt: [{ type: "text", text: OUTPUT_LIMIT_CONTINUATION_PROMPT }],
+          },
+          false
+        );
+      }
+      return outcome;
+    } catch (err) {
+      this.turns.failReply(err);
+      throw err;
+    } finally {
+      onPushed();
+      this.turns.endSend(signal);
+    }
+  }
+
+  private priorHistoryBlock(userMessageId: string): ConversationHistoryBlock | null {
+    const app = this.getApp?.();
+    const vaultBase = app ? getVaultBase(app) : null;
+    return buildConversationHistoryBlock(
+      this.store.getDisplayMessages().filter((m) => m.id !== userMessageId),
+      SAVED_HISTORY_MAX_CHARS,
+      vaultBase,
+      (image) => (app ? savedChatImagePath(app, getEffectiveConversationsFolder(), image) : null),
+      // A project chat's agent works in the project folder, so the notes are named by full path.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+      this.continuedFrom.map((note) => (vaultBase ? joinPosix(vaultBase, note) : note))
+    );
+  }
+
+  private displayNameFor(backendId: BackendId): string {
+    return this.getDisplayName?.(backendId) ?? backendId;
+  }
+
+  // Stop ends only the main reply; each background task is stopped from the running-tasks list. https://github.com/Brevilabs/obsidian-copilot-private/issues/788
+  async cancel(options: { keepUnread?: boolean } = {}): Promise<void> {
+    const status = this.getStatus();
+    if (status !== "running" && status !== "awaiting_permission") return;
+    if (!this.backendSessionId) return;
+    const keepUnread = options.keepUnread === true;
+    // Stop never sends a waiting message, and a closing chat stops its turn the same way. https://github.com/Brevilabs/obsidian-copilot-private/issues/943
+    this.dropHeldPrompts();
+    this.turns.stop(!keepUnread && this.canWithdrawPrompts());
+    this.requests.rejectToolRequestsFrom("main");
+    this.requests.withdrawQuestions();
+    await this.backend
+      .cancel({ sessionId: this.backendSessionId, ...(keepUnread ? { keepUnread } : {}) })
+      .catch((e: unknown) => {
+        logWarn(`[AgentMode] cancel notification failed`, e);
+      });
+  }
+
+  isReplyRunning(): boolean {
+    return this.turns.isMainTurnRunning();
+  }
+
+  async releaseBackendSession(): Promise<void> {
+    const backendSessionId = this.backendSessionId;
+    if (!backendSessionId || !this.backend.closeSession) {
+      throw new Error("This agent can't shut down a single chat.");
+    }
+    this.dropHeldPrompts();
+    try {
+      await this.backend.closeSession({ sessionId: backendSessionId });
+    } catch (error) {
+      if (error instanceof MethodUnsupportedError) {
+        throw new Error("This agent can't shut down a single chat.");
+      }
+      throw error;
+    }
+  }
+
+  async dispose(): Promise<void> {
+    this.disposed = true;
+    this.unregisterSessionHandler?.();
+    this.unregisterSessionHandler = null;
+    this.requests.dispose();
+    this.turns.dispose();
+    this.dropHeldPrompts();
+    this.recomputeStatusIfChanged();
+    this.cancelScheduledNotify();
+    this.listeners.clear();
+  }
+
+  handlePlanProposalPermission(request: PermissionPrompt): Promise<PermissionDecision> {
+    return this.requests.handlePlanProposalPermission(request);
+  }
+
+  resolvePlanProposalPermission(toolCallId: string, allow: boolean, denyMessage?: string): void {
+    this.requests.resolvePlanProposalPermission(toolCallId, allow, denyMessage);
+  }
+
+  getCurrentPlan(): CurrentPlan | null {
+    return this.requests.getCurrentPlan();
+  }
+
+  getTasks(): readonly AgentTask[] {
+    return this.taskList;
+  }
+
+  getTaskMessages(toolCallId: string): readonly AgentChatMessage[] {
+    return this.taskContent.get(toolCallId)?.getDisplayMessages() ?? EMPTY_MESSAGES;
+  }
+
+  getReportEvidence(): FeedbackEvidence {
+    return {
+      backendId: this.backendId,
+      model: this.currentState?.model?.current.baseModelId ?? null,
+      sessionId: this.backendSessionId,
+      raisedAt: new Date().toISOString(),
+    };
+  }
+
+  // An @-mentioned agent's run is saved on the message that asked it, often an earlier one.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/944
+  setAgentMentions(messageId: string, mentions: readonly AgentMention[]): void {
+    if (this.store.setAgentMentions(messageId, mentions)) this.notifyMessages();
+  }
+
+  getDisplayMessages(): readonly AgentChatMessage[] {
+    return this.store.getDisplayMessages();
+  }
+
+  getChatStates(): ChatStates {
+    return this.chatStates;
+  }
+
+  readChatState<S>(key: ChatStateKey<S>): S {
+    return readChatState(this.chatStates, key);
+  }
+
+  updateChatState<S>(key: ChatStateKey<S>, change: (state: S, chat: ChatView) => S): void {
+    const next = withChatState(this.chatStates, key, change(this.readChatState(key), this));
+    if (next === this.chatStates) return;
+    this.chatStates = next;
+    this.notifyMessages();
+  }
+
+  private applyTurnFailure(failure: TurnFailure): void {
+    for (const extension of this.chatExtensions) {
+      if (!extension.onTurnFailed) continue;
+      const state = extension.onTurnFailed(this.readChatState(extension.key), this, failure);
+      this.chatStates = withChatState(this.chatStates, extension.key, state);
+    }
+  }
+
+  getReloadableChatStates(): ChatStates {
+    return this.chatExtensions
+      .filter((extension) => extension.keepOnReload)
+      .reduce(
+        (states, { key }) => withChatState(states, key, this.readChatState(key)),
+        EMPTY_CHAT_STATES
+      );
+  }
+
+  restoreChatStates(states: ChatStates): void {
+    this.chatStates = states;
+    this.notifyMessages();
+  }
+
+  getNoteChatStates(): SavedChatStates {
+    const saved = this.chatExtensions.flatMap(({ key, readFromNote }) => {
+      const state = this.readChatState(key);
+      return readFromNote && state !== key.initial ? [[key.id, state] as const] : [];
+    });
+    return saved.length > 0 ? Object.fromEntries(saved) : NO_SAVED_CHAT_STATES;
+  }
+
+  restoreNoteChatStates(saved: SavedChatStates): void {
+    const restored = this.chatExtensions.reduce(
+      (states, { key, readFromNote }) =>
+        readFromNote && saved[key.id] !== undefined
+          ? withChatState(states, key, readFromNote(saved[key.id]))
+          : states,
+      this.chatStates
+    );
+    if (restored !== this.chatStates) this.restoreChatStates(restored);
+  }
+
+  private takePromptNotes(): { extension: ChatExtension<unknown>; note: PromptNote<unknown> }[] {
+    return this.chatExtensions.flatMap((extension) => {
+      const note = extension.beforePrompt?.(this.readChatState(extension.key));
+      return note ? [{ extension, note }] : [];
+    });
+  }
+
+  getSessionUsage(): SessionUsage | null {
+    return this.usageTracker.getSessionUsage();
+  }
+
+  getPlanUsage(): PlanUsage | null {
+    return this.usageTracker.getPlanUsage();
+  }
+
+  seedSessionUsage(usage: SessionUsage | undefined): void {
+    void this.usageTracker.seedSessionUsage(usage);
+  }
+
+  finalizePlanDecision(
+    proposalId: string,
+    decision?: PlanDecisionAction,
+    feedbackText?: string
+  ): boolean {
+    return this.requests.finalizePlanDecision(proposalId, decision, feedbackText);
+  }
+
+  clearCurrentPlanIfModeLeft(): void {
+    this.requests.clearCurrentPlanIfModeLeft();
+  }
+
+  hasPendingPlanPermission(): boolean {
+    return this.requests.hasPendingPlanPermission();
+  }
+
+  handleToolPermission(request: PermissionPrompt): Promise<PermissionDecision> {
+    const files = this.filesOf(request.requester ?? "main");
+    if (files) this.observeToolCall(files, request.toolCall.kind, toolCallTarget(request.toolCall));
+    return this.requests.handleToolPermission(request);
+  }
+
+  resolveToolPermission(toolCallId: string, optionId: string): void {
+    this.requests.resolveToolPermission(toolCallId, optionId);
+  }
+
+  rejectToolRequestsFrom(requester: PermissionRequester): void {
+    this.requests.rejectToolRequestsFrom(requester);
+  }
+
+  getPendingToolPermissions(): PermissionPrompt[] {
+    return this.requests.getPendingToolPermissions();
+  }
+
+  handleAskUserQuestion(request: AskUserQuestionPrompt): Promise<AgentQuestionAnswers> {
+    return this.requests.handleAskUserQuestion(request);
+  }
+
+  resolveAskUserQuestion(requestId: string, answers: AgentQuestionAnswers): void {
+    this.requests.resolveAskUserQuestion(requestId, answers);
+  }
+
+  getPendingAskUserQuestions(): AskUserQuestionPrompt[] {
+    return this.requests.getPendingAskUserQuestions();
+  }
+
+  private handleSessionEvent(event: SessionEvent): void {
+    // A custom agent asked from another chat is done by the sub agent rule, which reads the raw events.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/944
+    this.observeSessionEvent?.(event);
+    const update = event.update;
+    // Task lifecycle updates describe the task itself, even when reported from inside a task. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+    if (event.taskToolCallId !== undefined && !isTaskLifecycleUpdate(update)) {
+      this.applyTaskContent(event.taskToolCallId, update);
+      return;
+    }
+    // A user message echoed outside the replay is already shown from the prompt that sent it. https://github.com/Brevilabs/obsidian-copilot-private/issues/602
+    if (update.sessionUpdate === "user_message_chunk" && !this.historyReplay.isOpen()) return;
+    if (this.historyReplay.append(update, event.occurredAt)) {
+      return;
+    }
+    switch (update.sessionUpdate) {
+      case "message_delivered":
+        this.turns.deliverPrompt(update.promptId);
+        return;
+      case "messages_withdrawn":
+        this.turns.withdrawPrompts(update.promptIds);
+        return;
+      case "session_disconnected":
+        this.handleDisconnect(update.error);
+        return;
+      case "task_started":
+        // A launch from the stopped turn has no card left to settle it, so only a task the agent actually starts is listed. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+        if (
+          update.taskId === undefined &&
+          event.taskToolCallId === undefined &&
+          this.turns.isStopping()
+        ) {
+          return;
+        }
+        this.applyTaskUpdate(update);
+        return;
+      case "task_progress":
+      case "task_ended":
+        this.applyTaskUpdate(update);
+        return;
+      case "turn_started":
+        this.turns.startTurn(update.turnId, update.startedAt);
+        return;
+      case "turn_ended":
+        this.turns.endTurn(update);
+        return;
+      case "busy_changed":
+        this.agentBusy = update.busy;
+        this.recomputeStatusIfChanged();
+        return;
+    }
+    const toolOwnerMessageId =
+      update.sessionUpdate === "tool_call_update"
+        ? this.store.findMessageIdWithToolCall(update.toolCallId)
+        : undefined;
+    const toolOwnerStopReason = toolOwnerMessageId
+      ? this.store.getMessage(toolOwnerMessageId)?.turnStopReason
+      : undefined;
+    const isPriorToolUpdate =
+      toolOwnerMessageId !== undefined &&
+      toolOwnerStopReason !== undefined &&
+      toolOwnerStopReason !== "cancelled";
+
+    if (this.turns.isStopping()) {
+      switch (update.sessionUpdate) {
+        case "agent_message_chunk":
+        case "agent_thought_chunk":
+          this.turns.dropStoppedContent(update.messageId);
+          logWarn(
+            `[AgentMode] dropping ${update.sessionUpdate} from cancelled turn ${this.internalId}`
+          );
+          return;
+        case "tool_call":
+        case "plan":
+        case "compaction":
+          logWarn(
+            `[AgentMode] dropping ${update.sessionUpdate} from cancelled turn ${this.internalId}`
+          );
+          return;
+        case "tool_call_update":
+          if (isPriorToolUpdate) break;
+          logWarn(
+            `[AgentMode] dropping ${update.sessionUpdate} from cancelled turn ${this.internalId}`
+          );
+          return;
+      }
+    }
+
+    if (update.sessionUpdate === "session_info_update") {
+      // An update that omits `title` (opencode's compaction and retry markers) leaves the title alone; only an explicit null clears it. https://github.com/Brevilabs/obsidian-copilot-private/issues/632
+      if (update.title !== undefined && this.backendSummarizesTitle()) {
+        this.applyAgentLabel(update.title);
+      }
+      return;
+    }
+    if (update.sessionUpdate === "state_changed") {
+      void this.usageTracker.dropUsageWindowOnModelChange(update.state);
+      this.currentState = update.state;
+      this.notifyModelChanged();
+      this.clearCurrentPlanIfModeLeft();
+      return;
+    }
+    if (update.sessionUpdate === "current_mode_update") {
+      return;
+    }
+    if (update.sessionUpdate === "config_option_update") {
+      return;
+    }
+    if (update.sessionUpdate === "usage_update") {
+      this.usageTracker.applyUsageUpdate(update.usage);
+      return;
+    }
+    if (update.sessionUpdate === "plan_usage_update") {
+      this.usageTracker.applyPlanUsage(update.planUsage);
+      return;
+    }
+
+    if (
+      update.sessionUpdate === "agent_message_chunk" ||
+      update.sessionUpdate === "agent_thought_chunk"
+    ) {
+      const text = extractText(update.content);
+      if (!text) return;
+      const target = this.turns.resolveContentTarget(update.messageId);
+      if (!target) {
+        logWarn(`[AgentMode] dropping ${update.sessionUpdate} — no target for ${this.internalId}`);
+        return;
+      }
+      const appended =
+        update.sessionUpdate === "agent_message_chunk"
+          ? this.store.appendAgentText(target, text)
+          : this.store.appendAgentThought(target, text);
+      if (appended) {
+        this.turns.extendSettledTurn(target);
+        this.scheduleNotifyMessages();
+      }
+      return;
+    }
+
+    const targetMessageId = this.turns.resolveToolTarget(
+      isPriorToolUpdate ? toolOwnerMessageId : undefined
+    );
+    if (!targetMessageId) {
+      logWarn(`[AgentMode] dropping session/update — no placeholder for ${this.internalId}`);
+      return;
+    }
+
+    switch (update.sessionUpdate) {
+      case "tool_call": {
+        this.observeToolCall(this.turns.getTurnFiles(), update.kind, toolCallTarget(update));
+        const exitPlan = tryReadExitPlanModeCall({
+          kind: update.kind,
+          rawInput: update.rawInput,
+          isPlanProposal: update.isPlanProposal,
+        });
+        if (exitPlan) {
+          this.requests.publishGatedPlan(update.toolCallId, exitPlan);
+          if (this.store.upsertAgentPart(targetMessageId, toolCallToPart(update))) {
+            this.scheduleNotifyMessages();
+          }
+          return;
+        }
+        if (this.store.upsertAgentPart(targetMessageId, toolCallToPart(update))) {
+          this.scheduleNotifyMessages();
+        }
+        return;
+      }
+      case "tool_call_update": {
+        const existing = this.findToolCallPart(targetMessageId, update.toolCallId);
+        const merged = mergeToolCallUpdate(existing, this.withEndedTaskStatus(update));
+        // A late update to an earlier turn's call must not count as this turn's edit.
+        // https://github.com/Brevilabs/obsidian-copilot-private/issues/347
+        if (!isPriorToolUpdate) this.observeToolResult(this.turns.getTurnFiles(), merged, update);
+        if (merged.kind === "tool_call") {
+          const exitPlan = tryReadExitPlanModeCall({
+            kind: update.kind ?? merged.toolKind,
+            rawInput: merged.input,
+            isPlanProposal: update.isPlanProposal,
+          });
+          if (exitPlan) {
+            this.requests.publishGatedPlan(merged.id, exitPlan);
+          }
+        }
+        if (this.store.upsertAgentPart(targetMessageId, merged)) {
+          this.scheduleNotifyMessages();
+        }
+        this.endUnstartedTasks();
+        return;
+      }
+      case "plan": {
+        if (this.store.upsertAgentPart(targetMessageId, planToPart(update))) {
+          this.scheduleNotifyMessages();
+        }
+        return;
+      }
+      case "compaction": {
+        const upserted = upsertCompactionPart(this.store, targetMessageId, update);
+        const metered = this.usageTracker.applyCompactedUsage(update);
+        if (upserted || metered) this.scheduleNotifyMessages();
+        return;
+      }
+      default:
+        logInfo(
+          `[AgentMode] ignoring session/update kind=${(update as { sessionUpdate: string }).sessionUpdate}`
+        );
+        return;
+    }
+  }
+
+  private handleDisconnect(error: Error): void {
+    // A launch the agent never started cannot start after the connection is gone. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+    for (const task of this.tasks.values()) {
+      if (task.taskId === undefined && task.status === "running") this.endTask(task, "stopped");
+    }
+    this.agentBusy = false;
+    this.turns.disconnect(error);
+    for (const l of this.listeners) {
+      try {
+        l.onDisconnected?.();
+      } catch (e) {
+        logWarn(`[AgentMode] disconnect listener threw`, e);
+      }
+    }
+  }
+
+  private applyTaskUpdate(
+    update: Extract<
+      SessionEvent["update"],
+      { sessionUpdate: "task_started" | "task_progress" | "task_ended" }
+    >
+  ): void {
+    if (update.sessionUpdate === "task_started") return this.startTask(update);
+    const task = this.taskWithId(update.taskId);
+    if (!task) return;
+    if (update.sessionUpdate === "task_progress") {
+      // Usage counts show only on the launching card, so a usage-only frame leaves task cards alone. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+      if (update.progress) {
+        this.updateLaunchCard({ toolCallId: task.toolCallId, progress: update.progress });
+      }
+      const model = update.model ?? task.model;
+      const outputFile = update.outputFile ?? task.outputFile;
+      if (model === task.model && outputFile === task.outputFile) return;
+      this.tasks.set(task.toolCallId, { ...task, model, outputFile });
+      return this.publishTasks();
+    }
+    this.endTask(task, update.status, update.summary, update.outputFile);
+  }
+
+  // One entry per launching tool call, so a task's card, row and open view keep their identity when its id arrives. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+  private startTask(start: TaskStart): void {
+    const existing = this.tasks.get(start.toolCallId);
+    if (existing?.taskId !== undefined) return;
+    if (start.taskId === undefined && existing && existing.status !== "running") return;
+    this.tasks.set(start.toolCallId, {
+      ...existing,
+      toolCallId: start.toolCallId,
+      kind: start.kind,
+      taskId: start.taskId ?? existing?.taskId,
+      description: start.description || existing?.description || "",
+      prompt: start.prompt ?? existing?.prompt,
+      subagentType: start.subagentType ?? existing?.subagentType,
+      command: start.command ?? existing?.command,
+      status: "running",
+    });
+    this.publishTasks();
+  }
+
+  // A resumed subagent runs again under its earlier task id, listed under the resuming call, so the task's updates belong to its latest run. https://github.com/logancyang/obsidian-copilot/issues/3842
+  private taskWithId(taskId: string): AgentTask | undefined {
+    let latest: AgentTask | undefined;
+    for (const task of this.tasks.values()) if (task.taskId === taskId) latest = task;
+    return latest;
+  }
+
+  // A launch that settles before the agent names its task never became one: it was denied, failed or stopped. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+  private endUnstartedTasks(): void {
+    for (const task of this.tasks.values()) {
+      if (task.taskId !== undefined || task.status !== "running") continue;
+      const card = this.findLaunchCard(task.toolCallId)?.card;
+      const status = card?.kind === "tool_call" ? UNSTARTED_TASK_END[card.status] : undefined;
+      if (status) this.endTask(task, status);
+    }
+  }
+
+  // The agent names every task its turn launched before the turn ends, so a launch still unnamed then, such as a call cut off mid-stream, never starts. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+  private endLaunchesOfEndedTurn(status: TaskEndStatus): void {
+    for (const task of this.tasks.values()) {
+      if (task.taskId !== undefined || task.status !== "running") continue;
+      if (this.store.findMessageIdWithToolCall(task.toolCallId)) this.endTask(task, status);
+    }
+  }
+
+  private findLaunchCard(
+    toolCallId: string
+  ): { store: AgentMessageStore; messageId: string; card?: AgentMessagePart } | undefined {
+    for (const store of [this.store, ...this.taskContent.values()]) {
+      const messageId = store.findMessageIdWithToolCall(toolCallId);
+      if (!messageId) continue;
+      const card = store
+        .getMessage(messageId)
+        ?.parts?.find((part) => part.kind === "tool_call" && part.id === toolCallId);
+      return { store, messageId, card };
+    }
+    return undefined;
+  }
+
+  private endTask(
+    task: AgentTask,
+    status: TaskEndStatus,
+    summary?: string,
+    outputFile?: string
+  ): void {
+    this.tasks.set(task.toolCallId, {
+      ...task,
+      status,
+      summary,
+      outputFile: outputFile ?? task.outputFile,
+    });
+    // The launching card follows its task. A summary is not a result: a subagent's is boilerplate about its hand-back. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+    this.updateLaunchCard({ toolCallId: task.toolCallId, status: LAUNCH_CARD_STATUS[status] });
+    // A request from a task that has ended can no longer be answered, so its card must not stay open. https://github.com/Brevilabs/obsidian-copilot-private/issues/748
+    if (task.taskId !== undefined) this.requests.rejectToolRequestsFrom({ taskId: task.taskId });
+    // A tool call cut short by its task's end would otherwise spin in the task's view forever. https://github.com/Brevilabs/obsidian-copilot-private/issues/748
+    const content = this.taskContent.get(task.toolCallId);
+    const contentId = content?.getDisplayMessages()[0]?.id;
+    if (contentId) content?.stopToolCalls(contentId, EMPTY_TOOL_CALL_IDS);
+    this.endUnstartedTasks();
+    this.publishTasks();
+    void this.finalizeTaskFileChanges(task.toolCallId);
+  }
+
+  private async finalizeTaskFileChanges(toolCallId: string): Promise<void> {
+    const files = this.taskFiles.get(toolCallId);
+    this.taskFiles.delete(toolCallId);
+    const store = this.taskContent.get(toolCallId);
+    const messageId = store?.getDisplayMessages()[0]?.id;
+    if (!files || !store || !messageId) return;
+    try {
+      if (await this.finalizeFileChanges(files, store, messageId)) this.notifyTasks();
+    } catch (err) {
+      logWarn(`[AgentMode] could not capture a task's file changes`, err);
+    }
+  }
+
+  // A task's end decides its launching card's status; the tool's result can arrive after a stop and must not turn it into a failure. https://github.com/Brevilabs/obsidian-copilot-private/issues/748
+  private withEndedTaskStatus<T extends { toolCallId: string }>(
+    update: T
+  ): T | (T & { status: AgentToolStatus }) {
+    const taskStatus = this.tasks.get(update.toolCallId)?.status;
+    return taskStatus && taskStatus !== "running"
+      ? { ...update, status: LAUNCH_CARD_STATUS[taskStatus] }
+      : update;
+  }
+
+  private updateLaunchCard(delta: ToolCallDelta): void {
+    const launch = this.findLaunchCard(delta.toolCallId);
+    if (!launch) return;
+    const { store, messageId, card } = launch;
+    if (store.upsertAgentPart(messageId, mergeToolCallUpdate(card, delta))) {
+      if (store === this.store) this.scheduleNotifyMessages();
+    }
+  }
+
+  private applyTaskContent(toolCallId: string, update: SessionEvent["update"]): void {
+    let store = this.taskContent.get(toolCallId);
+    if (!store) {
+      store = new AgentMessageStore();
+      this.taskContent.set(toolCallId, store);
+    }
+    const messageId =
+      store.getDisplayMessages()[0]?.id ??
+      store.addMessage({
+        message: "",
+        sender: AI_SENDER,
+        timestamp: formatDateTime(new Date()),
+        isVisible: true,
+        parts: [],
+      });
+    let changed: boolean;
+    switch (update.sessionUpdate) {
+      case "agent_message_chunk":
+        changed = store.appendAgentText(messageId, extractText(update.content));
+        break;
+      case "agent_thought_chunk":
+        changed = store.appendAgentThought(messageId, extractText(update.content));
+        break;
+      case "tool_call":
+        this.observeToolCall(this.filesOfTask(toolCallId), update.kind, toolCallTarget(update));
+        changed = store.upsertAgentPart(messageId, toolCallToPart(update));
+        break;
+      case "tool_call_update": {
+        const existing = store
+          .getMessage(messageId)
+          ?.parts?.find((part) => part.kind === "tool_call" && part.id === update.toolCallId);
+        // A call cut short by its task's end fails afterwards on a disconnect; it reads stopped, as after Stop. https://github.com/Brevilabs/obsidian-copilot-private/issues/748
+        const cutShort =
+          existing?.kind === "tool_call" &&
+          existing.status === "cancelled" &&
+          update.status === "failed";
+        const merged = mergeToolCallUpdate(
+          existing,
+          cutShort ? { ...update, status: "cancelled" } : this.withEndedTaskStatus(update)
+        );
+        this.observeToolResult(this.filesOfTask(toolCallId), merged, update);
+        changed = store.upsertAgentPart(messageId, merged);
+        this.endUnstartedTasks();
+        break;
+      }
+      default:
+        return;
+    }
+    // A task's own messages change on every step it takes; the task list keeps its identity so the chat's cards do not re-render. https://github.com/Brevilabs/obsidian-copilot-private/issues/749
+    if (changed) this.notifyTasks();
+  }
+
+  private publishTasks(): void {
+    this.taskList = this.tasks.size === 0 ? EMPTY_TASKS : Object.freeze([...this.tasks.values()]);
+    this.notifyTasks();
+  }
+
+  private notifyTasks(): void {
+    for (const l of this.listeners) {
+      try {
+        l.onTasksChanged?.();
+      } catch (e) {
+        logWarn(`[AgentMode] tasks listener threw`, e);
+      }
+    }
+  }
+
+  // A subagent's edits belong to its own capture, never to the card of the main-agent run open beside it. https://github.com/Brevilabs/obsidian-copilot-private/issues/669
+  private filesOf(requester: PermissionRequester): FileCaptures | undefined {
+    if (requester === "main") return this.turns.getTurnFiles();
+    // An @-mentioned agent edits from its own chat, and its reply carries the change, so it is never this chat's.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/946
+    if ("agent" in requester) return undefined;
+    const toolCallId = this.taskWithId(requester.taskId)?.toolCallId;
+    return toolCallId === undefined ? undefined : this.filesOfTask(toolCallId);
+  }
+
+  private filesOfTask(toolCallId: string): FileCaptures {
+    let files = this.taskFiles.get(toolCallId);
+    if (!files) {
+      files = new Map();
+      this.taskFiles.set(toolCallId, files);
+    }
+    return files;
+  }
+
+  private observeToolResult(
+    files: FileCaptures,
+    part: AgentMessagePart,
+    update: ToolCallDelta
+  ): void {
+    if (part.kind !== "tool_call") return;
+    this.observeToolCall(
+      files,
+      part.toolKind,
+      { locations: part.locations, input: part.input, diffPaths: diffTargetPaths(part.output) },
+      update.originalFiles
+    );
+  }
+
+  private observeToolCall(
+    files: FileCaptures,
+    kind: AgentToolKind | undefined,
+    target: EditTargetSource,
+    originalFiles?: Readonly<Record<string, string | null>>
+  ): void {
+    const changes = kind === "edit" || kind === "delete";
+    if (!changes && kind !== "read") return;
+    const app = this.getApp?.();
+    const adapter = app?.vault?.adapter;
+    if (!app || !adapter) return;
+    const vaultBase = getVaultBase(app);
+    const originals = new Map(
+      Object.entries(originalFiles ?? {}).map(([path, text]) => [
+        toVaultTargetPath(path, vaultBase),
+        text,
+      ])
+    );
+    for (const path of editTargetPaths(target, vaultBase)) {
+      if (!isCapturableVaultPath(path)) continue;
+      let capture = files.get(path);
+      if (!capture) {
+        // Read as the call is announced; an Auto-mode write can land first, so a write-time original wins.
+        // https://github.com/Brevilabs/obsidian-copilot-private/issues/687
+        capture = { edited: false, snapshot: readVaultText(adapter, path) };
+        files.set(path, capture);
+      }
+      if (!changes) continue;
+      capture.edited = true;
+      // Later results report text this turn already changed; the first is the turn's starting file.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/347
+      if (capture.writeTimeBefore === undefined) capture.writeTimeBefore = originals.get(path);
+    }
+  }
+
+  // Before text comes from a source that saw the file at write time; the first-mention snapshot
+  // is only the fallback. https://github.com/Brevilabs/obsidian-copilot-private/issues/347
+  private async finalizeFileChanges(
+    files: FileCaptures,
+    store: AgentMessageStore,
+    messageId: string,
+    turnDiff?: TurnDiff
+  ): Promise<boolean> {
+    const edited = [...files].filter(([, capture]) => capture.edited);
+    const app = this.getApp?.();
+    const adapter = app?.vault?.adapter;
+    if (edited.length === 0 || !app || !adapter) return false;
+    const turnPatches = turnDiff ? filePatchesByVaultPath(turnDiff, getVaultBase(app)) : undefined;
+    const changes = (
+      await Promise.all(
+        edited.map(async ([path, capture]) => {
+          const after = await readVaultText(adapter, path);
+          const patch = turnPatches?.get(path);
+          if (capture.writeTimeBefore === undefined && patch) {
+            capture.writeTimeBefore = revertFilePatch(patch, after);
+          }
+          const before =
+            capture.writeTimeBefore === undefined
+              ? await capture.snapshot
+              : capture.writeTimeBefore;
+          return buildTurnFileChange(path, before, after);
+        })
+      )
+    ).filter((change): change is TurnFileChange => change !== null);
+    return changes.length > 0 && store.setFileChanges(messageId, changes);
+  }
+
+  private findToolCallPart(messageId: string, toolCallId: string): AgentMessagePart | undefined {
+    return findToolCallPart(this.store, messageId, toolCallId);
+  }
+
+  private hasLeftPlanMode(): boolean {
+    if (!this.getDescriptor?.()?.getModeMapping) return false;
+    return this.currentState?.mode?.current !== "plan";
+  }
+
+  private recomputeStatusIfChanged(): void {
+    const next = this.getStatus();
+    const replyRunning = this.isReplyRunning();
+    // A reply can end while subagents keep the chat running; the composer must still swap Stop for Send. https://github.com/Brevilabs/obsidian-copilot-private/issues/788
+    if (next === this.cachedStatus && replyRunning === this.cachedReplyRunning) return;
+    this.cachedStatus = next;
+    this.cachedReplyRunning = replyRunning;
+    // A held message starts the next turn before the chat reports idle, so the composer's held messages and a deferred backend restart keep waiting. https://github.com/Brevilabs/obsidian-copilot-private/issues/943
+    if (next === "idle" || next === "error") {
+      const held = this.heldPrompts.shift();
+      if (held) return held.settle(held.send());
+    }
+    for (const l of this.listeners) {
+      try {
+        l.onStatusChanged(next);
+      } catch (e) {
+        logWarn(`[AgentMode] status listener threw`, e);
+      }
+    }
+  }
+
+  private notifyMessages(): void {
+    this.cancelScheduledNotify();
+    for (const l of this.listeners) {
+      try {
+        l.onMessagesChanged();
+      } catch (e) {
+        logWarn(`[AgentMode] messages listener threw`, e);
+      }
+    }
+  }
+
+  private scheduleNotifyMessages(): void {
+    if (this.notifyScheduled) return;
+    this.notifyScheduled = true;
+    const fire = (): void => {
+      this.notifyHandle = null;
+      this.notifyScheduled = false;
+      this.notifyMessages();
+    };
+    if (typeof requestAnimationFrame !== "undefined") {
+      this.notifyHandle = window.requestAnimationFrame(fire);
+    } else {
+      this.notifyHandle = window.setTimeout(fire, 16);
+    }
+  }
+
+  private cancelScheduledNotify(): void {
+    if (!this.notifyScheduled) return;
+    this.notifyScheduled = false;
+    if (this.notifyHandle !== null) {
+      if (typeof cancelAnimationFrame !== "undefined" && typeof this.notifyHandle === "number") {
+        cancelAnimationFrame(this.notifyHandle);
+      } else {
+        window.clearTimeout(this.notifyHandle as ReturnType<typeof setTimeout>);
+      }
+      this.notifyHandle = null;
+    }
+  }
+
+  private async pollSessionTitle(): Promise<void> {
+    if (this.labelSource === "user") return;
+    if (!this.backendSummarizesTitle()) return;
+    try {
+      const resp = await this.backend.listSessions(this.cwd ? { cwd: this.cwd } : {});
+      const entry = resp.sessions.find((s) => s.sessionId === this.backendSessionId);
+      const title = entry?.title?.trim();
+      if (!title) return;
+      if (title.startsWith(DEFAULT_TITLE_PREFIX)) return;
+      this.applyAgentLabel(title);
+    } catch (err) {
+      if (err instanceof MethodUnsupportedError) return;
+      logWarn(`[AgentMode] session/list title poll failed for ${this.internalId}`, err);
+    }
+  }
+
+  private notifyModelChanged(): void {
+    for (const l of this.listeners) {
+      try {
+        l.onModelChanged?.();
+      } catch (e) {
+        logWarn(`[AgentMode] model listener threw`, e);
+      }
+    }
+  }
+
+  private notifyCurrentPlanChanged(): void {
+    for (const l of this.listeners) {
+      try {
+        l.onCurrentPlanChanged?.();
+      } catch (e) {
+        logWarn(`[AgentMode] plan listener threw`, e);
+      }
+    }
+  }
+}

@@ -1,0 +1,1124 @@
+import { AI_SENDER, USER_SENDER } from "@/constants";
+import { AgentMessagePart, TurnFileChange } from "@/agentMode/session/types";
+import { formatDateTime } from "@/utils";
+import { AgentMessageStore } from "./AgentMessageStore";
+
+jest.mock("@/logger", () => ({
+  logInfo: jest.fn(),
+  logWarn: jest.fn(),
+  logError: jest.fn(),
+}));
+
+const MEMORY_SAVE = {
+  agentName: "Coco",
+  memoryPath: "copilot/teammates/coco/MEMORY.md",
+  rule: "Launch videos lead with user value, not the feature list.",
+};
+
+const MAYA_MENTION = Object.freeze({
+  id: "mention-1",
+  agent: "maya",
+  name: "Maya",
+  status: "finished" as const,
+  startedAt: 1,
+  chat: { backendId: "claude", sessionId: "hidden-1" },
+});
+
+describe("AgentMessageStore", () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  const placeholder = () => ({
+    message: "",
+    sender: AI_SENDER,
+    timestamp: formatDateTime(new Date()),
+    isVisible: true as const,
+    parts: [] as AgentMessagePart[],
+  });
+
+  const compaction = (
+    overrides: Partial<Extract<AgentMessagePart, { kind: "compaction" }>> = {}
+  ): AgentMessagePart => ({
+    kind: "compaction",
+    id: "c1",
+    status: "in_progress",
+    trigger: "manual",
+    startedAtMs: 1_000,
+    ...overrides,
+  });
+
+  const change = (path: string): TurnFileChange => ({
+    path,
+    status: "modified",
+    before: "old\n",
+    after: "new\n",
+    additions: 1,
+    deletions: 1,
+  });
+
+  describe("addMessage()", () => {
+    it("keeps a null timestamp so a replayed message does not show the time it was loaded", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage({ ...placeholder(), timestamp: null });
+
+      expect(store.getMessage(id)?.timestamp).toBeNull();
+    });
+  });
+
+  describe("appendDisplayText()", () => {
+    it("accumulates streaming chunks", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.appendDisplayText(id, "Hello, ");
+      store.appendDisplayText(id, "world.");
+      expect(store.getMessage(id)?.message).toBe("Hello, world.");
+    });
+
+    it("returns false for an unknown message", () => {
+      const store = new AgentMessageStore();
+      expect(store.appendDisplayText("missing", "x")).toBe(false);
+    });
+  });
+
+  describe("appendAgentText()", () => {
+    it("folds successive chunks into one trailing text part", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.appendAgentText(id, "Hello, ");
+      store.appendAgentText(id, "world.");
+      const msg = store.getMessage(id);
+      const parts = msg?.parts ?? [];
+      expect(parts).toHaveLength(1);
+      expect(parts[0]).toEqual({ kind: "text", text: "Hello, world." });
+      expect(msg?.message).toBe("Hello, world.");
+    });
+
+    it("starts a new text part when interrupted by a tool call", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.appendAgentText(id, "before");
+      store.upsertAgentPart(id, {
+        kind: "tool_call",
+        id: "tc1",
+        title: "Read README",
+        status: "completed",
+      });
+      store.appendAgentText(id, "after");
+      const parts = store.getMessage(id)?.parts ?? [];
+      expect(parts.map((p) => p.kind)).toEqual(["text", "tool_call", "text"]);
+      expect(parts[0]).toEqual({ kind: "text", text: "before" });
+      expect(parts[2]).toEqual({ kind: "text", text: "after" });
+    });
+
+    it("returns false for an unknown message", () => {
+      const store = new AgentMessageStore();
+      expect(store.appendAgentText("missing", "x")).toBe(false);
+    });
+
+    it("extends a provisional late thought when completed prose ends it (https://github.com/Brevilabs/obsidian-copilot-private/issues/336)", () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(1_000);
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.appendAgentText(id, "Done");
+      store.markTurnComplete(id, "end_turn", 1_000);
+      jest.setSystemTime(5_000);
+      store.appendAgentThought(id, "Late thought");
+
+      jest.setSystemTime(7_000);
+      store.appendAgentText(id, "After");
+
+      expect(store.getMessage(id)?.parts).toEqual([
+        { kind: "text", text: "Done" },
+        { kind: "thought", text: "Late thought", startedAtMs: 5_000, durationMs: 2_000 },
+        { kind: "text", text: "After" },
+      ]);
+    });
+  });
+
+  describe("appendAgentThought()", () => {
+    it("folds successive chunks into one timed part (https://github.com/Brevilabs/obsidian-copilot-private/issues/336)", () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(1_000);
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.appendAgentThought(id, "Thinking");
+      store.appendAgentThought(id, " harder");
+      const parts = store.getMessage(id)?.parts ?? [];
+      expect(parts).toHaveLength(1);
+      expect(parts[0]).toEqual({
+        kind: "thought",
+        text: "Thinking harder",
+        startedAtMs: 1_000,
+      });
+    });
+
+    it("extends a completed trailing thought when its final chunk arrives late (https://github.com/Brevilabs/obsidian-copilot-private/issues/336)", () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(1_000);
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.appendAgentThought(id, "Thinking");
+      jest.advanceTimersByTime(2_000);
+      store.markTurnComplete(id, "end_turn", 2_000);
+
+      jest.advanceTimersByTime(3_000);
+      store.appendAgentThought(id, " after completion");
+
+      expect(store.getMessage(id)?.parts).toEqual([
+        {
+          kind: "thought",
+          text: "Thinking after completion",
+          startedAtMs: 1_000,
+          durationMs: 5_000,
+        },
+      ]);
+    });
+
+    it("freezes a new late thought after completed prose and extends it with later chunks (https://github.com/Brevilabs/obsidian-copilot-private/issues/336)", () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(1_000);
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.appendAgentText(id, "Done");
+      store.markTurnComplete(id, "end_turn", 1_000);
+
+      jest.setSystemTime(5_000);
+      store.appendAgentThought(id, "Late thought");
+      expect(store.getMessage(id)?.parts?.[1]).toEqual({
+        kind: "thought",
+        text: "Late thought",
+        startedAtMs: 5_000,
+        durationMs: 0,
+      });
+
+      jest.setSystemTime(7_000);
+      store.appendAgentThought(id, " continued");
+      expect(store.getMessage(id)?.parts?.[1]).toEqual({
+        kind: "thought",
+        text: "Late thought continued",
+        startedAtMs: 5_000,
+        durationMs: 2_000,
+      });
+    });
+
+    it("starts a new timed thought after a completed thought (https://github.com/Brevilabs/obsidian-copilot-private/issues/336)", () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(1_000);
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.appendAgentThought(id, "First");
+      jest.advanceTimersByTime(2_000);
+      store.appendAgentText(id, "Update");
+      jest.advanceTimersByTime(3_000);
+      store.appendAgentThought(id, "Second");
+
+      expect(store.getMessage(id)?.parts).toEqual([
+        { kind: "thought", text: "First", startedAtMs: 1_000, durationMs: 2_000 },
+        { kind: "text", text: "Update" },
+        { kind: "thought", text: "Second", startedAtMs: 6_000 },
+      ]);
+    });
+  });
+
+  describe("markTurnComplete()", () => {
+    it("freezes a trailing thought when the turn completes (https://github.com/Brevilabs/obsidian-copilot-private/issues/336)", () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(1_000);
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.appendAgentThought(id, "Final thought");
+      jest.advanceTimersByTime(5_778);
+      store.markTurnComplete(id, "end_turn", 10_000);
+
+      expect(store.getMessage(id)?.parts?.[0]).toMatchObject({ durationMs: 5_778 });
+    });
+  });
+
+  describe("markPermissionDeclined()", () => {
+    it("https://github.com/logancyang/obsidian-copilot/issues/4062 makes a later agent cancellation of the reply name the declined permission as its cause", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+
+      store.markPermissionDeclined(id);
+      store.markCancelledByAgent(id);
+
+      expect(store.getMessage(id)?.agentCancelCause).toBe("permission_declined");
+    });
+
+    it("leaves a reply that the agent never cancels without a cancel cause", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+
+      store.markPermissionDeclined(id);
+      store.markTurnComplete(id, "end_turn", 1_000);
+
+      expect(store.getMessage(id)?.agentCancelCause).toBeUndefined();
+    });
+  });
+
+  describe("markCancelledByAgent()", () => {
+    it("https://github.com/logancyang/obsidian-copilot/issues/4062 records an unspecified cause on a reply the agent cancelled without a declined permission", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+
+      store.markCancelledByAgent(id);
+
+      expect(store.getMessage(id)?.agentCancelCause).toBe("unspecified");
+    });
+  });
+
+  describe("upsertAgentPart()", () => {
+    it("appends a new tool call by its id", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.upsertAgentPart(id, {
+        kind: "tool_call",
+        id: "tc1",
+        title: "Read README",
+        status: "pending",
+      });
+      const parts = store.getMessage(id)?.parts ?? [];
+      expect(parts).toHaveLength(1);
+      expect(parts[0]).toMatchObject({ kind: "tool_call", id: "tc1", title: "Read README" });
+    });
+
+    it("freezes a thought when a tool call follows it (https://github.com/Brevilabs/obsidian-copilot-private/issues/336)", () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(1_000);
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.appendAgentThought(id, "Thinking");
+      jest.advanceTimersByTime(12_648);
+      store.upsertAgentPart(id, {
+        kind: "tool_call",
+        id: "tc1",
+        title: "Edit files",
+        status: "completed",
+      });
+
+      expect(store.getMessage(id)?.parts?.[0]).toMatchObject({
+        kind: "thought",
+        startedAtMs: 1_000,
+        durationMs: 12_648,
+      });
+    });
+
+    it("replaces existing tool_call when ids match", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.upsertAgentPart(id, {
+        kind: "tool_call",
+        id: "tc1",
+        title: "Read README",
+        status: "pending",
+      });
+      store.upsertAgentPart(id, {
+        kind: "tool_call",
+        id: "tc1",
+        title: "Read README",
+        status: "completed",
+        output: [{ type: "text", text: "ok" }],
+      });
+      const parts = store.getMessage(id)?.parts ?? [];
+      expect(parts).toHaveLength(1);
+      expect(parts[0]).toMatchObject({
+        kind: "tool_call",
+        id: "tc1",
+        status: "completed",
+        output: [{ type: "text", text: "ok" }],
+      });
+    });
+
+    it("notifies for progress changes but skips identical progress", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      const part: AgentMessagePart = {
+        kind: "tool_call",
+        id: "tc1",
+        title: "Agent",
+        status: "in_progress",
+        progress: { description: "Inspect vault", toolUses: 1, durationMs: 1000 },
+      };
+
+      expect(store.upsertAgentPart(id, part)).toBe(true);
+      expect(store.upsertAgentPart(id, { ...part, progress: { ...part.progress } })).toBe(false);
+      expect(
+        store.upsertAgentPart(id, {
+          ...part,
+          progress: { ...part.progress, toolUses: 2 },
+        })
+      ).toBe(true);
+    });
+
+    it("reports no change when a large tool output is re-applied unchanged", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      const part: AgentMessagePart = {
+        kind: "tool_call",
+        id: "tc1",
+        title: "Search",
+        status: "completed",
+        input: { query: "communication drill", nested: { text: "x".repeat(20_000) } },
+        output: [{ type: "text", text: "a".repeat(20_000) }],
+      };
+
+      expect(store.upsertAgentPart(id, part)).toBe(true);
+      expect(
+        store.upsertAgentPart(id, { ...part, output: part.output?.map((o) => ({ ...o })) })
+      ).toBe(false);
+      expect(store.getMessage(id)?.parts).toHaveLength(1);
+    });
+
+    it("treats a plan as a singleton (replace, not duplicate)", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.upsertAgentPart(id, {
+        kind: "plan",
+        entries: [{ content: "step 1", priority: "high", status: "pending" }],
+      });
+      store.upsertAgentPart(id, {
+        kind: "plan",
+        entries: [
+          { content: "step 1", priority: "high", status: "completed" },
+          { content: "step 2", priority: "medium", status: "pending" },
+        ],
+      });
+      const parts = store.getMessage(id)?.parts ?? [];
+      const planParts = parts.filter((p) => p.kind === "plan");
+      expect(planParts).toHaveLength(1);
+      expect(planParts[0]).toMatchObject({
+        kind: "plan",
+        entries: expect.arrayContaining([
+          expect.objectContaining({ content: "step 1", status: "completed" }),
+          expect.objectContaining({ content: "step 2" }),
+        ]),
+      });
+    });
+
+    it("lets a replacement plan freeze the trailing thought (https://github.com/Brevilabs/obsidian-copilot-private/issues/336)", () => {
+      jest.useFakeTimers();
+      jest.setSystemTime(1_000);
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      const plan: AgentMessagePart = {
+        kind: "plan",
+        entries: [{ content: "step 1", priority: "high", status: "pending" }],
+      };
+      store.upsertAgentPart(id, plan);
+      store.appendAgentThought(id, "Reconsider the next step");
+      jest.advanceTimersByTime(3_000);
+
+      expect(store.upsertAgentPart(id, { ...plan })).toBe(true);
+      expect(store.getMessage(id)?.parts?.[1]).toMatchObject({ durationMs: 3_000 });
+    });
+
+    it("replaces the compaction row holding the same id as its status advances", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.upsertAgentPart(id, compaction());
+
+      const changed = store.upsertAgentPart(
+        id,
+        compaction({ status: "completed", preTokens: 182_000, postTokens: 24_000 })
+      );
+
+      expect(changed).toBe(true);
+      expect(store.getMessage(id)?.parts).toEqual([
+        compaction({ status: "completed", preTokens: 182_000, postTokens: 24_000 }),
+      ]);
+    });
+
+    it("keeps compaction rows with different ids apart, in arrival order", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.upsertAgentPart(id, compaction({ id: "first", status: "completed" }));
+      store.appendAgentText(id, "between");
+      store.upsertAgentPart(id, compaction({ id: "second", trigger: "auto" }));
+
+      expect(store.getMessage(id)?.parts?.map((p) => p.kind)).toEqual([
+        "compaction",
+        "text",
+        "compaction",
+      ]);
+    });
+
+    it("reports no change and keeps the message identity when an identical compaction status repeats", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.upsertAgentPart(id, compaction());
+      const before = store.getMessage(id);
+
+      expect(store.upsertAgentPart(id, compaction())).toBe(false);
+      expect(store.getMessage(id)).toBe(before);
+    });
+
+    it.each([
+      ["error", { status: "failed" as const, error: "overloaded" }],
+      ["trigger", { trigger: "auto" as const }],
+      ["preTokens", { preTokens: 10 }],
+      ["postTokens", { postTokens: 5 }],
+    ])("treats a changed compaction %s as a new status for the row", (_field, change) => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.upsertAgentPart(id, compaction());
+
+      expect(store.upsertAgentPart(id, compaction(change))).toBe(true);
+    });
+  });
+
+  describe("hasAssistantActivity()", () => {
+    it("is false for a placeholder that has received nothing", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+
+      expect(store.hasAssistantActivity(id)).toBe(false);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/633 counts a compaction row as activity so a compaction-only turn is not an empty turn", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+
+      store.upsertAgentPart(id, compaction({ status: "completed" }));
+
+      expect(store.hasAssistantActivity(id)).toBe(true);
+    });
+  });
+
+  describe("settleOpenParts()", () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/633 settles every in-progress compaction to the given status and leaves settled rows alone", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      const done = compaction({ id: "done", status: "completed", postTokens: 5 });
+      store.upsertAgentPart(id, done);
+      store.upsertAgentPart(id, compaction({ id: "open", trigger: "auto" }));
+
+      expect(store.settleOpenParts(id)).toBe(true);
+
+      const parts = store.getMessage(id)?.parts ?? [];
+      expect(parts[0]).toBe(done);
+      expect(parts[1]).toEqual(compaction({ id: "open", trigger: "auto", status: "cancelled" }));
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/633 fails an in-progress compaction without a reason of its own", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.upsertAgentPart(id, compaction());
+
+      store.settleOpenParts(id, "failed");
+
+      expect(store.getMessage(id)?.parts?.[0]).toEqual(compaction({ status: "failed" }));
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/739 fails every tool call still pending, since it never started, even when compactions settle as cancelled, and leaves running background and finished calls alone", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.upsertAgentPart(id, {
+        kind: "tool_call",
+        id: "write",
+        title: "Write",
+        status: "pending",
+      });
+      store.upsertAgentPart(id, {
+        kind: "tool_call",
+        id: "bash",
+        title: "Bash",
+        status: "in_progress",
+      });
+      store.upsertAgentPart(id, {
+        kind: "tool_call",
+        id: "read",
+        title: "Read",
+        status: "completed",
+      });
+      store.upsertAgentPart(id, compaction());
+
+      expect(store.settleOpenParts(id)).toBe(true);
+
+      expect(store.getMessage(id)?.parts).toEqual([
+        { kind: "tool_call", id: "write", title: "Write", status: "failed" },
+        { kind: "tool_call", id: "bash", title: "Bash", status: "in_progress" },
+        { kind: "tool_call", id: "read", title: "Read", status: "completed" },
+        compaction({ status: "cancelled" }),
+      ]);
+    });
+
+    it("reports no change for a message with no in-progress compaction or pending tool call", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.upsertAgentPart(id, compaction({ status: "skipped" }));
+      const before = store.getMessage(id);
+
+      expect(store.settleOpenParts(id)).toBe(false);
+      expect(store.getMessage(id)).toBe(before);
+      expect(store.settleOpenParts("missing")).toBe(false);
+    });
+  });
+
+  describe("stopToolCalls()", () => {
+    it("marks every pending or running tool call stopped, except the ones to keep and those already finished (https://github.com/Brevilabs/obsidian-copilot-private/issues/747)", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      const call = (callId: string, status: "pending" | "in_progress" | "completed") =>
+        store.upsertAgentPart(id, { kind: "tool_call", id: callId, title: callId, status });
+      call("next", "pending");
+      call("bash", "in_progress");
+      call("agent", "in_progress");
+      call("read", "completed");
+
+      expect(store.stopToolCalls(id, new Set(["agent"]))).toBe(true);
+
+      expect(
+        store.getMessage(id)?.parts?.map((p) => (p.kind === "tool_call" ? [p.id, p.status] : null))
+      ).toEqual([
+        ["next", "cancelled"],
+        ["bash", "cancelled"],
+        ["agent", "in_progress"],
+        ["read", "completed"],
+      ]);
+      expect(store.stopToolCalls(id, new Set(["agent"]))).toBe(false);
+    });
+  });
+
+  describe("findMessageIdWithToolCall()", () => {
+    it("returns the message owning a tool call, or undefined", () => {
+      const store = new AgentMessageStore();
+      const first = store.addMessage(placeholder());
+      const second = store.addMessage(placeholder());
+      store.upsertAgentPart(first, {
+        kind: "tool_call",
+        id: "tc-old",
+        title: "Agent",
+        status: "in_progress",
+      });
+      store.upsertAgentPart(second, {
+        kind: "tool_call",
+        id: "tc-new",
+        title: "Read README",
+        status: "completed",
+      });
+
+      expect(store.findMessageIdWithToolCall("tc-old")).toBe(first);
+      expect(store.findMessageIdWithToolCall("tc-new")).toBe(second);
+      expect(store.findMessageIdWithToolCall("tc-missing")).toBeUndefined();
+    });
+  });
+
+  describe("markMessageError()", () => {
+    it("flags the message and appends formatted error text", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage({
+        message: "partial reply",
+        sender: AI_SENDER,
+        timestamp: formatDateTime(new Date()),
+        isVisible: true,
+      });
+      store.markMessageError(id, "boom", 12_345);
+      const msg = store.getMessage(id);
+      expect(msg?.isErrorMessage).toBe(true);
+      expect(msg?.message).toContain("partial reply");
+      expect(msg?.message).toContain("**Error:** boom");
+      expect(msg?.turnDurationMs).toBe(12_345);
+    });
+  });
+
+  describe("loadMessages()", () => {
+    it("keeps a message that has no send time undated instead of stamping the load time", () => {
+      const store = new AgentMessageStore();
+
+      store.loadMessages([
+        { id: "u1", sender: USER_SENDER, message: "hi", timestamp: null, isVisible: true },
+      ]);
+
+      expect(store.getDisplayMessages()[0].timestamp).toBeNull();
+    });
+
+    it("keeps the send time a message arrived with", () => {
+      const store = new AgentMessageStore();
+      const sent = formatDateTime(new Date("2026-01-02T03:04:05Z"));
+
+      store.loadMessages([
+        { id: "u1", sender: USER_SENDER, message: "hi", timestamp: sent, isVisible: true },
+      ]);
+
+      expect(store.getDisplayMessages()[0].timestamp).toEqual(sent);
+    });
+
+    it("loads a reply saved as a multi-agent answer as ordinary text, keeping its headings and markers (https://github.com/Brevilabs/obsidian-copilot-private/issues/935)", () => {
+      const store = new AgentMessageStore();
+      const body = [
+        "<!--copilot:multi-agent v=1-->",
+        "<!--copilot:summary-->",
+        "### Summary",
+        "Both agents say Paris.",
+        '<!--copilot:agent id="claude" name="Claude" status="done"-->',
+        "### Claude",
+        "Paris.",
+        "<!--copilot:multi-agent-end-->",
+      ].join("\n");
+      store.loadMessages([
+        { id: "a1", sender: AI_SENDER, message: body, timestamp: null, isVisible: true },
+      ]);
+
+      const [reply] = store.getDisplayMessages();
+
+      expect(reply.message).toBe(body);
+      expect(reply).not.toHaveProperty("fanout");
+    });
+
+    it("keeps the tools list a reply restored from its note", () => {
+      const store = new AgentMessageStore();
+
+      store.loadMessages([
+        {
+          id: "a1",
+          sender: AI_SENDER,
+          message: "summary",
+          timestamp: null,
+          isVisible: true,
+          toolsUsed: ["Read a.md (read): notes/a.md"],
+        },
+      ]);
+
+      expect(store.getDisplayMessages()[0].toolsUsed).toEqual(["Read a.md (read): notes/a.md"]);
+    });
+
+    it("keeps the rules a custom agent saved in a loaded reply (https://github.com/Brevilabs/obsidian-copilot-private/issues/942)", () => {
+      const store = new AgentMessageStore();
+
+      store.loadMessages([
+        {
+          id: "a1",
+          sender: AI_SENDER,
+          message: "Got it.",
+          timestamp: null,
+          isVisible: true,
+          memorySaves: [MEMORY_SAVE],
+        },
+      ]);
+
+      expect(store.getDisplayMessages()[0].memorySaves).toEqual([MEMORY_SAVE]);
+    });
+
+    it("keeps each @-mentioned agent's run on a loaded message (https://github.com/Brevilabs/obsidian-copilot-private/issues/944)", () => {
+      const store = new AgentMessageStore();
+
+      store.loadMessages([
+        {
+          id: "u1",
+          sender: USER_SENDER,
+          message: "@Maya review",
+          timestamp: null,
+          isVisible: true,
+          agentMentions: [MAYA_MENTION],
+        },
+      ]);
+
+      expect(store.getDisplayMessages()[0].agentMentions).toEqual([MAYA_MENTION]);
+    });
+
+    it("drops file changes from a loaded chat so a reopened turn shows none", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.setFileChanges(id, [change("notes/a.md")]);
+
+      store.loadMessages(store.getDisplayMessages());
+
+      expect(store.getMessage(id)?.fileChanges).toBeUndefined();
+    });
+  });
+
+  describe("adoptNoteRows()", () => {
+    const issue = "https://github.com/Brevilabs/obsidian-copilot-private/issues/921";
+    const noteAt = formatDateTime(new Date("2026-01-02T03:04:05Z"));
+    const replayAt = formatDateTime(new Date("2026-03-04T05:06:07Z"));
+    const embed = `![[copilot-image-${"a".repeat(64)}.png]]`;
+    const noteRow = (sender: string, message = "saved", extra = {}) => ({
+      id: `s-${message}`,
+      sender,
+      message,
+      timestamp: noteAt,
+      isVisible: true,
+      ...extra,
+    });
+    const replayed = (sender: string, message: string, extra = {}) => ({
+      message,
+      sender,
+      timestamp: replayAt,
+      isVisible: true,
+      ...extra,
+    });
+
+    it(`${issue} gives each replayed message the note's time at its position`, () => {
+      const store = new AgentMessageStore();
+      store.addMessage(replayed(USER_SENDER, "q"));
+      store.addMessage(replayed(AI_SENDER, "a"));
+
+      store.adoptNoteRows([noteRow(USER_SENDER, "q"), noteRow(AI_SENDER, "a")]);
+
+      expect(store.getDisplayMessages().map((m) => m.timestamp)).toEqual([noteAt, noteAt]);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/671 dates an undated replayed message from the note and keeps a replay time the note lacks", () => {
+      const store = new AgentMessageStore();
+      store.addMessage(replayed(USER_SENDER, "q", { timestamp: null }));
+      store.addMessage(replayed(AI_SENDER, "a"));
+
+      store.adoptNoteRows([
+        noteRow(USER_SENDER, "q"),
+        noteRow(AI_SENDER, "a", { timestamp: null }),
+      ]);
+
+      expect(store.getDisplayMessages().map((m) => m.timestamp)).toEqual([noteAt, replayAt]);
+    });
+
+    it(`${issue} appends the image embeds saved under a user message to the replayed message`, () => {
+      const store = new AgentMessageStore();
+      store.addMessage(replayed(USER_SENDER, "look at this"));
+
+      store.adoptNoteRows([noteRow(USER_SENDER, `look at this\n\n${embed}\n\n${embed}`)]);
+
+      expect(store.getDisplayMessages()[0].message).toBe(`look at this\n\n${embed}\n\n${embed}`);
+    });
+
+    it(`${issue} gives a replayed user message the context attached to it in the note`, () => {
+      const store = new AgentMessageStore();
+      store.addMessage(replayed(USER_SENDER, "summarize"));
+      const context = {
+        notes: [],
+        urls: [],
+        webTabs: [{ url: "https://example.com/", title: "Example" }],
+      };
+
+      store.adoptNoteRows([noteRow(USER_SENDER, "summarize", { context })]);
+
+      expect(store.getDisplayMessages()[0].context).toEqual(context);
+    });
+
+    it(`${issue} gives a replayed reply the note's tools-used list and keeps its replayed tool steps`, () => {
+      const store = new AgentMessageStore();
+      const parts: AgentMessagePart[] = [
+        { kind: "tool_call", id: "t1", title: "Read /vault/a.md", status: "completed" },
+        { kind: "text", text: "done" },
+      ];
+      store.addMessage(replayed(AI_SENDER, "done", { parts }));
+
+      store.adoptNoteRows([noteRow(AI_SENDER, "done", { toolsUsed: ["Read (read): a.md"] })]);
+
+      const [reply] = store.getDisplayMessages();
+      expect(reply.toolsUsed).toEqual(["Read (read): a.md"]);
+      expect(reply.parts?.map((p) => p.kind)).toEqual(["tool_call", "text"]);
+    });
+
+    it("gives a replayed message the @-mentioned agents' runs its note saved (https://github.com/Brevilabs/obsidian-copilot-private/issues/944)", () => {
+      const store = new AgentMessageStore();
+      store.addMessage(replayed(USER_SENDER, "q"));
+      store.addMessage(replayed(AI_SENDER, "a"));
+
+      store.adoptNoteRows([
+        noteRow(USER_SENDER, "q", { agentMentions: [MAYA_MENTION] }),
+        noteRow(AI_SENDER, "a"),
+      ]);
+
+      expect(store.getDisplayMessages()[0].agentMentions).toEqual([MAYA_MENTION]);
+    });
+
+    it("gives a replayed reply the rules its note says the custom agent saved (https://github.com/Brevilabs/obsidian-copilot-private/issues/942)", () => {
+      const store = new AgentMessageStore();
+      store.addMessage(replayed(USER_SENDER, "q"));
+      store.addMessage(replayed(AI_SENDER, "a"));
+
+      store.adoptNoteRows([
+        noteRow(USER_SENDER, "q"),
+        noteRow(AI_SENDER, "a", { memorySaves: [MEMORY_SAVE] }),
+      ]);
+
+      expect(store.getDisplayMessages()[1].memorySaves).toEqual([MEMORY_SAVE]);
+    });
+
+    it(`${issue} leaves messages unchanged from a note user message where the replay has a reply`, () => {
+      const store = new AgentMessageStore();
+      store.addMessage(replayed(USER_SENDER, "q"));
+      store.addMessage(replayed(AI_SENDER, "a"));
+      store.addMessage(replayed(USER_SENDER, "q2"));
+
+      store.adoptNoteRows([
+        noteRow(USER_SENDER, "q"),
+        noteRow(USER_SENDER, `q2\n\n${embed}`),
+        noteRow(AI_SENDER, "a", { toolsUsed: ["Search (search)"] }),
+      ]);
+
+      expect(store.getDisplayMessages().map((m) => [m.message, m.timestamp, m.toolsUsed])).toEqual([
+        ["q", noteAt, undefined],
+        ["a", replayAt, undefined],
+        ["q2", replayAt, undefined],
+      ]);
+    });
+
+    it(`${issue} leaves messages unchanged from a note message the replay lacks, so its image and context never land on another message`, () => {
+      const store = new AgentMessageStore();
+      store.addMessage(replayed(USER_SENDER, "q"));
+      store.addMessage(replayed(AI_SENDER, "a"));
+      store.addMessage(replayed(USER_SENDER, "sent after the last save"));
+      store.addMessage(replayed(AI_SENDER, "a2"));
+      const context = {
+        notes: [],
+        urls: [],
+        webTabs: [{ url: "https://example.com/", title: "Example" }],
+      };
+
+      store.adoptNoteRows([
+        noteRow(USER_SENDER, "q"),
+        noteRow(AI_SENDER, "a"),
+        noteRow(USER_SENDER, `asked only in the note\n\n${embed}`, { context }),
+        noteRow(AI_SENDER, "answered only in the note", { toolsUsed: ["Search (search)"] }),
+      ]);
+
+      expect(
+        store.getDisplayMessages().map((m) => [m.message, m.timestamp, m.context, m.toolsUsed])
+      ).toEqual([
+        ["q", noteAt, undefined, undefined],
+        ["a", noteAt, undefined, undefined],
+        ["sent after the last save", replayAt, undefined, undefined],
+        ["a2", replayAt, undefined, undefined],
+      ]);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/942 skips a reply only the note has, such as a failed turn's error, and gives the later messages their saved rules, @ runs and times", () => {
+      const store = new AgentMessageStore();
+      store.addMessage(replayed(USER_SENDER, "q"));
+      store.addMessage(replayed(USER_SENDER, "remember this"));
+      store.addMessage(replayed(AI_SENDER, "saved"));
+
+      store.adoptNoteRows([
+        noteRow(USER_SENDER, "q"),
+        noteRow(AI_SENDER, "**Error:** the turn returned nothing"),
+        noteRow(USER_SENDER, "remember this", { agentMentions: [MAYA_MENTION] }),
+        noteRow(AI_SENDER, "saved", { memorySaves: [MEMORY_SAVE] }),
+      ]);
+
+      expect(
+        store
+          .getDisplayMessages()
+          .map((m) => [m.message, m.timestamp, m.agentMentions, m.memorySaves])
+      ).toEqual([
+        ["q", noteAt, undefined, undefined],
+        ["remember this", noteAt, [MAYA_MENTION], undefined],
+        ["saved", noteAt, undefined, [MEMORY_SAVE]],
+      ]);
+    });
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/635 skips a /compact turn the replay omits and keeps matching the turns after it", () => {
+      const store = new AgentMessageStore();
+      store.addMessage(replayed(USER_SENDER, "q"));
+      store.addMessage(replayed(AI_SENDER, "a"));
+      store.addMessage(replayed(USER_SENDER, "q2"));
+      store.addMessage(replayed(AI_SENDER, "a2"));
+
+      store.adoptNoteRows([
+        noteRow(USER_SENDER, "q"),
+        noteRow(AI_SENDER, "a"),
+        noteRow(USER_SENDER, "/compact", { timestamp: replayAt }),
+        noteRow(AI_SENDER, "", { timestamp: replayAt }),
+        noteRow(USER_SENDER, `q2\n\n${embed}`),
+        noteRow(AI_SENDER, "a2", { toolsUsed: ["Search (search)"] }),
+      ]);
+
+      expect(store.getDisplayMessages().map((m) => [m.message, m.timestamp, m.toolsUsed])).toEqual([
+        ["q", noteAt, undefined],
+        ["a", noteAt, undefined],
+        [`q2\n\n${embed}`, noteAt, undefined],
+        ["a2", noteAt, ["Search (search)"]],
+      ]);
+    });
+  });
+
+  describe("extendTurnDuration()", () => {
+    it("advances only an already-completed turn", () => {
+      const store = new AgentMessageStore();
+      const runningId = store.addMessage(placeholder());
+      const completedId = store.addMessage(placeholder());
+      store.markTurnComplete(completedId, "end_turn", 10_000);
+
+      expect(store.extendTurnDuration(runningId, 15_000)).toBe(false);
+      expect(store.extendTurnDuration(completedId, 9_000)).toBe(false);
+      expect(store.extendTurnDuration(completedId, 15_000)).toBe(true);
+      expect(store.getMessage(completedId)?.turnDurationMs).toBe(15_000);
+    });
+  });
+
+  describe("truncateAfterMessageId()", () => {
+    it("drops everything after the target", () => {
+      const store = new AgentMessageStore();
+      const a = store.addMessage(placeholder());
+      store.addMessage(placeholder());
+      store.addMessage(placeholder());
+      store.truncateAfterMessageId(a);
+      expect(store.getDisplayMessages()).toHaveLength(1);
+    });
+  });
+
+  describe("getDisplayMessages()", () => {
+    it("includes structured message parts", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.upsertAgentPart(id, {
+        kind: "tool_call",
+        id: "tc1",
+        title: "x",
+        status: "pending",
+      });
+      const msg = store.getDisplayMessages().find((m) => m.id === id);
+      expect(msg?.parts).toHaveLength(1);
+    });
+
+    it("returns the same array reference when nothing changed", () => {
+      const store = new AgentMessageStore();
+      store.addMessage(placeholder());
+      const first = store.getDisplayMessages();
+      const second = store.getDisplayMessages();
+      expect(second).toBe(first);
+    });
+
+    it("keeps stable identities for unchanged messages while one streams", () => {
+      const store = new AgentMessageStore();
+      const stable = store.addMessage({
+        message: "done",
+        sender: AI_SENDER,
+        timestamp: formatDateTime(new Date()),
+        isVisible: true,
+      });
+      const streaming = store.addMessage(placeholder());
+
+      const before = store.getDisplayMessages();
+      const stableBefore = before.find((m) => m.id === stable);
+      const streamingBefore = before.find((m) => m.id === streaming);
+
+      store.appendAgentText(streaming, "Hello");
+
+      const after = store.getDisplayMessages();
+      const stableAfter = after.find((m) => m.id === stable);
+      const streamingAfter = after.find((m) => m.id === streaming);
+
+      expect(after).not.toBe(before);
+      expect(stableAfter).toBe(stableBefore);
+      expect(streamingAfter).not.toBe(streamingBefore);
+      expect(streamingAfter?.message).toBe("Hello");
+    });
+
+    it("re-adapts a message after every kind of in-place mutation", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+
+      const v0 = store.getDisplayMessages()[0];
+      store.appendDisplayText(id, "x");
+      const v1 = store.getDisplayMessages()[0];
+      expect(v1).not.toBe(v0);
+
+      store.upsertAgentPart(id, { kind: "tool_call", id: "tc1", title: "t", status: "pending" });
+      const v2 = store.getDisplayMessages()[0];
+      expect(v2).not.toBe(v1);
+
+      store.markTurnComplete(id, "end_turn", 12_345);
+      const v3 = store.getDisplayMessages()[0];
+      expect(v3).not.toBe(v2);
+      expect(v3.turnStopReason).toBe("end_turn");
+      expect(v3.turnDurationMs).toBe(12_345);
+    });
+
+    it("does not re-adapt when upsertAgentPart is a no-op", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      const part: AgentMessagePart = {
+        kind: "tool_call",
+        id: "tc1",
+        title: "Read README",
+        status: "pending",
+      };
+      store.upsertAgentPart(id, part);
+      const before = store.getDisplayMessages()[0];
+      expect(store.upsertAgentPart(id, { ...part })).toBe(false);
+      const after = store.getDisplayMessages()[0];
+      expect(after).toBe(before);
+    });
+
+    it("drops cached views for deleted and truncated messages", () => {
+      const store = new AgentMessageStore();
+      const a = store.addMessage(placeholder());
+      const b = store.addMessage(placeholder());
+      store.getDisplayMessages();
+
+      store.deleteMessage(b);
+      expect(store.getDisplayMessages().map((m) => m.id)).toEqual([a]);
+
+      const c = store.addMessage(placeholder());
+      store.truncateAfterMessageId(a);
+      expect(store.getDisplayMessages().map((m) => m.id)).toEqual([a]);
+      expect(store.getMessage(c)).toBeUndefined();
+    });
+  });
+
+  describe("setAgentMentions()", () => {
+    it("publishes the @-mentioned agents' runs on the message that asked them (https://github.com/Brevilabs/obsidian-copilot-private/issues/944)", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage({ ...placeholder(), sender: USER_SENDER });
+      const before = store.getDisplayMessages();
+
+      expect(store.setAgentMentions(id, [MAYA_MENTION])).toBe(true);
+
+      expect(store.getDisplayMessages()).not.toBe(before);
+      expect(store.getMessage(id)?.agentMentions).toEqual([MAYA_MENTION]);
+    });
+
+    it("returns false for an unknown message", () => {
+      expect(new AgentMessageStore().setAgentMentions("nope", [MAYA_MENTION])).toBe(false);
+    });
+  });
+
+  describe("setFileChanges()", () => {
+    it("publishes the turn's file changes on the message and invalidates its cached view", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      const before = store.getDisplayMessages().find((m) => m.id === id);
+      expect(before?.fileChanges).toBeUndefined();
+
+      expect(store.setFileChanges(id, [change("notes/a.md")])).toBe(true);
+
+      const after = store.getDisplayMessages().find((m) => m.id === id);
+      expect(after?.fileChanges).toEqual([change("notes/a.md")]);
+      expect(after).not.toBe(before);
+    });
+
+    it("replaces a previously published list rather than appending to it", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+      store.setFileChanges(id, [change("notes/a.md")]);
+      store.setFileChanges(id, [change("notes/b.md")]);
+      expect(store.getMessage(id)?.fileChanges).toEqual([change("notes/b.md")]);
+    });
+
+    it("returns false for an unknown message", () => {
+      const store = new AgentMessageStore();
+      expect(store.setFileChanges("nope", [change("notes/a.md")])).toBe(false);
+    });
+
+    it("publishes the rules a custom agent saved in the turn beside its file changes (https://github.com/Brevilabs/obsidian-copilot-private/issues/942)", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+
+      store.setFileChanges(id, [change("copilot/teammates/coco/MEMORY.md")], [MEMORY_SAVE]);
+
+      expect(store.getMessage(id)?.memorySaves).toEqual([MEMORY_SAVE]);
+    });
+
+    it("publishes no saved rules for a turn that saved none", () => {
+      const store = new AgentMessageStore();
+      const id = store.addMessage(placeholder());
+
+      store.setFileChanges(id, [change("notes/a.md")], []);
+
+      expect(store.getMessage(id)?.memorySaves).toBeUndefined();
+    });
+  });
+});

@@ -1,0 +1,209 @@
+import React, { useCallback, useEffect, useId } from "react";
+import { $getRoot, EditorState, LexicalEditor as LexicalEditorType } from "lexical";
+import { LexicalComposer } from "@lexical/react/LexicalComposer";
+import { PlainTextPlugin } from "@lexical/react/LexicalPlainTextPlugin";
+import { ContentEditable } from "@lexical/react/LexicalContentEditable";
+import { HistoryPlugin } from "@lexical/react/LexicalHistoryPlugin";
+import { OnChangePlugin } from "@lexical/react/LexicalOnChangePlugin";
+import { LexicalErrorBoundary } from "@lexical/react/LexicalErrorBoundary";
+import { TFile } from "obsidian";
+import type { WebTabContext } from "@/types/message";
+import { SlashCommandPlugin } from "./plugins/SlashCommandPlugin";
+import { NoteCommandPlugin } from "./plugins/NoteCommandPlugin";
+import { TagCommandPlugin } from "./plugins/TagCommandPlugin";
+import { AtMentionCommandPlugin } from "./plugins/AtMentionCommandPlugin";
+import { NotePillNode } from "./pills/NotePillNode";
+import { URLPillNode } from "./pills/URLPillNode";
+import { ToolPillNode } from "./pills/ToolPillNode";
+import { FolderPillNode } from "./pills/FolderPillNode";
+import { ActiveNotePillNode } from "./pills/ActiveNotePillNode";
+import { WebTabPillNode } from "./pills/WebTabPillNode";
+import { ActiveWebTabPillNode } from "./pills/ActiveWebTabPillNode";
+import { AgentMentionPillNode } from "@/agents/ui/AgentMentionPillNode";
+import { PillDeletionPlugin } from "./plugins/PillDeletionPlugin";
+import { KeyboardPlugin } from "./plugins/KeyboardPlugin";
+import { ValueSyncPlugin } from "./plugins/ValueSyncPlugin";
+import { FocusPlugin } from "./plugins/FocusPlugin";
+import { NotePillSyncPlugin } from "./plugins/NotePillSyncPlugin";
+import { URLPillSyncPlugin } from "./plugins/URLPillSyncPlugin";
+import { ToolPillSyncPlugin } from "./plugins/ToolPillSyncPlugin";
+import { FolderPillSyncPlugin } from "./plugins/FolderPillSyncPlugin";
+import { WebTabPillSyncPlugin } from "./plugins/WebTabPillSyncPlugin";
+import { PastePlugin } from "./plugins/PastePlugin";
+import { TextInsertionPlugin } from "./plugins/TextInsertionPlugin";
+import { useChatInput } from "@/context/ChatInputContext";
+import { logError } from "@/logger";
+import { ActiveFileProvider } from "./context/ActiveFileContext";
+import { ChainType } from "@/chainType";
+import { useSettingsValue } from "@/settings/model";
+
+interface LexicalEditorProps {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  placeholder?: string;
+  onNotesChange?: (notes: { path: string; basename: string }[]) => void;
+  onURLsChange?: (urls: string[]) => void;
+  onToolsChange?: (tools: string[]) => void;
+  onFoldersChange?: (folders: string[]) => void;
+  onWebTabsChange?: (webTabs: WebTabContext[]) => void;
+  onEditorReady?: (editor: LexicalEditorType) => void;
+  onImagePaste?: (files: File[]) => void;
+  onTagSelected?: () => void;
+  showTools?: boolean;
+  currentActiveFile?: TFile | null;
+  currentChain?: ChainType;
+  onEscape?: () => void;
+  onShiftTab?: () => void;
+  isAgentMode?: boolean;
+}
+
+const LexicalEditor: React.FC<LexicalEditorProps> = ({
+  value,
+  onChange,
+  onSubmit,
+  placeholder = "Type a message...",
+  onNotesChange,
+  onURLsChange,
+  onToolsChange,
+  onFoldersChange,
+  onWebTabsChange,
+  onEditorReady,
+  onImagePaste,
+  onTagSelected,
+  showTools = false,
+  currentActiveFile = null,
+  currentChain,
+  onEscape,
+  onShiftTab,
+  isAgentMode = false,
+}) => {
+  const [focusFn, setFocusFn] = React.useState<(() => void) | null>(null);
+  const [editorInstance, setEditorInstance] = React.useState<LexicalEditorType | null>(null);
+  const chatInputContext = useChatInput();
+  const settings = useSettingsValue();
+
+  const handleFocusRegistration = React.useCallback((fn: () => void) => {
+    setFocusFn(() => fn);
+  }, []);
+
+  useEffect(() => {
+    if (editorInstance) {
+      chatInputContext.registerEditor(editorInstance);
+    }
+  }, [editorInstance, chatInputContext]);
+
+  useEffect(() => {
+    if (focusFn) {
+      chatInputContext.registerFocusHandler(focusFn);
+    }
+  }, [focusFn, chatInputContext]);
+
+  const { registerFocusHandler } = chatInputContext;
+  useEffect(() => () => registerFocusHandler(null), [registerFocusHandler]);
+
+  const initialConfig = React.useMemo(
+    () => ({
+      namespace: "ChatEditor",
+      theme: {
+        root: "tw-outline-none",
+        paragraph: "tw-m-0",
+      },
+      nodes: [
+        NotePillNode,
+        ActiveNotePillNode,
+        ToolPillNode,
+        FolderPillNode,
+        WebTabPillNode,
+        ActiveWebTabPillNode,
+        AgentMentionPillNode,
+        ...(onURLsChange ? [URLPillNode] : []),
+      ],
+      onError: (error: Error) => {
+        logError("Lexical error:", error);
+      },
+    }),
+    [onURLsChange]
+  );
+
+  const handleEditorChange = useCallback(
+    (editorState: EditorState) => {
+      editorState.read(() => {
+        const root = $getRoot();
+        const textContent = root.getTextContent();
+        onChange(textContent);
+      });
+    },
+    [onChange]
+  );
+
+  const editorLabelId = useId();
+
+  const handleEditorReady = useCallback(
+    (editor: LexicalEditorType) => {
+      setEditorInstance(editor);
+      onEditorReady?.(editor);
+    },
+    [onEditorReady]
+  );
+
+  return (
+    <LexicalComposer initialConfig={initialConfig}>
+      <ActiveFileProvider currentActiveFile={currentActiveFile}>
+        <div className="tw-relative">
+          <span id={editorLabelId} className="tw-sr-only">
+            Chat input
+          </span>
+          <PlainTextPlugin
+            contentEditable={
+              <ContentEditable
+                className="tw-max-h-60 tw-min-h-[60px] tw-w-full tw-resize-none tw-overflow-y-auto tw-rounded-md tw-border-none tw-bg-transparent tw-px-2 tw-text-sm tw-text-normal tw-outline-none focus-visible:tw-ring-0"
+                aria-labelledby={editorLabelId}
+              />
+            }
+            placeholder={
+              // A hint naming a long agent cuts its end instead of running under the toolbar.
+              // https://github.com/Brevilabs/obsidian-copilot-private/issues/588
+              <div className="tw-pointer-events-none tw-absolute tw-left-2 tw-top-0 tw-line-clamp-3 tw-select-none tw-text-sm tw-text-muted/60">
+                {placeholder}
+              </div>
+            }
+            ErrorBoundary={LexicalErrorBoundary}
+          />
+          {/* Selection-only changes must not push stale text over an external clear.
+                https://github.com/logancyang/obsidian-copilot-preview/issues/211 */}
+          <OnChangePlugin onChange={handleEditorChange} ignoreSelectionChange />
+          <HistoryPlugin />
+          <KeyboardPlugin
+            onSubmit={onSubmit}
+            sendShortcut={settings.defaultSendShortcut}
+            onEscape={onEscape}
+            onShiftTab={onShiftTab}
+          />
+          <ValueSyncPlugin value={value} />
+          <FocusPlugin onFocus={handleFocusRegistration} onEditorReady={handleEditorReady} />
+          <NotePillSyncPlugin onNotesChange={onNotesChange} />
+          {onURLsChange && <URLPillSyncPlugin onURLsChange={onURLsChange} />}
+          <ToolPillSyncPlugin onToolsChange={onToolsChange} />
+          <FolderPillSyncPlugin onFoldersChange={onFoldersChange} />
+          <WebTabPillSyncPlugin onWebTabsChange={onWebTabsChange} />
+          <PillDeletionPlugin />
+          <PastePlugin enableURLPills={!!onURLsChange} onImagePaste={onImagePaste} />
+          <SlashCommandPlugin isAgentMode={isAgentMode} />
+          <NoteCommandPlugin currentActiveFile={currentActiveFile} />
+          {currentChain && currentChain !== ChainType.LLM_CHAIN && (
+            <TagCommandPlugin onTagSelected={onTagSelected} />
+          )}
+          <AtMentionCommandPlugin
+            showTools={showTools}
+            currentActiveFile={currentActiveFile}
+            isAgentMode={isAgentMode}
+          />
+          <TextInsertionPlugin />
+        </div>
+      </ActiveFileProvider>
+    </LexicalComposer>
+  );
+};
+
+export default LexicalEditor;

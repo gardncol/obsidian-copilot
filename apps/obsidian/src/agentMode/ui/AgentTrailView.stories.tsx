@@ -1,0 +1,333 @@
+import { useApp } from "@/context";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import type { AgentMessagePart, StopReason, TurnFileChange } from "@/agentMode/session/types";
+import { AgentTrail } from "@/agentMode/ui/AgentTrailView";
+import type { Meta, StoryObj } from "@/lib/story";
+import React from "react";
+
+type AgentTrailProps = React.ComponentProps<typeof AgentTrail>;
+
+function tool(
+  id: string,
+  vendorToolName: string,
+  overrides: Partial<Extract<AgentMessagePart, { kind: "tool_call" }>> = {}
+): AgentMessagePart {
+  return {
+    kind: "tool_call",
+    id,
+    title: id,
+    status: "completed",
+    vendorToolName,
+    ...overrides,
+  };
+}
+
+const think = (text: string): AgentMessagePart => ({ kind: "thought", text });
+const say = (text: string): AgentMessagePart => ({ kind: "text", text });
+
+const TURN: AgentMessagePart[] = [
+  think("The conference is probably on the calendar rather than in a note."),
+  tool("s1", "Skill", { input: { skill: "gcal" } }),
+  think("The helper is not on PATH here."),
+  tool("b1", "Bash", { input: { description: "Locate the gws binary" } }),
+  think("Searching the calendar for anything summit-shaped."),
+  tool("b2", "Bash", { input: { description: "Search calendar for summit events" } }),
+  tool("b3", "Bash", { input: { description: "Check calendar auth options" } }),
+  think("Two accounts are configured, so I should ask which one to read."),
+  say("I found two calendar accounts on this machine. Reading the personal one first."),
+  tool("q1", "AskUserQuestion", {
+    input: { questions: [{ header: "Account", question: "Which calendar should I read?" }] },
+  }),
+  tool("b4", "Bash", { input: { description: "Fetch Aug 1–2 events with descriptions" } }),
+  tool("b5", "Bash", {
+    input: { description: "Re-run with the personal profile" },
+    status: "failed",
+  }),
+  think("The first profile has no access; the second one works."),
+  say("Found it — **Agentic AI Summit 2026**, August 1–2 at the Marriott. Saving it to the vault."),
+  tool("e1", "Edit", { input: { file_path: "Events/Agentic AI Summit 2026.md" } }),
+  say("Saved to [[Agentic AI Summit 2026]] with the schedule and the two talks you flagged."),
+];
+
+const STREAMING: AgentMessagePart[] = [
+  ...TURN.slice(0, 8),
+  tool("b6", "Bash", {
+    input: { description: "Fetch Aug 1–2 events with descriptions" },
+    status: "in_progress",
+  }),
+];
+
+const UNIFIED_CARDS: AgentMessagePart[] = [
+  think("I should inspect the source before changing it."),
+  say("The reasoning row uses the same inset and disclosure treatment as the work below."),
+  tool("read-1", "Read", {
+    locations: [{ path: "src/agentMode/ui/AgentTrailView.tsx" }],
+    output: [{ type: "text", text: "export const AgentTrail = ..." }],
+  }),
+  say("A single expandable tool remains its own row."),
+  tool("read-2", "Read", { locations: [{ path: "src/agentMode/ui/ActionCard.tsx" }] }),
+  tool("test-1", "Bash", { input: { description: "Run focused activity-card tests" } }),
+  say("Consecutive work folds into a group with the same header geometry."),
+  tool("delegate-1", "Task", {
+    input: { subagent_type: "Explore", description: "Check nested trail cards" },
+  }),
+  tool("delegate-read", "Read", {
+    parentToolCallId: "delegate-1",
+    locations: [{ path: "src/agentMode/ui/SubAgentCard.tsx" }],
+  }),
+  say("Reasoning, individual tools, grouped work, and delegated work now align."),
+];
+
+const FAILED_FILE_CHANGES: AgentMessagePart[] = [
+  say("The edit was denied, so the card says the note was not edited."),
+  tool("failed-edit", "Edit", { status: "failed", input: { file_path: "Projects/plan.md" } }),
+  say("A denied write with no diff says the note was not edited."),
+  tool("failed-write", "Write", {
+    status: "failed",
+    input: { file_path: "Projects/notes.md", content: "# Notes\n" },
+    output: [{ type: "text", text: "User declined" }],
+  }),
+  say("A denied delete says the note was not deleted."),
+  tool("failed-delete", "Delete", {
+    status: "failed",
+    toolKind: "delete",
+    input: { filePath: "Archive/old.md" },
+  }),
+  say("A failed shell command still ran, so its label is unchanged."),
+  tool("failed-bash", "Bash", { status: "failed", input: { command: "npm test" } }),
+  say("A completed edit keeps its past-tense label."),
+  tool("done-edit", "Edit", { input: { file_path: "Projects/plan.md" } }),
+];
+
+const CONNECTOR_TOOLS: AgentMessagePart[] = [
+  say(
+    "A connector tool is named by its service and its readable tool name, without the service's own prefix."
+  ),
+  tool("notion-search", "notion_notion-search", {
+    mcpServer: "obsidian-copilot",
+    input: { query: "Orion" },
+    copilotTools: {
+      calls: [{ name: "notion_notion-search", args: { query: "Orion" } }],
+    },
+    output: [{ type: "text", text: "Orion kickoff plan" }],
+  }),
+  say("Codex names the same call through Copilot's server."),
+  tool("linear-create", "linear_create_issue", {
+    vendorToolName: undefined,
+    title: "mcp.obsidian-copilot.linear_create_issue",
+    toolKind: "execute",
+    input: {
+      server: "obsidian-copilot",
+      tool: "linear_create_issue",
+      arguments: { title: "Orion retro" },
+    },
+    copilotTools: {
+      calls: [{ name: "linear_create_issue", args: { title: "Orion retro" } }],
+    },
+  }),
+  say("OpenCode calls each connected tool directly, with its own name and arguments."),
+  tool("opencode-notion-create", "obsidian-copilot_notion_notion-create-pages", {
+    vendorToolName: undefined,
+    title: "obsidian-copilot_notion_notion-create-pages",
+    toolKind: "other",
+    input: { title: "Orion" },
+    copilotTools: { calls: [{ name: "notion_notion-create-pages", args: { title: "Orion" } }] },
+  }),
+  say("Native OpenCode code execution keeps its own Execute step."),
+  tool("opencode-native", "execute", {
+    vendorToolName: undefined,
+    title: "execute",
+    toolKind: "other",
+    input: { code: "return await tools.opencode.list_mcp_resources({});" },
+  }),
+  say("Older saved chats keep the tool labels recorded for their wrapped calls."),
+  tool("saved-wrapped-notion", "execute", {
+    vendorToolName: undefined,
+    title: "execute",
+    toolKind: "other",
+    copilotTools: {
+      wrapper: "Execute",
+      calls: [{ name: "notion_search", args: { query: "Orion" } }],
+    },
+  }),
+  say("Another server's tools keep the server's name."),
+  tool("context7-docs", "query-docs", { mcpServer: "context7" }),
+];
+
+type CompactionOverrides = Partial<Extract<AgentMessagePart, { kind: "compaction" }>>;
+
+const compaction = (overrides: CompactionOverrides = {}): AgentMessagePart => ({
+  kind: "compaction",
+  id: "compaction-1",
+  status: "completed",
+  trigger: "manual",
+  startedAtMs: Date.now() - 12_000,
+  ...overrides,
+});
+
+const TrailDemo: React.FC<{
+  parts: AgentMessagePart[];
+  isStreaming?: boolean;
+  showCompletedDuration?: boolean;
+  fileChanges?: TurnFileChange[];
+  stopReason?: StopReason;
+}> = ({
+  parts,
+  isStreaming = false,
+  showCompletedDuration = true,
+  fileChanges,
+  stopReason = "end_turn",
+}) => {
+  const app = useApp();
+  return (
+    <TooltipProvider>
+      <AgentTrail
+        parts={parts}
+        isStreaming={isStreaming}
+        turnStartedAtMs={isStreaming ? Date.now() - 138_000 : undefined}
+        turnDurationMs={!isStreaming && showCompletedDuration ? 138_000 : undefined}
+        timestampMs={new Date(2026, 7, 7, 20, 31, 10).getTime()}
+        app={app}
+        turnStopReason={isStreaming ? undefined : stopReason}
+        fileChanges={fileChanges}
+      />
+    </TooltipProvider>
+  );
+};
+
+const meta = {
+  title: "Agent Mode/Agent Trail",
+  component: AgentTrail,
+  parameters: { gallery: { host: "leaf", layout: "padded" } },
+} satisfies Meta<AgentTrailProps>;
+export default meta;
+
+export const GroupedTurn: StoryObj<AgentTrailProps> = {
+  render: () => <TrailDemo parts={TURN} />,
+};
+
+export const Streaming: StoryObj<AgentTrailProps> = {
+  render: () => <TrailDemo parts={STREAMING} isStreaming />,
+};
+
+export const UnifiedCardStyles: StoryObj<AgentTrailProps> = {
+  render: () => <TrailDemo parts={UNIFIED_CARDS} />,
+};
+
+export const FailedFileChanges: StoryObj<AgentTrailProps> = {
+  render: () => <TrailDemo parts={FAILED_FILE_CHANGES} />,
+};
+
+export const ConnectorTools: StoryObj<AgentTrailProps> = {
+  render: () => <TrailDemo parts={CONNECTOR_TOOLS} />,
+};
+
+export const StoppedAtOutputLimit: StoryObj<AgentTrailProps> = {
+  render: () => (
+    <TrailDemo
+      parts={[
+        say("I'll load the meeting note skill first."),
+        tool("s1", "Skill", { input: { skill: "meeting-note" } }),
+        tool("r1", "Read", { locations: [{ path: "Meetings/2026-10-12 Weekly sync.md" }] }),
+        tool("w1", "Write", {
+          toolKind: "edit",
+          status: "failed",
+          input: { file_path: "Meetings/2026-10-19 Weekly sync.md" },
+        }),
+      ]}
+      stopReason="max_tokens"
+    />
+  ),
+};
+
+export const CompletedWithoutDuration: StoryObj<AgentTrailProps> = {
+  render: () => <TrailDemo parts={UNIFIED_CARDS} showCompletedDuration={false} />,
+};
+
+const EDITED_FILES: TurnFileChange[] = [
+  {
+    path: "Events/Agentic AI Summit 2026.md",
+    status: "created",
+    before: null,
+    after: "after\n",
+    additions: 42,
+    deletions: 0,
+  },
+  {
+    path: "Daily/2026-08-07.md",
+    status: "modified",
+    before: "before\n",
+    after: "after\n",
+    additions: 3,
+    deletions: 1,
+  },
+];
+
+export const WithFilesChanged: StoryObj<AgentTrailProps> = {
+  render: () => <TrailDemo parts={TURN} fileChanges={EDITED_FILES} />,
+};
+
+export const CompactionRunningManual: StoryObj<AgentTrailProps> = {
+  render: () => <TrailDemo parts={[compaction({ status: "in_progress" })]} isStreaming />,
+};
+
+export const CompactionRunningAuto: StoryObj<AgentTrailProps> = {
+  render: () => (
+    <TrailDemo
+      parts={[
+        say("Reading the remaining notes before I summarize them."),
+        compaction({ status: "in_progress", trigger: "auto" }),
+      ]}
+      isStreaming
+    />
+  ),
+};
+
+export const CompactionCompletedWithTokens: StoryObj<AgentTrailProps> = {
+  render: () => (
+    <TrailDemo
+      parts={[compaction({ preTokens: 182_340, postTokens: 24_100 })]}
+      showCompletedDuration={false}
+    />
+  ),
+};
+
+export const CompactionCompletedWithoutTokens: StoryObj<AgentTrailProps> = {
+  render: () => <TrailDemo parts={[compaction()]} showCompletedDuration={false} />,
+};
+
+export const CompactionCompletedAutomatically: StoryObj<AgentTrailProps> = {
+  render: () => (
+    <TrailDemo
+      parts={[
+        tool("b1", "Bash", { input: { description: "Search the vault" } }),
+        tool("b2", "Bash", { input: { description: "Read the matching notes" } }),
+        compaction({ trigger: "auto", preTokens: 910_000, postTokens: 31_000 }),
+        tool("b3", "Bash", { input: { description: "Draft the summary" } }),
+        tool("b4", "Bash", { input: { description: "Save it to the vault" } }),
+        say("Saved the summary to [[Weekly review]]."),
+      ]}
+    />
+  ),
+};
+
+export const CompactionFailed: StoryObj<AgentTrailProps> = {
+  render: () => (
+    <TrailDemo
+      parts={[compaction({ status: "failed", error: "The summarization request timed out." })]}
+      showCompletedDuration={false}
+    />
+  ),
+};
+
+export const CompactionCancelled: StoryObj<AgentTrailProps> = {
+  render: () => (
+    <TrailDemo parts={[compaction({ status: "cancelled" })]} showCompletedDuration={false} />
+  ),
+};
+
+export const CompactionSkipped: StoryObj<AgentTrailProps> = {
+  render: () => (
+    <TrailDemo parts={[compaction({ status: "skipped" })]} showCompletedDuration={false} />
+  ),
+};

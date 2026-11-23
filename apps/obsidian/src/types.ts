@@ -1,0 +1,57 @@
+import type { EditorView } from "@codemirror/view";
+import { type TFile } from "obsidian";
+
+declare module "obsidian" {
+  interface MetadataCache {
+    getBacklinksForFile(file: TFile): {
+      data: Map<string, unknown>;
+    } | null;
+  }
+
+  interface Editor {
+    cm?: EditorView;
+  }
+
+  interface FileManager {
+    getAvailablePathForAttachment(filename: string, sourcePath?: string): Promise<string>;
+  }
+
+  interface MenuItem {
+    setSubmenu(): this;
+    setWarning(isWarning: boolean): this;
+
+    submenu?: Menu;
+  }
+
+  interface SecretStorage {
+    setSecret(id: string, secret: string): void;
+    getSecret(id: string): string | null;
+    listSecrets(): string[];
+    deleteSecret?(id: string): void;
+  }
+
+  interface App {
+    secretStorage?: SecretStorage;
+
+    loadLocalStorage(key: string): unknown;
+    saveLocalStorage(key: string, data: unknown): void;
+  }
+
+  interface FrontMatterInfo {
+    exists: boolean;
+    frontmatter: string;
+    from: number;
+    to: number;
+    contentStart: number;
+  }
+
+  function getFrontMatterInfo(content: string): FrontMatterInfo;
+}
+
+export enum PromptSortStrategy {
+  TIMESTAMP = "timestamp",
+  ALPHABETICAL = "alphabetical",
+  MANUAL = "manual",
+}
+
+export type ApplyViewResult = "accepted" | "rejected" | "aborted" | "failed";

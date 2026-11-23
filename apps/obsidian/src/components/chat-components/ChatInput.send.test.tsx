@@ -1,0 +1,348 @@
+import ChatInput, {
+  type ChatInputHandle,
+  type ChatInputProps,
+} from "@/components/chat-components/ChatInput";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { TFile, TFolder } from "obsidian";
+import React from "react";
+import {
+  createEditor,
+  $getRoot,
+  $createParagraphNode,
+  $createTextNode,
+  type LexicalEditor,
+} from "lexical";
+import { ToolPillNode, $createToolPillNode, $isToolPillNode } from "./pills/ToolPillNode";
+import type { ModelSelector } from "@/components/ui/ModelSelector";
+let mockEditor: LexicalEditor;
+let mockMention: () => void;
+let mockModelSelectorProps: React.ComponentProps<typeof ModelSelector> | undefined;
+
+jest.mock("@/aiParams", () => ({
+  useChainType: jest.fn().mockReturnValue(["agent"]),
+}));
+jest.mock("@/components/ui/ModelSelector", () => ({
+  ModelSelector: (props: React.ComponentProps<typeof ModelSelector>) => {
+    mockModelSelectorProps = props;
+    return null;
+  },
+}));
+jest.mock("@/components/chat-components/ContextControl", () => ({
+  ContextControl: ({
+    contextFolders,
+    onAddToContext,
+    onRemoveFromContext,
+  }: {
+    contextFolders: string[];
+    onAddToContext: (category: string, data: { path: string }) => void;
+    onRemoveFromContext: (category: string, data: string) => void;
+  }) => (
+    <>
+      <span data-testid="folder-badges">{contextFolders.join("|")}</span>
+      <button type="button" onClick={() => onAddToContext("folders", { path: "Daily" })}>
+        add Daily folder
+      </button>
+      <button type="button" onClick={() => onRemoveFromContext("folders", "Research")}>
+        remove Research folder
+      </button>
+    </>
+  ),
+}));
+jest.mock("@/components/chat-components/AddContextButton", () => ({
+  AddContextButton: () => null,
+}));
+jest.mock("@/components/chat-components/LexicalEditor", () => ({
+  __esModule: true,
+  default: function MockLexicalEditor({
+    onSubmit,
+    onEditorReady,
+    onNotesChange,
+    onFoldersChange,
+    value,
+  }: {
+    onSubmit: () => void;
+    onEditorReady: (editor: LexicalEditor) => void;
+    onNotesChange: (notes: { path: string; basename: string }[]) => void;
+    onFoldersChange: (folders: string[]) => void;
+    value: string;
+  }) {
+    mockMention = () => {
+      onNotesChange([{ path: "Notes/Plan.md", basename: "Plan" }]);
+      onFoldersChange(["Research"]);
+    };
+    React.useEffect(() => {
+      mockEditor = createEditor({
+        namespace: "restore-test",
+        nodes: [ToolPillNode],
+        onError: (error) => {
+          throw error;
+        },
+      });
+      mockEditor.update(
+        () => {
+          $getRoot().append(
+            $createParagraphNode().append($createToolPillNode("@websearch"), $createTextNode(value))
+          );
+        },
+        { discrete: true }
+      );
+      onEditorReady(mockEditor);
+    }, [onEditorReady, value]);
+    return (
+      <input aria-label="Message" onKeyDown={(event) => event.key === "Enter" && onSubmit()} />
+    );
+  },
+}));
+
+const image = new File(["image bytes"], "screenshot.png", { type: "image/png" });
+
+function composer(
+  inputMessage: string,
+  selectedImages: File[],
+  overrides: Partial<ChatInputProps> = {}
+) {
+  const props = {
+    inputMessage,
+    selectedImages,
+    handleSendMessage: jest.fn(),
+    isGenerating: false,
+    isAgentMode: true,
+    app: {
+      workspace: { getActiveFile: () => null, on: jest.fn(), offref: jest.fn() },
+      vault: { getAbstractFileByPath: () => null },
+      metadataCache: { getFirstLinkpathDest: () => null },
+    },
+    contextNotes: [],
+    setContextNotes: jest.fn(),
+    setInputMessage: jest.fn(),
+    onStopGenerating: jest.fn(),
+    setIncludeActiveNote: jest.fn(),
+    setIncludeActiveWebTab: jest.fn(),
+    onAddImage: jest.fn(),
+    setSelectedImages: jest.fn(),
+    includeActiveNote: false,
+    includeActiveWebTab: false,
+    activeWebTab: null,
+    ...overrides,
+  } as unknown as ChatInputProps;
+  return { node: <ChatInput {...props} />, send: props.handleSendMessage, props };
+}
+
+describe("ChatInput", () => {
+  const { createObjectURL, revokeObjectURL } = URL;
+  beforeAll(() => {
+    URL.createObjectURL = jest.fn(() => "blob:screenshot");
+    URL.revokeObjectURL = jest.fn();
+  });
+  afterAll(() => {
+    URL.createObjectURL = createObjectURL;
+    URL.revokeObjectURL = revokeObjectURL;
+  });
+  describe("ChatInput()", () => {
+    it("shows an empty, disabled model picker when the caller supplies no models, never the legacy built-in list (https://github.com/Brevilabs/obsidian-copilot-private/issues/761)", () => {
+      render(composer("", []).node);
+
+      expect(mockModelSelectorProps?.models).toEqual([]);
+      expect(mockModelSelectorProps?.value).toBe("");
+      expect(mockModelSelectorProps?.disabled).toBe(true);
+    });
+
+    it("shows the draft's folders as badges and adds or removes one in the draft (https://github.com/logancyang/obsidian-copilot/issues/3858)", () => {
+      let folders = ["Research"];
+      const setContextFolders = jest.fn((update: React.SetStateAction<string[]>) => {
+        folders = typeof update === "function" ? update(folders) : update;
+      });
+      render(composer("", [], { contextFolders: folders, setContextFolders }).node);
+
+      expect(screen.getByTestId("folder-badges").textContent).toBe("Research");
+      fireEvent.click(screen.getByText("add Daily folder"));
+      expect(folders).toEqual(["Research", "Daily"]);
+      fireEvent.click(screen.getByText("remove Research folder"));
+      expect(folders).toEqual(["Daily"]);
+    });
+
+    it("shows a note and a folder mentioned in the text as no badge, and sends them as context with the message (https://github.com/Brevilabs/obsidian-copilot-private/issues/932)", () => {
+      const plan = new (TFile as unknown as new (path: string) => TFile)("Notes/Plan.md");
+      const setContextNotes = jest.fn();
+      const setContextFolders = jest.fn();
+      const { node, send } = composer("see [[Plan]] {Research}", [], {
+        app: {
+          workspace: { getActiveFile: () => null, on: jest.fn(), offref: jest.fn() },
+          vault: { getAbstractFileByPath: (path: string) => (path === plan.path ? plan : null) },
+          metadataCache: { getFirstLinkpathDest: () => null },
+        } as unknown as ChatInputProps["app"],
+        contextFolders: [],
+        setContextNotes,
+        setContextFolders,
+      });
+      render(node);
+
+      act(() => mockMention());
+      expect(screen.getByTestId("folder-badges").textContent).toBe("");
+      expect(setContextNotes).not.toHaveBeenCalled();
+      expect(setContextFolders).not.toHaveBeenCalled();
+      fireEvent.keyDown(screen.getByLabelText("Message"), { key: "Enter" });
+
+      expect(send).toHaveBeenCalledWith({
+        webTabs: [],
+        contextNotes: [plan],
+        contextFolders: ["Research"],
+      });
+    });
+
+    it("sends a mentioned note that was renamed before sending, under its new path (https://github.com/Brevilabs/obsidian-copilot-private/issues/932)", () => {
+      const plan = new (TFile as unknown as new (path: string) => TFile)("Notes/Plan.md");
+      const files = new Map([[plan.path, plan]]);
+      const { node, send } = composer("see [[Plan]]", [], {
+        app: {
+          workspace: { getActiveFile: () => null, on: jest.fn(), offref: jest.fn() },
+          vault: { getAbstractFileByPath: (path: string) => files.get(path) ?? null },
+          metadataCache: { getFirstLinkpathDest: () => null },
+        } as unknown as ChatInputProps["app"],
+      });
+      render(node);
+      act(() => mockMention());
+
+      files.clear();
+      plan.path = "Archive/Plan.md";
+      act(() => mockMention());
+      fireEvent.keyDown(screen.getByLabelText("Message"), { key: "Enter" });
+
+      expect(jest.mocked(send).mock.calls[0][0]?.contextNotes).toEqual([plan]);
+      expect(plan.path).toBe("Archive/Plan.md");
+    });
+
+    it("sends the note and folder a restored draft mentions as plain text, without pills (https://github.com/Brevilabs/obsidian-copilot-private/issues/932)", () => {
+      const plan = new (TFile as unknown as new (path: string) => TFile)("Notes/Plan.md");
+      const research = new (TFolder as unknown as new (path: string) => TFolder)("Research");
+      const { node, send } = composer("see [[Plan]] in {Research}", [], {
+        app: {
+          workspace: { getActiveFile: () => null, on: jest.fn(), offref: jest.fn() },
+          vault: {
+            getAbstractFileByPath: (path: string) => (path === research.path ? research : null),
+          },
+          metadataCache: {
+            getFirstLinkpathDest: (linkpath: string) => (linkpath === "Plan" ? plan : null),
+          },
+        } as unknown as ChatInputProps["app"],
+      });
+      render(node);
+
+      fireEvent.keyDown(screen.getByLabelText("Message"), { key: "Enter" });
+
+      expect(send).toHaveBeenCalledWith({
+        webTabs: [],
+        contextNotes: [plan],
+        contextFolders: ["Research"],
+      });
+    });
+
+    it("leaves the message text as typed when a badge is removed (https://github.com/Brevilabs/obsidian-copilot-private/issues/932)", () => {
+      const { node } = composer("compare", [], {
+        contextFolders: ["Research"],
+        setContextFolders: jest.fn(),
+      });
+      render(node);
+      const before = mockEditor.getEditorState().read(() => $getRoot().getTextContent());
+
+      fireEvent.click(screen.getByText("remove Research folder"));
+
+      expect(mockEditor.getEditorState().read(() => $getRoot().getTextContent())).toBe(before);
+    });
+  });
+  describe("prependContent()", () => {
+    it.each(["draft in progress", ""])(
+      "restores web context and resolved text ahead of draft %p without losing existing pills https://github.com/Brevilabs/obsidian-copilot-private/issues/485",
+      (current) => {
+        const { props, send } = composer(current, []);
+        const ref: React.RefObject<ChatInputHandle> = { current: null };
+        render(<ChatInput {...props} ref={ref} />);
+        const webTab = { url: "https://example.com/report", title: "Report" };
+        act(() => ref.current!.prependContent("Review these changes", [webTab]));
+        const restored = mockEditor.getEditorState().read(() => ({
+          text: $getRoot().getTextContent(),
+          nodes: $getRoot()
+            .getChildren()
+            .flatMap((node) =>
+              "getChildren" in node ? (node as import("lexical").ElementNode).getChildren() : []
+            ),
+        }));
+        expect(restored.text).toBe(`Review these changes\n\n@websearch${current}`);
+        expect(restored.nodes.filter($isToolPillNode).map((node) => node.getToolName())).toEqual([
+          "@websearch",
+        ]);
+        expect(props.setInputMessage).toHaveBeenCalledWith(restored.text);
+        fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter" });
+        expect(send).toHaveBeenCalledWith(expect.objectContaining({ webTabs: [webTab] }));
+      }
+    );
+  });
+  describe("onSendMessage()", () => {
+    it.each(["", "   ", "Describe this"])(
+      "enables Send with an image and draft %p https://github.com/logancyang/obsidian-copilot/issues/2850",
+      (text) => {
+        const { node, send } = composer(text, [image]);
+        render(node);
+        const button = screen.getByRole<HTMLButtonElement>("button", { name: "Send" });
+        expect(button.disabled).toBe(false);
+        fireEvent.click(button);
+        expect(send).toHaveBeenCalledTimes(1);
+      }
+    );
+
+    it("disables Send after the last image is removed from an empty draft https://github.com/logancyang/obsidian-copilot/issues/2850", () => {
+      const view = render(composer("", [image]).node);
+      view.rerender(composer("   ", []).node);
+      expect(screen.getByRole<HTMLButtonElement>("button", { name: "Send" }).disabled).toBe(true);
+    });
+
+    it("routes Enter with an image-only draft to the send handler https://github.com/logancyang/obsidian-copilot/issues/2850", () => {
+      const { node, send } = composer("", [image]);
+      render(node);
+      fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter" });
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      { scenario: "text", text: "Do this instead", images: [] as File[] },
+      { scenario: "an image", text: "", images: [image] },
+    ])(
+      "https://github.com/Brevilabs/obsidian-copilot-private/issues/788 shows only Send while the agent's reply runs and the draft has $scenario, sending it as Enter would",
+      ({ text, images }) => {
+        const { node, send } = composer(text, images, { isGenerating: true });
+        render(node);
+
+        expect(screen.queryByRole("button", { name: "Stop generating" })).toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(send).toHaveBeenCalledWith(expect.not.objectContaining({ interrupt: true }));
+      }
+    );
+
+    it.each([
+      { scenario: "the draft is empty", text: "   ", isAgentMode: true },
+      { scenario: "it is the legacy chat composer", text: "Do this", isAgentMode: false },
+    ])(
+      "https://github.com/Brevilabs/obsidian-copilot-private/issues/788 shows only Stop while the agent's reply runs when $scenario",
+      ({ text, isAgentMode }) => {
+        const { node, props } = composer(text, [], { isGenerating: true, isAgentMode });
+        render(node);
+
+        expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "Stop generating" }));
+
+        expect(props.onStopGenerating).toHaveBeenCalledTimes(1);
+      }
+    );
+
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/509 sends Enter while the agent works without interrupt", () => {
+      const { node, send } = composer("Only the first two", [], { isGenerating: true });
+      render(node);
+
+      fireEvent.keyDown(screen.getByRole("textbox", { name: "Message" }), { key: "Enter" });
+
+      expect(send).toHaveBeenCalledWith(expect.not.objectContaining({ interrupt: true }));
+    });
+  });
+});

@@ -1,0 +1,539 @@
+import type { AgentChatBackend } from "@/agentMode/session/AgentChatBackend";
+import { expandCustomCommandPrefix } from "@/agentMode/session/expandCustomCommandPrefix";
+import { resolveActiveNoteToken } from "@/agentMode/session/resolveActiveNoteToken";
+import type { QueuedAgentMessage } from "@/agentMode/session/AgentInputDraftStore";
+import type { PromptContent, QueuedPrompt } from "@/agentMode/session/types";
+import type { AgentInputDraftControls } from "@/agentMode/ui/hooks/useAgentInputDrafts";
+import { isCompactCommand } from "@/commands/compactCommand";
+import {
+  clearSelection,
+  dismissSelection,
+  useSelectedTextContexts,
+} from "@/selection/selectionStore";
+import { CustomCommandManager } from "@/commands/customCommandManager";
+import { getCachedCustomCommands } from "@/commands/state";
+import ChatInput, {
+  type ChatInputHandle,
+  type ChatInputProps,
+} from "@/components/chat-components/ChatInput";
+import { useActiveWebTabState } from "@/components/chat-components/hooks/useActiveWebTabState";
+import { ACTIVE_NOTE_MENTION, ACTIVE_WEB_TAB_MARKER, EVENT_NAMES } from "@/constants";
+import { EventTargetContext } from "@/context";
+import { mentionedAgentNames } from "@/agents/agentMentionPrompt";
+import { useMentionableAgents } from "@/agents/ui/chatAgents";
+import { logError, logWarn } from "@/logger";
+import { buildWebTabsWithActiveSnapshot } from "@/services/webViewerService/activeWebTabSnapshot";
+import {
+  isNoteSelectedTextContext,
+  type MessageContext,
+  type SelectedTextContext,
+  type WebTabContext,
+} from "@/types/message";
+import { getModelKeyFromModel } from "@/settings/model";
+import { modelSupportsVision } from "@/utils";
+import { arrayBufferToBase64, base64ToArrayBuffer } from "@/utils/base64";
+import { mergeWebTabContexts } from "@/utils/urlNormalization";
+import { App, Notice, TFile } from "obsidian";
+import React, { memo, useCallback, useContext, useEffect, useRef } from "react";
+import { v4 as uuidv4 } from "uuid";
+import { safeAsyncHandler } from "@/utils/safeAsyncHandler";
+
+interface AgentChatInputProps {
+  backend: AgentChatBackend;
+  chatInputId: string;
+  draft: AgentInputDraftControls;
+  app: App;
+  updateUserMessageHistory: (newMessage: string) => void;
+  isStarting: boolean;
+  isLoading: boolean;
+  isReplyRunning: boolean;
+  queuedPrompts: readonly QueuedPrompt[];
+  acceptsMidTurnMessages: boolean;
+  hasPendingPlanPermission: boolean;
+  modelPickerOverride: ChatInputProps["modelPickerOverride"];
+  modePickerOverride: ChatInputProps["modePickerOverride"];
+  onCycleMode: () => void;
+  disabled?: boolean;
+  projectFolderPath?: string;
+  hasChatMovedFrom: (backend: AgentChatBackend) => boolean;
+  placeholder?: string;
+}
+
+const dedupeBy = <T,>(items: Iterable<T>, key: (item: T) => string): T[] => {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    const k = key(item);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(item);
+  }
+  return out;
+};
+
+const buildMessageContext = (
+  notes: TFile[],
+  selected: readonly SelectedTextContext[],
+  webTabs: readonly WebTabContext[],
+  folders: readonly string[],
+  agents: readonly string[] = []
+): MessageContext | undefined => {
+  if (
+    notes.length === 0 &&
+    selected.length === 0 &&
+    webTabs.length === 0 &&
+    folders.length === 0 &&
+    agents.length === 0
+  )
+    return undefined;
+  return {
+    notes,
+    urls: [],
+    folders: folders.length > 0 ? [...folders] : undefined,
+    selectedTextContexts: selected.length > 0 ? [...selected] : undefined,
+    webTabs: webTabs.length > 0 ? [...webTabs] : undefined,
+    agents: agents.length > 0 ? [...agents] : undefined,
+  };
+};
+
+const combineQueuedMessages = (items: QueuedAgentMessage[]): QueuedAgentMessage => {
+  if (items.length === 1) return items[0];
+
+  const allNotes = items.flatMap((i) => i.context?.notes ?? []);
+  const allSelected = items.flatMap((i) => i.context?.selectedTextContexts ?? []);
+  const allWebTabs = items.flatMap((i) => i.context?.webTabs ?? []);
+  const allFolders = items.flatMap((i) => i.context?.folders ?? []);
+  const allAgents = items.flatMap((i) => i.context?.agents ?? []);
+  const allPromptContent = items.flatMap((i) => i.promptContent ?? []);
+
+  return {
+    id: `queued-combined-${uuidv4()}`,
+    text: items.map((i) => i.text).join("\n\n"),
+    rawInput: items.map((i) => i.rawInput).join("\n\n"),
+    context: buildMessageContext(
+      dedupeBy(allNotes, (n) => n.path),
+      dedupeBy(allSelected, (s) => s.id),
+      mergeWebTabContexts(allWebTabs),
+      dedupeBy(allFolders, (folder) => folder),
+      dedupeBy(allAgents, (name) => name)
+    ),
+    promptContent: allPromptContent.length > 0 ? allPromptContent : undefined,
+  };
+};
+
+// Agents only compact when /compact is the whole prompt, so a queued one never merges with neighbours.
+// https://github.com/Brevilabs/obsidian-copilot-private/issues/634
+const takeNextQueuedBatch = (
+  items: QueuedAgentMessage[]
+): { batch: QueuedAgentMessage[]; rest: QueuedAgentMessage[] } => {
+  const nextCompact = items.findIndex((item) => isCompactCommand(item.text));
+  const end = nextCompact === 0 ? 1 : nextCompact === -1 ? items.length : nextCompact;
+  return { batch: items.slice(0, end), rest: items.slice(end) };
+};
+
+async function fileToImageBlock(file: File): Promise<PromptContent | null> {
+  try {
+    const buf = await file.arrayBuffer();
+    if (buf.byteLength === 0) return null;
+    return { type: "image", mimeType: file.type || "image/png", data: arrayBufferToBase64(buf) };
+  } catch (e) {
+    logWarn("[AgentMode] failed to read attached image", e);
+    return null;
+  }
+}
+
+function imageBlockToFile(block: PromptContent, index: number): File | null {
+  if (block.type !== "image") return null;
+  const extension = block.mimeType.split("/")[1] || "png";
+  return new File([base64ToArrayBuffer(block.data)], `queued-image-${index + 1}.${extension}`, {
+    type: block.mimeType,
+  });
+}
+
+export const AgentChatInput = memo(function AgentChatInput({
+  backend,
+  chatInputId,
+  draft,
+  app,
+  updateUserMessageHistory,
+  isStarting,
+  isLoading: loading,
+  isReplyRunning,
+  queuedPrompts,
+  acceptsMidTurnMessages,
+  hasPendingPlanPermission,
+  modelPickerOverride,
+  modePickerOverride,
+  onCycleMode,
+  disabled = false,
+  projectFolderPath,
+  hasChatMovedFrom,
+  placeholder = "Ask anything • @ to add context • / for commands",
+}: AgentChatInputProps) {
+  const eventTarget = useContext(EventTargetContext);
+  const mentionableAgents = useMentionableAgents();
+  const chatInputRef = useRef<ChatInputHandle>(null);
+
+  const selectedTextContexts = useSelectedTextContexts();
+  const { activeWebTabForMentions } = useActiveWebTabState();
+
+  const previousChatInputIdRef = useRef(chatInputId);
+
+  const {
+    input: inputMessage,
+    images: selectedImages,
+    contextNotes,
+    contextFolders,
+    includeActiveNote,
+    includeActiveWebTab,
+    queue: queuedMessages,
+    setInput: setInputMessage,
+    setContextNotes,
+    setContextFolders,
+    setSelectedImages,
+    addImages,
+    setIncludeActiveNote,
+    setIncludeActiveWebTab,
+    setLoading,
+    setQueue: setQueuedMessages,
+    resetCompose,
+  } = draft;
+  const activeModelEntry = modelPickerOverride?.models.find(
+    (model) => getModelKeyFromModel(model) === modelPickerOverride.value
+  );
+  const unsupportedImageModelLabel =
+    Array.isArray(activeModelEntry?.capabilities) && !modelSupportsVision(activeModelEntry)
+      ? activeModelEntry.displayName || activeModelEntry.name
+      : null;
+
+  useEffect(() => {
+    if (previousChatInputIdRef.current === chatInputId) return;
+    previousChatInputIdRef.current = chatInputId;
+    clearSelection();
+  }, [chatInputId]);
+
+  // Selected text remains ephemeral and is deliberately not restored.
+  // https://github.com/Brevilabs/obsidian-copilot-private/issues/365
+  const restoreToComposer = useCallback(
+    (items: QueuedAgentMessage[]) => {
+      // Merged into one draft, /compact would swallow the queued messages as compaction input.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/634
+      const nonCompact = items.filter((item) => !isCompactCommand(item.text));
+      const restored = combineQueuedMessages(nonCompact.length > 0 ? nonCompact : items);
+      // A fixed copy of the current page would duplicate its Active Web Tab badge and outlive
+      // that badge's removal. https://github.com/Brevilabs/obsidian-copilot-private/issues/667
+      const activeUrl = activeWebTabForMentions?.url;
+      const restoredWebTabs = restored.context?.webTabs ?? [];
+      if (restoredWebTabs.some((tab) => tab.url === activeUrl)) setIncludeActiveWebTab(true);
+      chatInputRef.current?.prependContent(
+        restored.text,
+        restoredWebTabs.filter((tab) => tab.url !== activeUrl)
+      );
+      // A fixed copy of the active note would duplicate its Active Note badge and outlive that
+      // badge's removal. https://github.com/Brevilabs/obsidian-copilot-private/issues/670
+      const activePath = app.workspace.getActiveFile()?.path;
+      const restoredNotes = restored.context?.notes ?? [];
+      if (restoredNotes.some((note) => note.path === activePath)) setIncludeActiveNote(true);
+      const notes = restoredNotes.filter((note) => note.path !== activePath);
+      if (notes.length > 0) {
+        setContextNotes((previous) => dedupeBy([...notes, ...previous], (note) => note.path));
+      }
+      const folders = restored.context?.folders ?? [];
+      if (folders.length > 0) {
+        setContextFolders((previous) => dedupeBy([...folders, ...previous], (folder) => folder));
+      }
+      const images = (restored.promptContent ?? [])
+        .map(imageBlockToFile)
+        .filter((file): file is File => file !== null);
+      if (images.length > 0) setSelectedImages((previous) => [...images, ...previous]);
+    },
+    [
+      activeWebTabForMentions,
+      app,
+      setContextNotes,
+      setContextFolders,
+      setIncludeActiveNote,
+      setIncludeActiveWebTab,
+      setSelectedImages,
+    ]
+  );
+
+  const handleStopGenerating = useCallback(async () => {
+    // Restore before cancellation can finish the turn and flush the queue.
+    // Only runSend owns loading; a late cancel must not mark a newer turn idle.
+    // https://github.com/Brevilabs/obsidian-copilot-private/issues/485
+    setQueuedMessages([]);
+    if (queuedMessages.length > 0) restoreToComposer(queuedMessages);
+    try {
+      await backend.cancel();
+    } catch (e) {
+      logError("[AgentMode] cancel failed", e);
+    }
+  }, [backend, queuedMessages, restoreToComposer, setQueuedMessages]);
+
+  // A message withdrawn before the agent read it returns to the composer ahead of the draft. https://github.com/Brevilabs/obsidian-copilot-private/issues/747
+  useEffect(() => {
+    const withdrawn = backend.takeWithdrawnPrompts();
+    if (withdrawn.length === 0) return;
+    restoreToComposer(withdrawn.map((p) => ({ ...p, rawInput: p.text })));
+  }, [backend, queuedPrompts, restoreToComposer]);
+
+  const runSend = useCallback(
+    async (item: QueuedAgentMessage) => {
+      setLoading(true);
+      try {
+        const { turn } = backend.sendMessage(item.text, item.context, item.promptContent);
+        if (item.rawInput) updateUserMessageHistory(item.rawInput);
+        await turn;
+      } catch (error) {
+        logError("Error sending agent message:", error);
+        new Notice("Failed to send message. Please try again.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [backend, setLoading, updateUserMessageHistory]
+  );
+
+  // The session shows the message once it reaches the agent, so the composer neither waits nor holds it. https://github.com/Brevilabs/obsidian-copilot-private/issues/509
+  const sendMidTurn = useCallback(
+    (item: QueuedAgentMessage) => {
+      try {
+        backend.sendMessage(item.text, item.context, item.promptContent);
+        if (item.rawInput) updateUserMessageHistory(item.rawInput);
+      } catch (error) {
+        logError("Error sending agent message:", error);
+        new Notice("Failed to send message. Please try again.");
+        restoreToComposer([item]);
+      }
+    },
+    [backend, restoreToComposer, updateUserMessageHistory]
+  );
+
+  const handleSendMessage = useCallback(
+    async ({
+      webTabs,
+      contextNotes: mentionedNotes = [],
+      contextFolders: mentionedFolders = [],
+    }: Parameters<ChatInputProps["handleSendMessage"]>[0] = {}) => {
+      if (disabled) return;
+      const text = inputMessage.trim();
+      if (!text && selectedImages.length === 0) return;
+      const rawInput = inputMessage;
+
+      const activeFile = app.workspace.getActiveFile();
+
+      const candidateNotes: TFile[] = [];
+      // An active note mentioned in the text is sent as context even when its badge is off.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/932
+      if ((includeActiveNote || ACTIVE_NOTE_MENTION.test(text)) && activeFile) {
+        candidateNotes.push(activeFile);
+      }
+      candidateNotes.push(...contextNotes, ...mentionedNotes);
+      const notes = dedupeBy(candidateNotes, (n) => n.path);
+      const folders = dedupeBy([...contextFolders, ...mentionedFolders], (folder) => folder);
+
+      const noteSelection = selectedTextContexts.find(isNoteSelectedTextContext);
+      const expanded = await expandCustomCommandPrefix(
+        text,
+        getCachedCustomCommands(),
+        noteSelection?.content ?? "",
+        activeFile
+      );
+      if (expanded.matched) {
+        void CustomCommandManager.getInstance().recordUsage(expanded.matched);
+      }
+      const resolvedText = resolveActiveNoteToken(expanded.text, activeFile);
+
+      const shouldIncludeActiveWebTab =
+        includeActiveWebTab || resolvedText.includes(ACTIVE_WEB_TAB_MARKER);
+      const resolvedWebTabs = buildWebTabsWithActiveSnapshot(
+        app,
+        webTabs ?? [],
+        shouldIncludeActiveWebTab
+      );
+
+      // /compact drops attachments, so an image the model can't read must not block it.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/634
+      const images = isCompactCommand(resolvedText) ? [] : selectedImages;
+      if (images.length > 0 && unsupportedImageModelLabel) {
+        new Notice(
+          `${unsupportedImageModelLabel} doesn't support images. Switch to a vision-capable model to send images.`
+        );
+        return;
+      }
+
+      resetCompose();
+      clearSelection();
+
+      const content: PromptContent[] = [];
+      for (const image of images) {
+        const block = await fileToImageBlock(image);
+        if (block) content.push(block);
+      }
+
+      // Failed image reads must not turn an image-only message into an empty request.
+      // https://github.com/logancyang/obsidian-copilot/issues/2850
+      if (images.length > 0 && !resolvedText && content.length === 0) {
+        new Notice("Could not read the attached images. Please attach them again.");
+        return;
+      }
+
+      const item: QueuedAgentMessage = {
+        id: `queued-${uuidv4()}`,
+        text: resolvedText,
+        rawInput,
+        context: buildMessageContext(
+          notes,
+          selectedTextContexts,
+          resolvedWebTabs,
+          folders,
+          mentionedAgentNames(resolvedText, mentionableAgents)
+        ),
+        promptContent: content.length > 0 ? content : undefined,
+      };
+
+      // A chat moved to another agent while its images were read is closing, and a message sent to it would vanish. The composer remounts for the new chat, so the draft goes back through the store.
+      // https://github.com/Brevilabs/obsidian-copilot-private/issues/908
+      if (hasChatMovedFrom(backend)) {
+        setInputMessage((current) =>
+          [rawInput, current].filter((part) => part.trim()).join("\n\n")
+        );
+        setContextNotes((previous) => dedupeBy([...contextNotes, ...previous], (n) => n.path));
+        setContextFolders((previous) =>
+          dedupeBy([...contextFolders, ...previous], (folder) => folder)
+        );
+        setSelectedImages((previous) => [...selectedImages, ...previous]);
+        return;
+      }
+
+      if (loading || isStarting || queuedPrompts.length > 0) {
+        // Compaction is a whole turn of its own, so Copilot holds it until the agent finishes. https://github.com/Brevilabs/obsidian-copilot-private/issues/509
+        if (!isStarting && acceptsMidTurnMessages && !isCompactCommand(item.text)) {
+          sendMidTurn(item);
+          return;
+        }
+        setQueuedMessages((q) => [...q, item]);
+        return;
+      }
+
+      await runSend(item);
+    },
+    [
+      app,
+      inputMessage,
+      selectedImages,
+      contextNotes,
+      contextFolders,
+      includeActiveNote,
+      includeActiveWebTab,
+      selectedTextContexts,
+      loading,
+      isStarting,
+      queuedPrompts.length,
+      acceptsMidTurnMessages,
+      sendMidTurn,
+      unsupportedImageModelLabel,
+      mentionableAgents,
+      disabled,
+      resetCompose,
+      runSend,
+      setQueuedMessages,
+      backend,
+      hasChatMovedFrom,
+      setInputMessage,
+      setContextNotes,
+      setContextFolders,
+      setSelectedImages,
+    ]
+  );
+
+  useEffect(() => {
+    // Held messages go after every message already handed to the agent. https://github.com/Brevilabs/obsidian-copilot-private/issues/509
+    if (
+      disabled ||
+      loading ||
+      isStarting ||
+      queuedPrompts.length > 0 ||
+      queuedMessages.length === 0
+    ) {
+      return;
+    }
+    const { batch, rest } = takeNextQueuedBatch(queuedMessages);
+    const combined = combineQueuedMessages(batch);
+    if (
+      combined.promptContent?.some((content) => content.type === "image") &&
+      unsupportedImageModelLabel
+    ) {
+      new Notice(
+        `${unsupportedImageModelLabel} doesn't support images. Switch to a vision-capable model to send images.`
+      );
+      return;
+    }
+    setQueuedMessages(rest);
+    void runSend(combined);
+  }, [
+    disabled,
+    loading,
+    isStarting,
+    queuedPrompts.length,
+    queuedMessages,
+    runSend,
+    setQueuedMessages,
+    unsupportedImageModelLabel,
+  ]);
+
+  useEffect(() => {
+    const handleAbortStream = () => {
+      void handleStopGenerating();
+    };
+    eventTarget?.addEventListener(EVENT_NAMES.ABORT_STREAM, handleAbortStream);
+    return () => {
+      eventTarget?.removeEventListener(EVENT_NAMES.ABORT_STREAM, handleAbortStream);
+    };
+  }, [eventTarget, handleStopGenerating]);
+
+  return (
+    <>
+      <div
+        className={
+          hasPendingPlanPermission || disabled ? "tw-pointer-events-none tw-opacity-50" : undefined
+        }
+        aria-disabled={hasPendingPlanPermission || disabled || undefined}
+      >
+        <ChatInput
+          ref={chatInputRef}
+          key={chatInputId}
+          isAgentMode
+          placeholder={placeholder}
+          inputMessage={inputMessage}
+          setInputMessage={setInputMessage}
+          handleSendMessage={safeAsyncHandler(handleSendMessage)}
+          isGenerating={isReplyRunning}
+          onStopGenerating={safeAsyncHandler(handleStopGenerating)}
+          onEscape={isReplyRunning ? safeAsyncHandler(handleStopGenerating) : undefined}
+          onShiftTab={modePickerOverride ? onCycleMode : undefined}
+          app={app}
+          contextNotes={contextNotes}
+          setContextNotes={setContextNotes}
+          contextFolders={contextFolders}
+          setContextFolders={setContextFolders}
+          includeActiveNote={includeActiveNote}
+          setIncludeActiveNote={setIncludeActiveNote}
+          includeActiveWebTab={includeActiveWebTab}
+          setIncludeActiveWebTab={setIncludeActiveWebTab}
+          activeWebTab={activeWebTabForMentions}
+          selectedImages={selectedImages}
+          onAddImage={addImages}
+          setSelectedImages={setSelectedImages}
+          disableModelSwitch={!modelPickerOverride}
+          modelPickerOverride={modelPickerOverride ?? undefined}
+          modePickerOverride={modePickerOverride ?? undefined}
+          selectedTextContexts={selectedTextContexts}
+          onRemoveSelectedText={dismissSelection}
+          projectFolderPath={projectFolderPath}
+        />
+      </div>
+    </>
+  );
+});
